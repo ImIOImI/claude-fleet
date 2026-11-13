@@ -54,12 +54,24 @@ export class NotifyStore {
     return r ? toRow(r) : null;
   }
 
-  async list(opts: { filter?: 'all' | 'delivered' | 'held'; limit?: number } = {}): Promise<NotificationRow[]> {
+  async list(opts: { filter?: 'all' | 'delivered' | 'held'; limit?: number; workspaceId?: string } = {}): Promise<NotificationRow[]> {
     const limit = Math.min(Math.max(1, Math.floor(opts.limit ?? 200)), 1000);
     let q = this.db.selectFrom('notifications').selectAll();
     if (opts.filter === 'held') q = q.where('delivered', '=', 0);
     else if (opts.filter === 'delivered') q = q.where('delivered', '=', 1);
+    if (opts.workspaceId !== undefined) q = q.where('workspace_id', '=', opts.workspaceId);
     const rows = await q.orderBy('ts', 'desc').orderBy('id', 'desc').limit(limit).execute();
+    return rows.map(toRow);
+  }
+
+  /** Oldest first from `ts` (inclusive), or strictly after (ts, afterId): the host's notices feed. */
+  async since(ts: number, limit: number, workspaceId?: string, afterId?: string): Promise<NotificationRow[]> {
+    let q = this.db.selectFrom('notifications').selectAll();
+    q = afterId === undefined
+      ? q.where('ts', '>=', ts)
+      : q.where((eb) => eb.or([eb('ts', '>', ts), eb.and([eb('ts', '=', ts), eb('id', '>', afterId)])]));
+    if (workspaceId !== undefined) q = q.where('workspace_id', '=', workspaceId);
+    const rows = await q.orderBy('ts', 'asc').orderBy('id', 'asc').limit(Math.min(Math.max(1, Math.floor(limit)), 1000)).execute();
     return rows.map(toRow);
   }
 
@@ -92,6 +104,17 @@ export class NotifyStore {
 
   async prune(olderThan: number): Promise<number> {
     const r = await this.db.deleteFrom('notifications').where('ts', '<', olderThan).executeTakeFirst();
+    return Number(r.numDeletedRows);
+  }
+
+  /** Deletes all but the newest `keep` rows (by ts, id) for one workspace. */
+  async keepNewest(workspaceId: string, keep: number): Promise<number> {
+    const edge = await this.db.selectFrom('notifications').select(['ts', 'id']).where('workspace_id', '=', workspaceId)
+      .orderBy('ts', 'desc').orderBy('id', 'desc').offset(keep).limit(1).executeTakeFirst();
+    if (!edge) return 0;
+    const r = await this.db.deleteFrom('notifications').where('workspace_id', '=', workspaceId)
+      .where((eb) => eb.or([eb('ts', '<', edge.ts), eb.and([eb('ts', '=', edge.ts), eb('id', '<=', edge.id)])]))
+      .executeTakeFirst();
     return Number(r.numDeletedRows);
   }
 
@@ -202,4 +225,43 @@ export class NotifyStore {
   async setQuietSince(ts: number | null): Promise<void> {
     await this.setState('quietSince', ts === null ? null : String(ts));
   }
+
+  // --- remote notice cursors (D132, D133) -----------------------------------
+
+  async getRemoteCursor(origin: string): Promise<RemoteNoticeCursor | null> {
+    const v = await this.getState(`${REMOTE_CURSOR}${origin}`);
+    if (!v) return null;
+    try {
+      const c = JSON.parse(v) as { ts?: unknown; id?: unknown; ids?: unknown; floor?: { ts?: unknown; id?: unknown } | null };
+      if (typeof c.ts !== 'number' || !Number.isSafeInteger(c.ts) || typeof c.id !== 'string' || !Array.isArray(c.ids)) return null;
+      const f = c.floor;
+      const floor = f && typeof f.ts === 'number' && Number.isSafeInteger(f.ts) && typeof f.id === 'string' ? { ts: f.ts, id: f.id } : null;
+      return { ts: c.ts, id: c.id, ids: c.ids.filter((x): x is string => typeof x === 'string').slice(-REMOTE_CURSOR_IDS), floor };
+    } catch {
+      return null;
+    }
+  }
+
+  async setRemoteCursor(origin: string, c: RemoteNoticeCursor): Promise<void> {
+    await this.setState(`${REMOTE_CURSOR}${origin}`, JSON.stringify({ ts: c.ts, id: c.id, ids: c.ids.slice(-REMOTE_CURSOR_IDS), floor: c.floor }));
+  }
+
+  async remoteCursorOrigins(): Promise<string[]> {
+    const rows = await this.db.selectFrom('notify_state').select('k').where('k', 'like', `${REMOTE_CURSOR}%`).execute();
+    return rows.map((r) => r.k.slice(REMOTE_CURSOR.length));
+  }
+
+  /** A forgotten remote bookmark: its notification rows and its cursor go (D133). */
+  async forgetOrigin(origin: string): Promise<void> {
+    await this.db.transaction().execute(async (trx) => {
+      await trx.deleteFrom('notifications').where('workspace_id', '=', origin).execute();
+      await trx.deleteFrom('notify_state').where('k', '=', `${REMOTE_CURSOR}${origin}`).execute();
+    });
+  }
 }
+
+const REMOTE_CURSOR = 'remote-notices:';
+/** A remote notices feed position (remoteNotices.ts NoticeCursor). */
+export interface RemoteNoticeCursor { ts: number; id: string; ids: string[]; floor: { ts: number; id: string } | null }
+/** Ids kept to dedupe the overlap window (remoteNotices.ts CURSOR_IDS). */
+export const REMOTE_CURSOR_IDS = 500;

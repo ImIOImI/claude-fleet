@@ -233,7 +233,7 @@ to people. Tiers are cumulative:
 | Tier | Allows |
 |---|---|
 | `read` | See everything: sessions (watch-only attach), transcripts, cost, automations, runs, proposals, todos. Publish one's own transcripts (§7). |
-| `steer` | Also: type into existing sessions; run, enable, disable and edit automations; approve or reject proposals; create and update todos; kill a served port; port preview. |
+| `steer` | Also: type into existing sessions; run automations; reject proposals; create and update todos; kill a served port; port preview. Automations are never edited, enabled or disabled from a desktop: definitions come only from the host config, and host proposals are config drafts applied through a platform-ops PR (D125, D126). |
 | `session` | Also: start and close one's own sessions. Owner-equivalent (§4). |
 
 ```yaml

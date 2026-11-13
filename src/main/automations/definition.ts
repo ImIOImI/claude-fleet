@@ -53,11 +53,15 @@ function validateReschedule(raw: unknown, errors: string[]): AutomationDef['resc
 export interface ResolveCtx {
   /** Resolve a workspace id or name to an id (null if unknown). */
   workspace(idOrName: string): string | null;
+  /** Why an unresolved workspace can't be named here; replaces "unknown workspace". */
+  refusal?(idOrName: string): string | null;
   /** Shells this computer offers for `runIn: host` steps (detected); undefined = don't check. */
   hostShells?: string[];
   /** Extra refusals for where this definition will run (fleet-host); runs only on an otherwise valid definition. */
   check?(def: AutomationDef): string[];
 }
+
+const refusalOf = (ctx: ResolveCtx, v: unknown): string | null => (typeof v === 'string' ? ctx.refusal?.(v) ?? null : null);
 
 export function parseDefinitionText(text: string): Validation<unknown> {
   try {
@@ -132,7 +136,7 @@ function validateTriggers(raw: unknown, params: ParamDef[], ctx: ResolveCtx, err
       const trig: { on: (typeof EVENTS)[number]; workspace?: string; tag?: string; debounce?: string } = { on: ev.on as (typeof EVENTS)[number] };
       if (ev.workspace !== undefined) {
         const id = typeof ev.workspace === 'string' ? ctx.workspace(ev.workspace) : null;
-        if (!id) { errors.push(`${w}.event.workspace: unknown workspace "${String(ev.workspace)}"`); return; }
+        if (!id) { errors.push(`${w}.event.workspace: ${refusalOf(ctx, ev.workspace) ?? `unknown workspace "${String(ev.workspace)}"`}`); return; }
         trig.workspace = id;
       }
       if (ev.tag !== undefined) {
@@ -173,7 +177,7 @@ function validateTriggers(raw: unknown, params: ParamDef[], ctx: ResolveCtx, err
         if (!Array.isArray(m.allowFrom)) errors.push(`${w}.manual.allowFrom: must be a list of workspaces`);
         else for (const a of m.allowFrom) {
           const id = typeof a === 'string' ? ctx.workspace(a) : null;
-          if (!id) errors.push(`${w}.manual.allowFrom: unknown workspace "${String(a)}"`);
+          if (!id) errors.push(`${w}.manual.allowFrom: ${refusalOf(ctx, a) ?? `unknown workspace "${String(a)}"`}`);
           else allow.push(id);
         }
       }
@@ -195,7 +199,7 @@ function validateScript(raw: unknown, w: string, ctx: ResolveCtx, errors: string
     if (o.runIn === 'host') out.runIn = 'host';
     else {
       const id = typeof o.runIn === 'string' ? ctx.workspace(o.runIn) : null;
-      if (!id) { errors.push(`${w}.script.runIn: host, or a container workspace name (unknown "${String(o.runIn)}")`); return null; }
+      if (!id) { errors.push(`${w}.script.runIn: ${refusalOf(ctx, o.runIn) ?? `host, or a container workspace name (unknown "${String(o.runIn)}")`}`); return null; }
       out.runIn = id;
     }
   }
@@ -257,7 +261,7 @@ function validateSteps(raw: unknown, params: ParamDef[], ctx: ResolveCtx, errors
     const p = (o.prompt ?? {}) as Record<string, unknown>;
     if (p.workspace === '$self') { errors.push(`${w}.prompt.workspace: $self only works in automations shipped in a loadout (it means the workspace the loadout is installed into)`); return; }
     const ws = typeof p.workspace === 'string' ? ctx.workspace(p.workspace) : null;
-    if (!ws) { errors.push(`${w}.prompt.workspace: unknown workspace "${String(p.workspace ?? '')}"`); return; }
+    if (!ws) { errors.push(`${w}.prompt.workspace: ${refusalOf(ctx, p.workspace) ?? `unknown workspace "${String(p.workspace ?? '')}"`}`); return; }
     const mode = p.mode ?? 'live';
     if (mode !== 'live' && mode !== 'fresh') { errors.push(`${w}.prompt.mode: live or fresh`); return; }
     let allowedTools: string[] | undefined;

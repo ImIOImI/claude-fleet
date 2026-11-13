@@ -15,7 +15,8 @@ import type { SessionOwnerStore } from './sessionOwners.js';
 export const HOST_MCP_TOOLS: ReadonlySet<string> = new Set([
   'list_sessions', 'get_session', 'get_cost', 'list_events', 'session_summary', 'query', 'mark_useful', 'cost_by_owner',
   'post_todo', 'update_todo', 'list_todos',
-  'list_automations', 'get_automation', 'list_runs', 'run_automation', 'schedule_next'
+  'list_automations', 'get_automation', 'list_runs', 'run_automation', 'schedule_next',
+  'notify', 'propose_automation', 'propose_automation_change', 'get_proposal'
 ]);
 export const HOST_SEARCH_TOOL = 'search_transcripts';
 const HOST_TOOLS_WITH_SEARCH: ReadonlySet<string> = new Set([...HOST_MCP_TOOLS, HOST_SEARCH_TOOL]);

@@ -83,6 +83,8 @@
 !src/preload/captureSettings.ts
 !src/preload/federation.ts
 !src/preload/sessionOwner.ts
+!src/preload/remoteAutomations.ts
+!src/main/remoteUrl.ts
 !src/main/embedderClient.ts
 !src/main/transcriptIndexCore.ts
 !src/main/publish/protocol.ts
@@ -99,6 +101,7 @@ src/**/*.test.ts
 src/host/testFakes.ts
 src/host/testHost.ts
 src/host/testGithubApp.ts
+src/host/testAutomationRuntime.ts
 docker/host/*.test.sh
 embedder/target/**
 embedder/bin/**

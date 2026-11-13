@@ -8,8 +8,12 @@ import type { RemoteSessionsResult, SearchHitItem, SessionCursor, SourcePage, Un
 import { EMBED_MODEL_ID } from '../vectors.js';
 import { MAX_REMOTE_SESSIONS, parseOwnerCosts, parseSearchReply, parseSessionsPage, parseSummary, type RemoteSessionItem } from './remoteRows.js';
 import type { OwnerCostRow } from '../../preload/sessionOwner.js';
+import type { RemoteActionResult } from '../../preload/remoteAutomations.js';
+import { actionError } from './actionError.js';
+import { parseActionReply } from './remoteAutomationRows.js';
 
 export const SOURCE_TIMEOUT_MS = 3_000;
+export const ACTION_TIMEOUT_MS = 15_000;
 
 export type RemoteListItem = RemoteSessionItem & {
   workspaceName: string;
@@ -40,6 +44,12 @@ export interface FederatedReader {
     remote: { origin: string; hits: Omit<SearchHitItem, 'origin'>[] }[];
     unavailable: UnavailableSource[];
   }>;
+  /** One read per running source, in parallel, each bounded; failures listed under `unavailable`. */
+  each<T>(channel: string, args: unknown[], parse: (v: unknown, src: RemoteSourceInfo) => T): Promise<{ values: Array<{ src: RemoteSourceInfo; value: T }>; unavailable: UnavailableSource[] }>;
+  /** undefined: no such bookmark. */
+  one<T>(origin: string, channel: string, args: unknown[], parse: (v: unknown, src: RemoteSourceInfo) => T): Promise<Outcome<T> | undefined>;
+  /** An action RPC to the host that owns the row (never federated, never shared with another call). */
+  act(origin: string, channel: string, payload: Record<string, unknown>): Promise<RemoteActionResult<unknown>>;
 }
 
 class SourceTimeout extends Error {}
@@ -86,6 +96,37 @@ export function createFederatedReader(d: FederatedReaderDeps): FederatedReader {
   return {
     call,
     sources: () => d.sources(),
+    async each<T>(channel: string, args: unknown[], parse: (v: unknown, src: RemoteSourceInfo) => T) {
+      const values: Array<{ src: RemoteSourceInfo; value: T }> = [];
+      const unavailable: UnavailableSource[] = [];
+      await Promise.all(d.sources().map(async (s) => {
+        const r = await call(s, channel, args, (v) => parse(v, s));
+        if (r.ok) values.push({ src: s, value: r.value });
+        else unavailable.push({ origin: s.id, name: s.name, reason: r.reason });
+      }));
+      values.sort((a, b) => (a.src.id < b.src.id ? -1 : a.src.id > b.src.id ? 1 : 0));
+      return { values, unavailable: byOrigin(unavailable) };
+    },
+    async one(origin, channel, args, parse) {
+      const s = d.sources().find((x) => x.id === origin);
+      return s ? call(s, channel, args, (v) => parse(v, s)) : undefined;
+    },
+    async act(origin, channel, payload) {
+      const s = d.sources().find((x) => x.id === origin);
+      if (!s) return { ok: false, kind: 'unavailable', message: 'that remote workspace is no longer bookmarked' };
+      if (s.state !== 'running') {
+        return {
+          ok: false, kind: 'unavailable',
+          message: s.state === null ? `${s.name} is still being checked` : `${s.name} is unreachable; try again when it's back`
+        };
+      }
+      try {
+        const r = parseActionReply(await d.rpc(s.url, channel, [payload], ACTION_TIMEOUT_MS));
+        return r.error !== null ? { ok: false, kind: 'failed', message: r.error } : { ok: true, replayed: r.replayed, result: r.result };
+      } catch (err) {
+        return { ok: false, ...actionError(err, s.name) };
+      }
+    },
     async search(o) {
       const targets = d.sources().filter((s) => o.origins.includes(s.id));
       const remote: { origin: string; hits: Omit<SearchHitItem, 'origin'>[] }[] = [];

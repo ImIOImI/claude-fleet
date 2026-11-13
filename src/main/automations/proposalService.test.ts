@@ -64,6 +64,28 @@ describe('proposing', () => {
     await svc.mcp.propose('W2', { definition: YAML('log-watch', '*/30 * * * *') });
     expect((await svc.list()).map((p) => p.status).sort()).toEqual(['pending', 'superseded']);
   });
+  it('supersede is a CAS: a proposal decided concurrently is left alone, not overwritten to superseded', async () => {
+    inbox = await openTestInbox();
+    const store = new ProposalStore(inbox.kysely);
+    let armed = false;
+    // simulates another decision (e.g. approve/reject) landing between supersede's read and its save
+    const racing = Object.assign(Object.create(store) as ProposalStore, {
+      pending: async () => {
+        const list = await store.pending();
+        if (armed) for (const p of list) await store.save({ ...p, status: 'approved', note: 'decided elsewhere', decidedAt: 999 });
+        return list;
+      }
+    });
+    const svc = createProposalService({
+      proposals: racing, automations: new AutomationStore(inbox.kysely), now: () => 2,
+      resolveWorkspace: (v) => WSS[v] ?? null, workspaceName: (id) => id, trusted: async () => false,
+      notify: () => null, changed: () => {}
+    });
+    const first = await svc.mcp.propose('W2', { definition: YAML() });
+    armed = true;
+    await svc.mcp.propose('W2', { definition: YAML('log-watch', '*/30 * * * *') });
+    expect(await store.get(first.id)).toMatchObject({ status: 'approved', note: 'decided elsewhere' });
+  });
 });
 
 describe('approving', () => {
@@ -83,6 +105,28 @@ describe('approving', () => {
     await svc.reject(id, 'too noisy');
     expect(await svc.mcp.get('W2', { id })).toMatchObject({ status: 'rejected', note: 'too noisy' });
     await expect(svc.mcp.get('W1', { id })).rejects.toThrow(/not found/);
+  });
+  it('a reject whose read raced another decision refuses and leaves that decision', async () => {
+    inbox = await openTestInbox();
+    const store = new ProposalStore(inbox.kysely);
+    let armed = false;
+    const racing = Object.assign(Object.create(store) as ProposalStore, {
+      get: async (id: string) => {
+        const p = await store.get(id);
+        const other = await store.get(id);
+        if (armed && other?.status === 'pending') await store.save({ ...other, status: 'approved', note: 'applied elsewhere', decidedAt: 1 });
+        return p;
+      }
+    });
+    const svc = createProposalService({
+      proposals: racing, automations: new AutomationStore(inbox.kysely), now: () => 2,
+      resolveWorkspace: (v) => WSS[v] ?? null, workspaceName: (id) => id, trusted: async () => false,
+      notify: () => null, changed: () => {}
+    });
+    const { id } = await svc.mcp.propose('W2', { definition: YAML() });
+    armed = true;
+    await expect(svc.reject(id, 'no')).rejects.toThrow(/decided meanwhile/);
+    expect(await store.get(id)).toMatchObject({ status: 'approved', note: 'applied elsewhere' });
   });
   it('a change whose automation moved on since it was proposed is refused', async () => {
     const { svc, automations } = await setup();

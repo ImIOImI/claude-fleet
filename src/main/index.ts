@@ -1,6 +1,9 @@
 import { app, BrowserWindow, dialog, shell, ipcMain } from 'electron';
 import { join } from 'node:path';
-import { registerIpc, invalidateWorkspaceList, replayInputWait, setFederatedEmbedder, stopRemoteBackend } from './ipc.js';
+import { registerIpc, invalidateWorkspaceList, MOCK_MODE, remoteFederation, replayInputWait, setFederatedEmbedder, setRemoteNoticeSink, stopRemoteBackend } from './ipc.js';
+import { createRemoteNotifier } from './federation/remoteNotices.js';
+import { parseNoticeRows } from './federation/remoteAutomationRows.js';
+import { NotifyStore } from './inbox/notifyStore.js';
 import { openDb, openDbPostgres, closeDb, deleteEmbeddingsForOtherModels, sessionsWithPendingTurns, recordErrors, stateKysely, onStateOpenStats, stateLeftoverDrain, setStateWarnSink, sessionCaptureSignals, isAutomationSession } from './db.js';
 import { initPerf, shutdownPerf, perfSpan, perfSpanAsync, perfRecordSpan, perfNoteSqlSync, getEffectivePerf, recordBootProfile } from './perf.js';
 import { setSqliteQueryObserver } from './store/kysely.js';
@@ -458,6 +461,28 @@ if (gotSingleInstanceLock) app.whenReady().then(async () => {
       auto?.setInboxSink(inboxHost);
     });
     inboxTeardown.push(() => scope.dispose());
+    // Remote notices through the local policy (D132), stored in this notification log (D133).
+    if (notifySvc && !MOCK_MODE) {
+      const svc = notifySvc;
+      const notifyStore = new NotifyStore(inbox.kysely);
+      const reader = remoteFederation();
+      const notifier = createRemoteNotifier({
+        fetch: async (origin, q) => {
+          const r = await reader.one(origin, 'notices:feed', [{ ...q, limit: 100 }], (v) => parseNoticeRows(v));
+          return r?.ok ? r.value : undefined;
+        },
+        name: (origin) => reader.sources().find((s) => s.id === origin)?.name ?? 'remote workspace',
+        request: (n) => svc.request(n),
+        getCursor: (o) => notifyStore.getRemoteCursor(o),
+        setCursor: (o, c) => notifyStore.setRemoteCursor(o, c),
+        cursorOrigins: () => notifyStore.remoteCursorOrigins(),
+        forget: (o) => notifyStore.forgetOrigin(o),
+        now: Date.now,
+        onError: (e) => logError({ source: 'main', type: 'remote-notices', level: 'warn', message: String(e) })
+      });
+      setRemoteNoticeSink(notifier);
+      inboxTeardown.push(() => { notifier.stop(); setRemoteNoticeSink(null); });
+    }
     // Knowledge capture settings (#483 §5a): get/set_capture_settings MCP tools,
     // capture-settings proposals, and the change log for form edits.
     if (auto) {

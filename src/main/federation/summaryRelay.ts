@@ -3,6 +3,7 @@
 import type { RemoteEvent } from '../remoteClient.js';
 import type { RemoteSourceInfo } from '../remote.js';
 import type { WorkspaceSummary } from '../db.js';
+import { REMOTE_CHANGE_CHANNELS, type RemoteChangeChannel } from '../../preload/remoteAutomations.js';
 
 export const RELAY_DEBOUNCE_MS = 2_000;
 
@@ -14,6 +15,10 @@ export interface SummaryRelayDeps {
   fetchSummary(remoteId: string): Promise<WorkspaceSummary | null | undefined>;
   broadcast(workspaceId: string, summary: WorkspaceSummary | null): void;
   schedule?: (fn: () => void, ms: number) => () => void;
+  /** An automations/proposals/inbox/notices hint from that host; carries no data. */
+  onHostChange?(origin: string, channel: RemoteChangeChannel): void;
+  /** The /events socket for that host (re)connected. */
+  onConnected?(origin: string): void;
 }
 
 export function createSummaryRelay(d: SummaryRelayDeps): { sync(): void; stop(): void } {
@@ -46,9 +51,12 @@ export function createSummaryRelay(d: SummaryRelayDeps): { sync(): void; stop():
         entry.stop = d.subscribe(
           src.url,
           (e) => {
+            if (subs.get(id) !== entry) return;
+            if ((REMOTE_CHANGE_CHANNELS as readonly string[]).includes(e.channel)) d.onHostChange?.(id, e.channel as RemoteChangeChannel);
             if (e.channel === 'observability:summary' && (e.payload as { workspaceId?: unknown } | null)?.workspaceId === id) hint(id);
           },
           (connected, why) => {
+            if (connected && subs.get(id) === entry) d.onConnected?.(id);
             if (!connected && why?.retryInMs === null && subs.get(id) === entry) drop(id);
           }
         );

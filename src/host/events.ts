@@ -13,7 +13,8 @@ export const EVENT_CHANNELS = new Set([
   'inputwait:update',
   'automations:changed',
   'proposals:changed',
-  'inbox:changed'
+  'inbox:changed',
+  'notices:changed'
 ]);
 
 export interface Subscriber {

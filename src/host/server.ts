@@ -374,7 +374,7 @@ export function createHostServer(deps: HostServerDeps): HostServer {
       return sendJson(res, 404, { ok: false, error: 'no such channel' });
     }
     const r = await dispatchRpc(deps.rpc, channel, body, caller, deps.log);
-    sendJson(res, r.status, r.body);
+    sendJson(res, r.status, r.body, r.retryAfterSec !== undefined ? { 'Retry-After': String(r.retryAfterSec) } : {});
   }
 
   async function handlePublish(req: IncomingMessage, res: ServerResponse, path: string, caller: Principal): Promise<void> {

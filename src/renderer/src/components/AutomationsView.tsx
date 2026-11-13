@@ -3,7 +3,8 @@
 // params, runs with per-step outcomes). Authoring is Claude-first (Phase 6):
 // describe it and the automations workspace drafts it; YAML is the fallback.
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import type { Automation, RunRow } from '../../../preload';
+import type { Automation, RemoteAutomation, RunRow } from '../../../preload';
+import type { UnavailableSource } from '../../../preload/federation';
 import { RUN_LABELS, TRIGGER_LABELS, nextLabel, rescheduleLabel, runDuration, runTone, runWhen } from '../automationView';
 import { AutomationEditor } from './AutomationEditor';
 import { RunModal } from './RunModal';
@@ -12,6 +13,10 @@ import { HostShellPicker } from './HostShellPicker';
 import { stringify } from 'yaml';
 import { withShell } from '../automationView';
 import { Markdown } from './Markdown';
+import { OriginBadge } from './OriginBadge';
+import { RemoteAutomationDetail } from './RemoteAutomationDetail';
+import { rowKey, sortRemoteAutomations } from '../remoteAutomationsView';
+import { unavailableText } from '../sessionsView';
 
 interface Props {
   names: Record<string, string>;
@@ -20,9 +25,11 @@ interface Props {
   onCreateAutomationsWs?: () => void;
   onEditAutomationsWs?: () => void;
   onWatch?: () => void;
+  /** Remote bookmarks: drafting for one runs locally (D127). */
+  remotes?: Array<{ id: string; name: string }>;
 }
 
-export function AutomationsView({ names, automationsWs = null, workspaces = [], onCreateAutomationsWs, onEditAutomationsWs, onWatch }: Props) {
+export function AutomationsView({ names, automationsWs = null, workspaces = [], onCreateAutomationsWs, onEditAutomationsWs, onWatch, remotes = [] }: Props) {
   const [pick, setPick] = useState('');
   const [roleError, setRoleError] = useState<string | null>(null);
   const containers = workspaces.filter((w) => w.kind === 'container');
@@ -44,6 +51,24 @@ export function AutomationsView({ names, automationsWs = null, workspaces = [], 
   }, []);
   useEffect(() => { reload(); }, [reload]);
   useEffect(() => window.api.automations.onChanged(() => reload()), [reload]);
+
+  const [remote, setRemote] = useState<RemoteAutomation[]>([]);
+  const [unavailable, setUnavailable] = useState<UnavailableSource[]>([]);
+  const [remoteSel, setRemoteSel] = useState<string | null>(null);
+  const [remoteVersion, setRemoteVersion] = useState(0);
+  const [draftTarget, setDraftTarget] = useState('local');
+  const reloadRemote = useCallback(() => {
+    void window.api.remoteAutomations.list().then((r) => {
+      setRemote(sortRemoteAutomations(r.items));
+      setUnavailable(r.unavailable);
+      setRemoteVersion((v) => v + 1);
+    });
+  }, []);
+  useEffect(() => { reloadRemote(); }, [reloadRemote]);
+  useEffect(() => window.api.remote.onChanged((c) => { if (c.channel === 'automations:changed') reloadRemote(); }), [reloadRemote]);
+  const selectedRemote = remote.find((x) => rowKey(x.origin, x.id) === remoteSel) ?? null;
+  const draftRemote = remotes.find((r) => r.id === draftTarget) ?? null;
+  useEffect(() => { if (draftTarget !== 'local' && !draftRemote) setDraftTarget('local'); }, [draftTarget, draftRemote]);
   useEffect(() => {
     setConfirmDelete(false);
     if (!selected) { setDetail(null); return; }
@@ -54,8 +79,15 @@ export function AutomationsView({ names, automationsWs = null, workspaces = [], 
     (filter === 'all' || (filter === 'enabled' ? a.enabled : a.lastRun && runTone(a.lastRun.status) === 'bad')) &&
     (!search.trim() || `${a.name} ${a.description ?? ''} ${a.tags.join(' ')}`.toLowerCase().includes(search.trim().toLowerCase()))
   ), [list, filter, search]);
-  const enabledCount = list.filter((a) => a.enabled).length;
-  const failingCount = list.filter((a) => a.lastRun && runTone(a.lastRun.status) === 'bad').length;
+  const remoteVisible = useMemo(() => remote.filter((x) =>
+    (filter === 'all' || (filter === 'enabled' ? x.enabled : x.lastRun && runTone(x.lastRun.status) === 'bad')) &&
+    (!search.trim() || `${x.name} ${x.description ?? ''} ${x.tags.join(' ')} ${x.workspaceName}`.toLowerCase().includes(search.trim().toLowerCase()))
+  ), [remote, filter, search]);
+  const both = [...list, ...remote];
+  const enabledCount = both.filter((a) => a.enabled).length;
+  const failingCount = both.filter((a) => a.lastRun && runTone(a.lastRun.status) === 'bad').length;
+  const pickLocal = (id: string) => { setSelected(id); setRemoteSel(null); };
+  const pickRemote = (k: string) => { setRemoteSel(k); setSelected(null); };
 
   const a = detail?.automation;
   const isRunning = !!detail?.runs.some((r) => r.status === 'running');
@@ -93,14 +125,22 @@ export function AutomationsView({ names, automationsWs = null, workspaces = [], 
           placeholder="Describe an automation: what to check, how often, and what should land in your inbox…"
           button="Draft with Claude"
           multiline
-          send={(t) => window.api.automations.draft(t)}
-          sentNote={`Sent to ${automationsWs?.name ?? 'the automations workspace'}. Its draft will appear in Activity for you to approve.`}
+          targets={[
+            { id: 'local', label: 'Draft for this desktop', disabledReason: null },
+            ...remotes.map((r) => ({ id: r.id, label: `Draft for ${r.name} (remote host config)`, disabledReason: null }))
+          ]}
+          target={draftTarget}
+          onTarget={setDraftTarget}
+          send={(t) => (draftRemote ? window.api.automations.draftRemote(draftRemote.id, t, null) : window.api.automations.draft(t))}
+          sentNote={draftRemote
+            ? `Sent to ${automationsWs?.name ?? 'the automations workspace'}. The entry for ${draftRemote.name}'s host config will appear in Activity › Needs approval, to copy into a platform-ops PR.`
+            : `Sent to ${automationsWs?.name ?? 'the automations workspace'}. Its draft will appear in Activity for you to approve.`}
           onWatch={onWatch}
           disabledReason={automationsWs ? null : 'Set up the automations workspace to draft automations with Claude'}
         />
         <div className="ib-toolbar">
           <div className="obs-scope-toggle ib-scope three" role="tablist" aria-label="Automation filter">
-            {([['all', `All · ${list.length}`], ['enabled', `Enabled · ${enabledCount}`], ['failing', `Failing · ${failingCount}`]] as const).map(([f, label]) => (
+            {([['all', `All · ${both.length}`], ['enabled', `Enabled · ${enabledCount}`], ['failing', `Failing · ${failingCount}`]] as const).map(([f, label]) => (
               <button key={f} role="tab" aria-selected={filter === f} className={`obs-scope-btn ${filter === f ? 'active' : ''}`} onClick={() => setFilter(f)}>{label}</button>
             ))}
           </div>
@@ -110,12 +150,12 @@ export function AutomationsView({ names, automationsWs = null, workspaces = [], 
           </div>
         </div>
         {visible.length === 0 ? (
-          <div className="ib-empty">{list.length === 0 ? 'No automations yet. Describe one above and Claude drafts it, or write the YAML yourself.' : 'No automations match.'}</div>
+          remoteVisible.length > 0 ? null : <div className="ib-empty">{list.length + remote.length === 0 ? 'No automations yet. Describe one above and Claude drafts it, or write the YAML yourself.' : 'No automations match.'}</div>
         ) : (
           <ul className="auto-list" aria-label="Automations">
             {visible.map((x) => (
-              <li key={x.id} className={`auto-row${selected === x.id ? ' sel' : ''}${x.enabled ? '' : ' off'}`} onClick={() => setSelected(x.id)} aria-selected={selected === x.id} tabIndex={0}
-                onKeyDown={(e) => { if (e.key === 'Enter') setSelected(x.id); }}>
+              <li key={x.id} className={`auto-row${selected === x.id ? ' sel' : ''}${x.enabled ? '' : ' off'}`} onClick={() => pickLocal(x.id)} aria-selected={selected === x.id} tabIndex={0}
+                onKeyDown={(e) => { if (e.key === 'Enter') pickLocal(x.id); }}>
                 <button
                   className={`switch${x.enabled ? ' on' : ''}`}
                   role="switch"
@@ -137,9 +177,36 @@ export function AutomationsView({ names, automationsWs = null, workspaces = [], 
             ))}
           </ul>
         )}
+        {remoteVisible.length > 0 && (
+          <>
+            <div className="session-group-label">From remote workspaces<span className="session-group-line" /></div>
+            <ul className="auto-list" aria-label="Remote automations">
+              {remoteVisible.map((x) => {
+                const k = rowKey(x.origin, x.id);
+                return (
+                  <li key={k} className={`auto-row${remoteSel === k ? ' sel' : ''}${x.enabled ? '' : ' off'}`} onClick={() => pickRemote(k)}
+                    aria-selected={remoteSel === k} tabIndex={0} onKeyDown={(e) => { if (e.key === 'Enter') pickRemote(k); }}>
+                    <span className={`switch${x.enabled ? ' on' : ''} readonly`} role="img" aria-label={`${x.name} ${x.enabled ? 'enabled' : 'disabled'} in the host config`} title="Managed by the host config" />
+                    <div className="auto-main">
+                      <div className="auto-name">{x.name} <OriginBadge name={x.workspaceName} hue={x.workspaceColorHue} tier={x.tier} /></div>
+                      <div className="auto-meta"><span className="mono">{x.triggerSummaries.join(' + ') || 'no triggers'}</span><span className="ib-dim">· next {nextLabel(x)}</span></div>
+                      <div className="auto-meta">
+                        {x.lastRun ? <><span className={`run-chip ${runTone(x.lastRun.status)}`}>{RUN_LABELS[x.lastRun.status]}</span><span className="ib-dim">{runWhen(x.lastRun)}</span></> : <span className="ib-dim">never run</span>}
+                        {x.tags.map((t) => <span key={t} className="tag">{t}</span>)}
+                      </div>
+                    </div>
+                  </li>
+                );
+              })}
+            </ul>
+          </>
+        )}
+        {unavailableText(unavailable) && <div className="remote-unavailable" role="note">{unavailableText(unavailable)}</div>}
       </section>
 
-      {a && detail ? (
+      {selectedRemote ? (
+        <RemoteAutomationDetail key={remoteSel} automation={selectedRemote} version={remoteVersion} automationsWs={automationsWs} onWatch={onWatch} />
+      ) : a && detail ? (
         <aside className="ib-detail auto-detail" aria-label="Automation details">
           <div className="ib-detail-head">
             <div className="ib-detail-chips">

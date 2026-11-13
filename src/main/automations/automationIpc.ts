@@ -11,8 +11,11 @@ import { createLoadoutInstaller } from './loadoutInstaller.js';
 import { runScript } from './hostScript.js';
 import {
   hostCloseFresh, hostEnsureRunning, hostExecScript, hostFreshState, hostPostToWorkspace, hostSpawnFresh, hostWorkspaceBusy, hostWorkspaceNames,
-  hostWorkspaceState, hostWslDistros, setFleetEventObserver
+  hostWorkspaceState, hostWslDistros, remoteFederation, setFleetEventObserver
 } from '../ipc.js';
+import { newId } from '../inbox/inboxDb.js';
+import { createRemoteDrafts, remoteDraftFor, requestRemoteDraft } from './remoteDrafts.js';
+import { localWorkspaces, remoteTargetRefusal, resolveLocalWorkspace, type NamedWorkspace } from './localTargets.js';
 import { existsSync } from 'node:fs';
 import type { HostShell } from '../../preload/inboxTypes.js';
 import { detectHostShells, onPath } from './hostShells.js';
@@ -52,8 +55,11 @@ export function registerAutomationIpc(inbox: InboxStore, notify: NotifyService |
 } {
   let sink: InboxSink | null = null;
   const store = new AutomationStore(inbox.kysely);
-  // Name ↔ id map refreshed on use; automations name workspaces in YAML.
-  let names: Array<{ id: string; name: string }> = [];
+  // Name ↔ id map refreshed on use; automations name workspaces in YAML. Includes
+  // remote bookmarks for display; targets resolve through resolveLocal only.
+  let names: NamedWorkspace[] = [];
+  const resolveLocal = (v: string) => resolveLocalWorkspace(names, v);
+  const refuseRemote = (v: string) => remoteTargetRefusal(names, v);
   /** The workspace behind the Inbox chip (manifest role 'automations'), if any. */
   let roleWs: string | null = null;
   const refreshUnspanned = async () => {
@@ -123,7 +129,8 @@ export function registerAutomationIpc(inbox: InboxStore, notify: NotifyService |
     secret: (ws, key) => { assertNotReservedVaultScope(ws); return getSecret(ws, key); },
     emitTodo: async (id, runId, input) => { if (!sink) throw new Error('the inbox is unavailable'); await sink.todoFromAutomation(id, runId, input); },
     emitNotify: async (id, runId, input) => { if (!sink) throw new Error('the inbox is unavailable'); await sink.notifyFromAutomation(id, runId, input); },
-    resolveWorkspace: (v) => names.find((n) => n.id === v)?.id ?? names.find((n) => n.name === v)?.id ?? null,
+    resolveWorkspace: resolveLocal,
+    refuseWorkspace: refuseRemote,
     hostShells: hostShellIds,
     notify: notify ? (n) => { void notify.request(n).catch((e) => logError({ source: 'main', type: 'notify-request', level: 'warn', message: String(e) })); } : undefined,
     changed: () => { send('automations:changed'); emitInboxChanged(); },
@@ -135,7 +142,8 @@ export function registerAutomationIpc(inbox: InboxStore, notify: NotifyService |
     proposals: new ProposalStore(inbox.kysely),
     automations: store,
     now: Date.now,
-    resolveWorkspace: (v) => names.find((n) => n.id === v)?.id ?? names.find((n) => n.name === v)?.id ?? null,
+    resolveWorkspace: resolveLocal,
+    refuseWorkspace: refuseRemote,
     workspaceName: (id) => names.find((n) => n.id === id)?.name ?? id,
     hostShells: hostShellIds,
     trusted: async (id) => {
@@ -160,9 +168,9 @@ export function registerAutomationIpc(inbox: InboxStore, notify: NotifyService |
     const sources = await readLoadoutAutomations(srcDir);
     if (!sources.length) return [];
     const keys = new Map<string, string[]>();
-    for (const ws of new Set([workspaceId, ...(roleWs ? [roleWs] : []), ...names.map((n) => n.id)])) keys.set(ws, await listKeys(ws).catch(() => []));
+    for (const ws of new Set([workspaceId, ...(roleWs ? [roleWs] : []), ...localWorkspaces(names).map((n) => n.id)])) keys.set(ws, await listKeys(ws).catch(() => []));
     await refreshShells();
-    return prepareLoadoutAutomations(sources, workspaceId, { workspace: (v) => names.find((n) => n.id === v)?.id ?? names.find((n) => n.name === v)?.id ?? null, hostShells: hostShellIds() },
+    return prepareLoadoutAutomations(sources, workspaceId, { workspace: resolveLocal, refusal: refuseRemote, hostShells: hostShellIds() },
       (ws) => keys.get(ws) ?? [], roleWs);
   };
   setLoadoutAutomationHooks({
@@ -210,14 +218,28 @@ export function registerAutomationIpc(inbox: InboxStore, notify: NotifyService |
   };
   inboxEvents.on('todo', onTodo);
 
+  // Remote drafting runs here (D127): drafts are config text in memory; nothing is sent to the host.
+  const remoteDrafts = createRemoteDrafts({
+    now: Date.now,
+    sources: () => remoteFederation().sources(),
+    newId: () => newId(),
+    changed: () => send('proposals:changed')
+  });
+
   setAutomationHandlers({
     list: async (callerId) => { await refresh(); return svc.mcp.list(callerId, privileged(callerId)); },
     run: async (callerId, args) => { await refresh(); return svc.mcp.run(callerId, args, privileged(callerId)); },
     get: async (callerId, args) => { await refresh(); return svc.mcp.get(callerId, args, privileged(callerId)); },
     listRuns: async (callerId, args) => { await refresh(); return svc.mcp.listRuns(callerId, args, privileged(callerId)); },
     scheduleNext: async (callerId, args) => { await refresh(); return svc.mcp.scheduleNext(callerId, args); },
-    propose: async (callerId, args) => { await refresh(); return proposals.mcp.propose(callerId, args); },
-    proposeChange: async (callerId, args) => { await refresh(); return proposals.mcp.proposeChange(callerId, args); },
+    propose: async (callerId, args) => {
+      await refresh();
+      return remoteDraftFor(remoteDrafts, callerId, roleWs, args, 'new') ?? proposals.mcp.propose(callerId, args);
+    },
+    proposeChange: async (callerId, args) => {
+      await refresh();
+      return remoteDraftFor(remoteDrafts, callerId, roleWs, args, 'change') ?? proposals.mcp.proposeChange(callerId, args);
+    },
     getProposal: async (callerId, args) => proposals.mcp.get(callerId, args)
   });
 
@@ -237,7 +259,7 @@ export function registerAutomationIpc(inbox: InboxStore, notify: NotifyService |
   ipcMain.handle('automations:run', (_e, id: string, args: Record<string, unknown>) =>
     withNames(() => svc.run(id, { kind: 'manual', by: USER, args: args ?? {}, coerce: true })));
   ipcMain.handle('automations:starter', () =>
-    withNames(() => STARTER_YAML.replace('REPLACE-WITH-WORKSPACE-NAME', names[0]?.name ?? 'REPLACE-WITH-WORKSPACE-NAME')));
+    withNames(() => STARTER_YAML.replace('REPLACE-WITH-WORKSPACE-NAME', localWorkspaces(names)[0]?.name ?? 'REPLACE-WITH-WORKSPACE-NAME')));
   // The automations workspace (#407 Phase 5b): one per fleet, container-only, trusted.
   ipcMain.handle('automations:roleWorkspace', async () => { await refresh(); return roleWs; });
   ipcMain.handle('automations:setRole', async (_e, id: string | null) => {
@@ -275,7 +297,7 @@ export function registerAutomationIpc(inbox: InboxStore, notify: NotifyService |
   const toRole = async (prompt: (ctx: { workspaces: string[]; automations: string[] }) => string): Promise<string> => {
     await refresh();
     if (!roleWs) throw new Error('set up an automations workspace first');
-    const ctx = { workspaces: names.filter((n) => n.id !== roleWs).map((n) => n.name), automations: (await store.list()).map((a) => a.name), hostShells: (await refreshShells()).map((x) => `${x.id} (${x.label})`) };
+    const ctx = { workspaces: localWorkspaces(names).filter((n) => n.id !== roleWs).map((n) => n.name), automations: (await store.list()).map((a) => a.name), hostShells: (await refreshShells()).map((x) => `${x.id} (${x.label})`) };
     await hostPostToWorkspace(roleWs, prompt(ctx));
     return roleWs;
   };
@@ -294,6 +316,21 @@ export function registerAutomationIpc(inbox: InboxStore, notify: NotifyService |
     if (!a) throw new Error('automation not found');
     return toRole((ctx) => changePrompt(a.name, definitionToYaml(a.definition), d, ctx));
   });
+  ipcMain.handle('automations:draftRemote', async (_e, origin: unknown, text: unknown, automationId: unknown) => {
+    const ulid = (v: unknown, what: string): string => {
+      if (typeof v !== 'string' || !/^[0-9A-HJKMNP-TV-Z]{26}$/.test(v)) throw new Error(`${what} must be an id`);
+      return v;
+    };
+    const o = ulid(origin, 'origin');
+    const d = need(text, automationId == null ? 'the automation' : 'the change');
+    const a = automationId == null ? null : ulid(automationId, 'automation');
+    await refresh();
+    if (!roleWs) throw new Error('set up an automations workspace first');
+    const ws = roleWs;
+    return requestRemoteDraft({ reader: remoteFederation(), drafts: remoteDrafts, post: async (p) => { await hostPostToWorkspace(ws, p); return ws; } }, o, d, a);
+  });
+  ipcMain.handle('automations:remoteDrafts', () => remoteDrafts.list());
+  ipcMain.handle('automations:dismissRemoteDraft', (_e, id: unknown) => remoteDrafts.dismiss(String(id)));
   ipcMain.handle('proposals:refine', async (_e, id: string, index: number, text: string) => {
     const d = need(text, 'the changes');
     const p = (await proposals.list()).find((x) => x.id === id);

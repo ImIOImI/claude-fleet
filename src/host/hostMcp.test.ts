@@ -159,11 +159,12 @@ describe('HOST_MCP_TOOLS', () => {
   it('serves query; search_transcripts only with an embedder', () => {
     expect(HOST_MCP_TOOLS.has('query')).toBe(true);
     expect(HOST_MCP_TOOLS.has('search_transcripts')).toBe(false);
-    expect(HOST_MCP_TOOLS.size).toBe(16);
+    expect(HOST_MCP_TOOLS.size).toBe(20);
+    for (const t of ['notify', 'propose_automation', 'propose_automation_change', 'get_proposal']) expect(HOST_MCP_TOOLS.has(t)).toBe(true);
     expect(HOST_MCP_TOOLS.has('cost_by_owner')).toBe(true);
     expect(HOST_MCP_TOOLS.has('mark_useful')).toBe(true);
     expect(HOST_SEARCH_TOOL).toBe('search_transcripts');
-    expect(hostMcpTools(true).size).toBe(17);
+    expect(hostMcpTools(true).size).toBe(21);
     expect(hostMcpTools(true).has('search_transcripts')).toBe(true);
     expect(hostMcpTools(false)).toBe(HOST_MCP_TOOLS);
   });
@@ -223,7 +224,7 @@ describe('search_transcripts on the host', () => {
     const p = await start([]);
     const [list, call] = await rpc(p, [{ jsonrpc: '2.0', id: 1, method: 'tools/list' }, search(2, { query: 'x' })])
       .then((ms) => [1, 2].map((id) => ms.find((m) => m.id === id)!));
-    expect(names(list)).toHaveLength(16);
+    expect(names(list)).toHaveLength(20);
     expect(call.error.message).toBe('Unknown tool: search_transcripts');
     expect(scopes).toEqual([]);
   });

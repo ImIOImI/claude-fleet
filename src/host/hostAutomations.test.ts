@@ -3,6 +3,8 @@ import { AutomationStore } from '../main/automations/automationStore.js';
 import { definitionToYaml } from '../main/automations/definition.js';
 import { INBOX_TOOLS } from '../main/automations/runner.js';
 import { InboxStore } from '../main/inbox/inboxDb.js';
+import { NotifyStore } from '../main/inbox/notifyStore.js';
+import { NOTICE_RETENTION_MS } from './hostNotices.js';
 import { callTool, initReadSource, releaseReadSource, setAutomationHandlers, setInboxHandlers } from '../main/mcpCore.js';
 import { isPg, openTestInbox, testPgSchema, type TestPg } from '../main/store/testStore.js';
 import type { AutomationDef } from '../preload/inboxTypes.js';
@@ -12,6 +14,9 @@ import { hostMcpArgs } from './hostMcp.js';
 import { LeaseLostError } from './pgLease.js';
 import { HOST_CONFIG_ORIGIN, startHostAutomations, type HostAutomations } from './hostAutomations.js';
 import { automationOwner, type OwnerClaim } from './sessionOwners.js';
+import { automationRpcChannels, runtimeOf } from './automationRpc.js';
+import { dispatchRpc } from './rpc.js';
+import type { Principal } from './attachHub.js';
 
 const WS = { id: '01JC0000000000000000000000', name: 'review-bot' };
 const USER = { kind: 'user' as const, id: null };
@@ -35,6 +40,10 @@ const def = (name: string, cron?: string): AutomationDef => ({
   name, triggers: [cron ? { schedule: { cron } } : { manual: {} }], concurrency: 'skip', steps: [{ id: 'go', prompt: { workspace: WS.id, mode: 'fresh', message: 'x' } }]
 });
 const text = (r: unknown) => (r as { content: Array<{ text: string }> }).content[0].text;
+const ann: Principal = { identity: { provider: 'github', kind: 'user', login: 'ann', id: 7, name: null, avatarUrl: null, teams: [] }, tier: 'steer' };
+const rid = (n: number) => `${String(n).padStart(8, '0')}-4b1c-4c2a-9a0e-1f2e3d4c5b6a`;
+const act = (channel: string, body: Record<string, unknown>, n: number) =>
+  dispatchRpc(automationRpcChannels(() => runtimeOf(h!, () => WS)), channel, { args: [{ requestId: rid(n), ...body }] }, ann);
 
 async function start(inbox?: InboxStore) {
   const store = inbox ?? (await openTestInbox());
@@ -269,15 +278,17 @@ describe('startHostAutomations', () => {
     expect(other.isError).toBe(true);
   });
 
-  it('takes definitions only from the config: session proposals are refused and never schedule', async () => {
+  it('takes definitions only from the config: a session proposal over MCP is a pending draft and never schedules', async () => {
     const { store } = await start();
     initReadSource(null);
-    const yaml = 'name: sneaky\ntriggers:\n  - schedule: { cron: "* * * * *" }\nsteps:\n  - id: go\n    prompt: { workspace: review-bot, mode: fresh, message: x }\n';
-    for (const name of ['propose_automation', 'propose_automation_change', 'get_proposal']) {
-      const r = await callTool({ name, arguments: { definition: yaml, name: 'sneaky' } }, WS.id) as { isError?: boolean; content: Array<{ text: string }> };
-      expect([r.isError, text(r)]).toEqual([true, expect.stringMatching(/from the host config/)]);
-    }
-    const p = await h!.proposals.mcp.propose(WS.id, { definition: yaml });
+    const yaml = 'name: sneaky\ntriggers:\n  - schedule: { cron: "* * * * *" }\nsteps:\n  - id: go\n    prompt: { workspace: $self, mode: fresh, message: x }\n';
+    const r = await callTool({ name: 'propose_automation', arguments: { definition: yaml } }, WS.id) as { isError?: boolean; content: Array<{ text: string }> };
+    expect(r.isError).toBeUndefined();
+    const id = (JSON.parse(text(r)) as { id: string; status: string }).id;
+    expect(JSON.parse(text(await callTool({ name: 'get_proposal', arguments: { id } }, WS.id)))).toMatchObject({ status: 'pending' });
+    const other = await callTool({ name: 'propose_automation', arguments: { definition: yaml.replace('sneaky', 'other') } }, 'SOMEONE-ELSE') as { isError?: boolean; content: Array<{ text: string }> };
+    expect(other.isError).toBe(true);
+    const p = await h!.proposals.mcp.propose(WS.id, { definition: yaml.replace('sneaky', 'sneaky2').replace('$self', 'review-bot') });
     expect(p).toMatchObject({ status: 'pending' });
     await h!.tick();
     expect(await new AutomationStore(store.kysely).list()).toEqual([]);
@@ -285,6 +296,73 @@ describe('startHostAutomations', () => {
     const edit = definitionToYaml({ name: 'a', description: 'edited by a session', triggers: [{ manual: {} }], concurrency: 'skip', steps: [{ id: 'go', prompt: { workspace: WS.id, mode: 'fresh', message: 'review' } }] });
     expect(await h!.proposals.mcp.proposeChange(WS.id, { id: 'a', definition: edit })).toMatchObject({ status: 'pending' });
     expect(await names()).toEqual([['a', true, 1]]);
+  });
+
+  it('RPC Run now: attributed to the person; disabled and non-config automations are refused and start nothing', async () => {
+    const { store, broker } = await start();
+    initReadSource(null);
+    await h!.reconcile([fresh('a'), { ...fresh('off'), enabled: false }]);
+    const byName = Object.fromEntries((await h!.automations.list()).map((a) => [a.name, a.id]));
+    const ok = await act('automations:run', { id: byName.a }, 1);
+    const runId = (ok.body as { result: { result: { runId: string } } }).result.result.runId;
+    expect((await new AutomationStore(store.kysely).runs(byName.a, 10)).find((r) => r.id === runId)?.trigger.by).toEqual({ kind: 'user', id: 'ann' });
+    await expect.poll(() => broker.created.length).toBe(1);
+    expect((await act('automations:run', { id: byName.off }, 2)).body).toEqual({ ok: true, result: { replayed: false, result: null, error: 'off is disabled in the host config' } });
+    const stray = await new AutomationStore(store.kysely).create(def('stray'), USER, Date.now());
+    const r = await act('automations:run', { id: stray.id }, 3);
+    expect((r.body as { result: { error: string } }).result.error).toMatch(/stray can't run here: .*not from the host config/);
+    expect(broker.created).toHaveLength(1);
+  });
+
+  it('RPC todo create and update are recorded as the person', async () => {
+    const { store } = await start();
+    const c = await act('inbox:create', { input: { title: 'look' } }, 1);
+    const id = (c.body as { result: { result: { id: string } } }).result.result.id;
+    await act('inbox:update', { id, patch: { status: 'done' } }, 2);
+    expect((await store.get(id))?.source).toEqual({ kind: 'user', id: 'ann' });
+    expect((await store.events(id)).at(-1)?.actor).toEqual({ kind: 'user', id: 'ann' });
+  });
+
+  it('notify from a host session is a held notice the RPC feed serves; any other caller is refused (D131)', async () => {
+    const { published } = await start();
+    initReadSource(null);
+    const r = await callTool({ name: 'notify', arguments: { title: 'nightly ok\nsecond line', body: 'all green', key: 'nightly' } }, WS.id);
+    expect(JSON.parse(text(r))).toMatchObject({ delivered: false, heldReason: 'remote' });
+    const other = await callTool({ name: 'notify', arguments: { title: 'x' } }, 'SOMEONE-ELSE') as { isError?: boolean };
+    expect(other.isError).toBe(true);
+    expect(published.filter(([c]) => c === 'notices:changed')).toEqual([['notices:changed', null]]);
+    const feed = await dispatchRpc(automationRpcChannels(() => runtimeOf(h!, () => WS)), 'notices:feed', { args: [{ sinceTs: 0 }] }, { ...ann, tier: 'read' });
+    const rows = (feed.body as { result: { rows: Array<Record<string, unknown>> } }).result.rows;
+    expect(rows).toEqual([expect.objectContaining({
+      kind: 'post', title: 'nightly ok second line', body: 'all green', dedupeKey: 'nightly', workspaceId: WS.id,
+      source: { kind: 'workspace', id: WS.id }, delivered: false, heldReason: 'remote'
+    })]);
+  });
+
+  it('notify shares the hourly post limit', async () => {
+    await start();
+    initReadSource(null);
+    for (let i = 0; i < 60; i++) await callTool({ name: 'notify', arguments: { title: `n${i}` } }, WS.id);
+    const r = await callTool({ name: 'notify', arguments: { title: 'one more' } }, WS.id) as { isError?: boolean; content: Array<{ text: string }> };
+    expect([r.isError, text(r)]).toEqual([true, expect.stringMatching(/post limit \(60\/hour\)/)]);
+  });
+
+  it('a todo posted with notify becomes a notice; one without does not', async () => {
+    await start();
+    initReadSource(null);
+    await callTool({ name: 'post_todo', arguments: { title: 'look', notify: true } }, WS.id);
+    await callTool({ name: 'post_todo', arguments: { title: 'quiet' } }, WS.id);
+    const notes = await h!.notices.feed({ sinceTs: 0, limit: 100 });
+    expect(notes.map((n) => [n.kind, n.title])).toEqual([['todo', 'look']]);
+  });
+
+  it('prunes expired notices when the holder starts, not only hourly', async () => {
+    const inbox = await openTestInbox();
+    const ns = new NotifyStore(inbox.kysely);
+    await ns.insert({ ts: Date.now() - NOTICE_RETENTION_MS - 1, kind: 'post', title: 'old', body: null, priority: 'normal', source: { kind: 'workspace', id: WS.id }, todoId: null, workspaceId: WS.id, dedupeKey: null, tags: [], delivered: false, heldReason: 'remote', channel: null });
+    await ns.insert({ ts: Date.now(), kind: 'post', title: 'new', body: null, priority: 'normal', source: { kind: 'workspace', id: WS.id }, todoId: null, workspaceId: WS.id, dedupeKey: null, tags: [], delivered: false, heldReason: 'remote', channel: null });
+    await start(inbox);
+    expect((await h!.notices.feed({ sinceTs: 0, limit: 100 })).map((n) => n.title)).toEqual(['new']);
   });
 
   it('stop() unhooks the MCP handlers and is idempotent', async () => {
@@ -333,6 +411,20 @@ describe.skipIf(!isPg)('startHostAutomations on a fenced store', () => {
     expect(broker.created).toEqual([]);
     lost = false;
     expect((await h!.automations.list()).map((a) => [a.name, a.version])).toEqual([['a', 1]]);
+    await inbox.close();
+  });
+
+  it('an RPC action under a lost lease answers 503, writes nothing, and its retry never runs it', async () => {
+    t = await testPgSchema();
+    await InboxStore.openPostgres(t.pool).then((s) => s.close().catch(() => undefined));
+    let lost = false;
+    const inbox = await InboxStore.openPostgres(t.pool, { migrate: false, afterBeginWrite: async () => { if (lost) throw new LeaseLostError('lease lost'); } });
+    await start(inbox);
+    lost = true;
+    expect(await act('inbox:create', { input: { title: 'x' } }, 1)).toEqual({ status: 503, body: { ok: false, error: 'automations unavailable' } });
+    lost = false;
+    expect((await act('inbox:create', { input: { title: 'x' } }, 1)).body).toEqual({ ok: true, result: { replayed: true, result: null, error: null } });
+    expect(await inbox.list({ status: 'all' })).toEqual([]);
     await inbox.close();
   });
 });

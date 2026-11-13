@@ -16,6 +16,7 @@ import type { BrokerOps } from './brokerOps.js';
 import type { HostAutomationEntry } from './config.js';
 import { startHostEmbedder, type HostEmbedder, type HostEmbedderOptions } from './embedder.js';
 import type { EventHub } from './events.js';
+import { pgActionLedger } from './hostActions.js';
 import { startHostAutomations, type HostAutomations } from './hostAutomations.js';
 import { startHostIndexer } from './hostIndexer.js';
 import type { ListenTarget } from './endpoint.js';
@@ -115,6 +116,7 @@ export async function startHolder(o: HolderOptions): Promise<Holder> {
   });
   // Fenced although only read: offsets are written inside ingest's chunk transaction.
   const offsetsRead = postgresKysely<HostDb>(stores.pool, { afterBeginWrite: fence });
+  const ledgerK = postgresKysely<HostDb>(stores.pool, { afterBeginWrite: fence });
   const embedder: HostEmbedder | null = o.search.embedder ? startHostEmbedder({ dir: o.embedDir, log: o.log, ...o.embedder }) : null;
   const indexer = embedder?.state() === 'ready'
     ? startHostIndexer({ embed: embedder.embed, log: o.log, paused: () => embedder.state() !== 'ready' })
@@ -140,6 +142,7 @@ export async function startHolder(o: HolderOptions): Promise<Holder> {
     embedder?.close();
     await ingest.stop();
     await offsetsRead.destroy();
+    await ledgerK.destroy();
     await stores.inbox.close();
     await closeDb();
     await stores.end();
@@ -148,7 +151,8 @@ export async function startHolder(o: HolderOptions): Promise<Holder> {
     await ingest.start();
     if (indexer) void indexer.backfill().catch((err: Error) => o.log.log('warn', 'index backfill failed', { error: err.message }));
     automations = await startHostAutomations({
-      inbox: stores.inbox, workspace: o.workspace, ops: o.ops, owners, mcpArgs: o.mcp.args, events: o.events, log: o.log
+      inbox: stores.inbox, workspace: o.workspace, ops: o.ops, owners, mcpArgs: o.mcp.args, events: o.events, log: o.log,
+      ledger: pgActionLedger(ledgerK)
     });
     await automations.reconcile(o.automations());
   } catch (err) {

@@ -11,6 +11,10 @@ export interface HostDb {
     broker_session_id: string; session_id: string; workspace_id: string; kind: string; provider: string;
     account_id: string; login: string; name: string | null; avatar_url: string | null; started_at: number;
   };
+  host_action_requests: {
+    actor: string; request_id: string; channel: string; created_at: number;
+    settled_at: number | null; result: string | null; error: string | null;
+  };
 }
 
 export const HOST_PG_BASELINE_VERSION = 1;
@@ -75,7 +79,22 @@ CREATE TABLE session_owners (
 CREATE INDEX idx_session_owners_session ON session_owners (session_id, started_at);
 `;
 
+// At-most-once host actions (D128): one row per (actor, request id), kept 24 h.
+const HOST_ACTION_REQUESTS_V4 = `
+CREATE TABLE host_action_requests (
+  actor TEXT COLLATE "C" NOT NULL,
+  request_id TEXT COLLATE "C" NOT NULL,
+  channel TEXT COLLATE "C" NOT NULL,
+  created_at BIGINT NOT NULL,
+  settled_at BIGINT,
+  result TEXT,
+  error TEXT,
+  PRIMARY KEY (actor, request_id)
+);
+CREATE INDEX idx_host_action_requests_created ON host_action_requests (created_at);
+`;
+
 export const HOST_TRACK: PgTrack = {
   track: 'host', baselineVersion: HOST_PG_BASELINE_VERSION, baseline: HOST_PG_BASELINE,
-  steps: [{ version: 2, postgres: HOST_PUBLISH_V2 }, { version: 3, postgres: HOST_SESSION_OWNERS_V3 }]
+  steps: [{ version: 2, postgres: HOST_PUBLISH_V2 }, { version: 3, postgres: HOST_SESSION_OWNERS_V3 }, { version: 4, postgres: HOST_ACTION_REQUESTS_V4 }]
 };

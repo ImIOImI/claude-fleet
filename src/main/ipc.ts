@@ -94,9 +94,12 @@ import { IdentityService } from './identity/identityService.js';
 import { pickGithubClientId, GITHUB_CLIENT_ID_ENV } from './identity/clientId.js';
 import { registerIdentityIpc } from './identityIpc.js';
 import { createRemoteBackend } from './remote.js';
-import { createFederatedReader } from './federation/federatedReader.js';
+import { createFederatedReader, type FederatedReader } from './federation/federatedReader.js';
 import { createSummaryRelay } from './federation/summaryRelay.js';
 import { registerFederationIpc, type LocalSearch } from './federation/federationIpc.js';
+import { registerRemoteAutomationsIpc } from './federation/remoteAutomationsIpc.js';
+import { createRemoteChangeForwarder } from './federation/remoteChanges.js';
+import type { RemoteNotifier } from './federation/remoteNotices.js';
 import { assertNotRemoteSpec, confirmText, registerRemoteIpc, type RemoteConfirm } from './remoteIpc.js';
 import { listEndpoints, saveEndpoint, deleteEndpoint, setEndpointApiKey, probeEndpoint, getEndpoint, type ModelEndpoint } from './endpoints.js';
 import * as fs from './fs.js';
@@ -400,12 +403,45 @@ const federated = createFederatedReader({
   sources: () => (MOCK_MODE ? [] : remoteBackend.sources()),
   rpc: (url, channel, args, timeoutMs) => remoteBackend.clientFor(url).rpc(channel, args, { timeoutMs })
 });
+/** The federated reader, for main-side consumers outside ipc.ts (remote drafting, remote notices). */
+export function remoteFederation(): FederatedReader {
+  return federated;
+}
+const remoteChanges = createRemoteChangeForwarder({
+  isBookmarked: (origin) => !MOCK_MODE && remoteBackend.sources().some((s) => s.id === origin),
+  send: (change) => {
+    for (const w of BrowserWindow.getAllWindows()) {
+      if (w.isDestroyed() || w.webContents.isDestroyed()) continue;
+      try { w.webContents.send('remote:changed', change); } catch { /* mid-teardown */ }
+    }
+  }
+});
 const summaryRelay = createSummaryRelay({
   sources: () => (MOCK_MODE ? [] : remoteBackend.sources()),
   subscribe: (url, on, state) => remoteBackend.clientFor(url).subscribe(on, state),
   fetchSummary: (id) => federated.summary(id, null),
-  broadcast: (workspaceId, summary) => broadcastObservabilitySummary({ workspaceId, summary }, BrowserWindow.getAllWindows())
+  broadcast: (workspaceId, summary) => broadcastObservabilitySummary({ workspaceId, summary }, BrowserWindow.getAllWindows()),
+  onHostChange: (origin, channel) => {
+    remoteChanges.hint(origin, channel);
+    if (channel === 'notices:changed') remoteNoticeSink?.hint(origin);
+  },
+  onConnected: (origin) => {
+    remoteChanges.connected(origin);
+    remoteNoticeSink?.hint(origin);
+  }
 });
+/** The remote notifier (D132), set by the inbox services while they run. */
+let remoteNoticeSink: Pick<RemoteNotifier, 'hint' | 'sync'> | null = null;
+export function setRemoteNoticeSink(s: Pick<RemoteNotifier, 'hint' | 'sync'> | null): void {
+  remoteNoticeSink = s;
+}
+/** Bookmarks come from the manifests, not the probe loop, so a cold start can't forget them (D133). */
+function syncRemoteNotices(): void {
+  if (MOCK_MODE || !remoteNoticeSink) return;
+  void listWorkspaceManifests()
+    .then((ms) => remoteNoticeSink?.sync(ms.filter((m) => m.kind === 'remote').map((m) => m.id)))
+    .catch((e) => logError({ source: 'main', type: 'remote-notices', level: 'warn', message: String(e) }));
+}
 let relayTimer: NodeJS.Timeout | null = null;
 // Started by registerIpc once the identity service exists; writeManifest bumps it.
 let publisher: Publisher | null = null;
@@ -430,6 +466,7 @@ const localSearch: LocalSearch = {
 
 export function stopRemoteBackend(): void {
   summaryRelay.stop();
+  remoteChanges.stop();
   if (relayTimer) clearInterval(relayTimer);
   publisher?.stop();
   remoteBackend.stop();
@@ -762,9 +799,9 @@ export async function hostWorkspaceState(targetId: string): Promise<'running' | 
   return (w?.state as 'running' | 'paused' | 'stopped' | 'deleted' | 'unreachable' | undefined) ?? null;
 }
 
-/** id ↔ name for every known workspace (live and saved). */
-export async function hostWorkspaceNames(): Promise<Array<{ id: string; name: string }>> {
-  return (await listAllWorkspaces()).map((w) => ({ id: w.id, name: w.name }));
+/** id ↔ name for every known workspace (live and saved), remote bookmarks included. */
+export async function hostWorkspaceNames(): Promise<Array<{ id: string; name: string; kind: string }>> {
+  return (await listAllWorkspaces()).map((w) => ({ id: w.id, name: w.name, kind: w.kind }));
 }
 
 /** Find a live renderer PtyHandle for a workspace, if one is attached. */
@@ -2184,6 +2221,7 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
     invalidate: invalidateWorkspaceList
   });
   registerFederationIpc(ipcMain, federated, localSearch);
+  registerRemoteAutomationsIpc(ipcMain, federated);
   if (jsonlWatcher && !MOCK_MODE) {
     publisher = startPublisher({
       manifests: () => listWorkspaceManifests(),
@@ -2203,7 +2241,7 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
     withhold: withholdSession,
     idle: (ws) => publisher?.idle(ws) ?? Promise.resolve()
   });
-  relayTimer = setInterval(() => summaryRelay.sync(), 15_000);
+  relayTimer = setInterval(() => { summaryRelay.sync(); syncRemoteNotices(); }, 15_000);
   relayTimer.unref?.();
   loadoutSources.setGithubTokenProvider(() => identity.packagesToken());
 

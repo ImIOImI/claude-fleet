@@ -1,4 +1,5 @@
 import { useEffect, useState, useCallback, useRef, useReducer, useMemo } from 'react';
+import { withRemoteCounts } from './inboxView';
 import type { RemoteTier } from '../../preload/remoteTypes';
 import { RenameRemoteModal } from './components/RenameRemoteModal';
 import { remotePane, unreachableBanner, unreachableRemoteNames } from './remoteView';
@@ -250,11 +251,21 @@ export function App() {
     load();
     return window.api.automations.onChanged(load);
   }, []);
-  const [inboxCounts, setInboxCounts] = useState<InboxCounts>({ open: 0, urgent: 0, high: 0 });
+  const [localCounts, setLocalCounts] = useState<InboxCounts>({ open: 0, urgent: 0, high: 0 });
   useEffect(() => {
-    void window.api.inbox.counts().then(setInboxCounts);
-    return window.api.inbox.onChanged(setInboxCounts);
+    void window.api.inbox.counts().then(setLocalCounts);
+    return window.api.inbox.onChanged(setLocalCounts);
   }, []);
+  // D137: the chip adds remote counts; the tray, taskbar and dock (main) stay local-only.
+  const [remoteCounts, setRemoteCounts] = useState<Required<InboxCounts>>({ open: 0, urgent: 0, high: 0, approvals: 0 });
+  useEffect(() => {
+    const load = () => void window.api.remoteInbox.counts().then(({ unavailable: _u, ...c }) => setRemoteCounts(c)).catch(() => undefined);
+    load();
+    const t = setInterval(load, 30_000);
+    const off = window.api.remote.onChanged((c) => { if (c.channel === 'inbox:changed' || c.channel === 'proposals:changed') load(); });
+    return () => { clearInterval(t); off(); };
+  }, []);
+  const inboxCounts = useMemo(() => withRemoteCounts(localCounts, remoteCounts), [localCounts, remoteCounts]);
   // A pushed status is newer than the fetched one. main broadcasts
   // inbox:changed when the Postgres store becomes ready.
   const [storeStatus, setStoreStatus] = useState<StoreStatus | null>(null);
@@ -1575,7 +1586,7 @@ export function App() {
                   const w = roleWsId ? workspaces.find((x) => x.id === roleWsId) : undefined;
                   return w ? { id: w.id, name: w.name, running: w.state === 'running' || w.state === 'paused' } : null;
                 })()}
-                workspaces={workspaces.filter((w) => w.state !== 'deleted').map((w) => ({ id: w.id, name: w.name, kind: w.kind }))}
+                workspaces={workspaces.filter((w) => w.state !== 'deleted').map((w) => ({ id: w.id, name: w.name, kind: w.kind, remoteTier: w.remote?.tier ?? null }))}
                 onCreateAutomationsWs={() => {
                   setCloneSource({ name: 'automations', kind: 'container', image: 'ghcr.io/imioimi/claude-fleet/runner-devops:latest' });
                   setAssignRoleOnCreate(true);

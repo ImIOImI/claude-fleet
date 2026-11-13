@@ -1,7 +1,8 @@
 import { describe, it, expect, afterEach } from 'vitest';
 import { InboxStore } from './inboxDb.js';
 import { NotifyStore } from './notifyStore.js';
-import { createNotifyService, INPUT_WAIT_DELAY_MS } from './notifyService.js';
+import { createNotifyService, INPUT_WAIT_DELAY_MS, todoNoticeInput } from './notifyService.js';
+import { remoteNoticeInput } from '../federation/remoteNotices.js';
 import type { NotificationRow } from '../../preload/inboxTypes.js';
 import { openTestInbox, countQueries, settle } from '../store/testStore.js';
 
@@ -51,6 +52,24 @@ describe('request + delivery', () => {
     const b = await svc.request({ kind: 'post', title: 'muted', priority: 'urgent', source: { kind: 'workspace', id: 'W1' } });
     expect(b).toMatchObject({ delivered: false, heldReason: `rule:${r.id}`, channel: null });
     expect(delivered.map((n) => n.title)).toEqual(['hi']);
+  });
+});
+
+describe('forceHold', () => {
+  it('forceHold records the notification held with that reason, whatever the rules say', async () => {
+    const { svc, delivered } = await setup();
+    const row = await svc.request({ kind: 'post', title: 'x', priority: 'urgent', source: { kind: 'workspace', id: 'W' }, forceHold: 'remote-rate' });
+    expect(row).toMatchObject({ delivered: false, heldReason: 'remote-rate' });
+    expect(delivered).toEqual([]);
+  });
+});
+
+describe('todoNoticeInput', () => {
+  it('is null unless asked or an urgent arrival; titles and bodies like the desktop', () => {
+    expect(todoNoticeInput(todo() as never, 'created', false, 'ops')).toBeNull();
+    expect(todoNoticeInput(todo({ priority: 'urgent' }) as never, 'updated', false, 'ops')).toBeNull();
+    expect(todoNoticeInput(todo({ seenCount: 3 }) as never, 'reopened', true, 'ops')).toMatchObject({ kind: 'todo', title: 'prod-api 5xx', body: 'ops · seen 3× · reopened', todoId: 'T1', dedupeKey: 'k' });
+    expect(todoNoticeInput(todo({ priority: 'urgent' }) as never, 'created', false, 'ops')).toMatchObject({ title: 'Urgent · prod-api 5xx', priority: 'urgent' });
   });
 });
 
@@ -217,5 +236,32 @@ describe('tick serialization', () => {
     const [a, b] = await Promise.all([svc.tick(), svc.tick()]);
     expect([a, b].filter((n) => n?.kind === 'digest')).toHaveLength(1);
     expect(delivered.filter((n) => n.kind === 'digest')).toHaveLength(1);
+  });
+});
+
+describe('remote notices meet the local policy (D132)', () => {
+  const R = '01JC0000000000000000000000';
+  const notice = (over: Record<string, unknown> = {}) => remoteNoticeInput(
+    { id: '01JC0000000000000000000001', ts: 0, kind: 'post', title: 'deploy failed', body: null, priority: 'urgent', dedupeKey: 'deploy', ...over } as never,
+    R, 'review-bot', null
+  );
+
+  it('a muted remote workspace holds its notices, whatever key the host sends', async () => {
+    const { store, svc, delivered } = await setup();
+    await store.setRule({ scopeKind: 'source', scopeValue: `workspace:${R}`, level: 'off', snoozeUntil: null });
+    const row = await svc.request(notice());
+    expect(row).toMatchObject({ delivered: false, workspaceId: R, source: { kind: 'workspace', id: R }, tags: [] });
+    expect(row.heldReason).toMatch(/^rule:/);
+    expect(await svc.request(notice({ dedupeKey: 'something-else' }))).toMatchObject({ delivered: false });
+    expect(delivered).toEqual([]);
+  });
+
+  it('a pause holds them too, and an unmuted one is delivered under its name', async () => {
+    const { store, svc, delivered, at } = await setup();
+    await store.setPause({ until: at() + 60_000, letUrgent: false, setAt: at() } as never);
+    expect(await svc.request(notice({ priority: 'normal' }))).toMatchObject({ delivered: false, heldReason: 'pause' });
+    await store.clearPause();
+    expect(await svc.request(notice({ priority: 'normal' }))).toMatchObject({ delivered: true, title: 'review-bot · deploy failed' });
+    expect(delivered).toHaveLength(1);
   });
 });

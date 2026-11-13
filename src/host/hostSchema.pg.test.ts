@@ -20,7 +20,7 @@ describe.skipIf(!isPg)('host track', () => {
     await expect(k.insertInto('publish_sessions').values({ session_id: 's2', partition_id: 'pub_zz', source_session_id: 'y', first_published_at: 1, last_published_at: 1 }).execute())
       .rejects.toThrow(/foreign key/i);
     const v = await sql<{ version: number }>`SELECT version FROM schema_migrations WHERE track = 'host'`.execute(k);
-    expect(Number(v.rows[0].version)).toBe(3);
+    expect(Number(v.rows[0].version)).toBe(4);
   });
 
   it('v3 adds session_owners: one row per broker and claude session, people, machines and automation runs only', async () => {

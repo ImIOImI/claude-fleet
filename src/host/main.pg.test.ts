@@ -227,6 +227,29 @@ describe.skipIf(!isPg)('runHost on Postgres', () => {
     await vi.waitFor(async () => expect((await versions())[0].version).toBe(2), { timeout: 10_000 });
   }, 30_000);
 
+  it('automation RPC: reads the holder runtime; an action is claimed in the fenced ledger once and recorded as the person', async () => {
+    const auto = 'automations:\n  - definition: { name: nightly, triggers: [{ manual: {} }], steps: [{ id: go, prompt: { workspace: $self, mode: fresh, message: hi } }] }\n';
+    const a = await start({}, undefined, auto);
+    await vi.waitFor(async () => expect(await leader(a.url)).toBe(200), { timeout: 10_000 });
+    const call = async (channel: string, args: unknown[]) => {
+      const res = await fetch(`${a.url}/rpc/${channel}`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${TOKEN}` }, body: JSON.stringify({ args })
+      });
+      return { status: res.status, body: (await res.json()) as Record<string, any> };
+    };
+    await vi.waitFor(async () => expect((await call('automations:list', [])).body.result.rows.map((r: { name: string }) => r.name)).toEqual(['nightly']), { timeout: 10_000 });
+    const RID = '0b6f8f0e-4b1c-4c2a-9a0e-1f2e3d4c5b6a';
+    const one = await call('inbox:create', [{ requestId: RID, input: { title: 'look' } }]);
+    const two = await call('inbox:create', [{ requestId: RID, input: { title: 'look' } }]);
+    expect([one.body.result.replayed, two.body.result.replayed]).toEqual([false, true]);
+    expect(two.body.result.result).toEqual(one.body.result.result);
+    const todos = await t!.pool.query(`SELECT title, source_kind, source_id FROM ${t!.schema}.todos`);
+    expect(todos.rows).toEqual([{ title: 'look', source_kind: 'user', source_id: 'owner' }]);
+    const ledger = await t!.pool.query(`SELECT actor, request_id, channel, error FROM ${t!.schema}.host_action_requests`);
+    expect(ledger.rows).toEqual([{ actor: 'github:1', request_id: RID, channel: 'inbox:create', error: null }]);
+    expect((await call('inbox:counts', [])).body.result).toMatchObject({ open: 1 });
+  }, 30_000);
+
   it('one holder and one ready standby; the standby takes over after the holder stops', async () => {
     const a = await start();
     await vi.waitFor(async () => expect(await leader(a.url)).toBe(200), { timeout: 10_000 });

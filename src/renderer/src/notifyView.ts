@@ -100,6 +100,8 @@ export function heldReasonLabel(reason: string | null, rules: NotifyRule[], down
     if (!r) return 'held by a rule you removed';
     return `held by rule: ${ruleScopeLabel(r.scopeKind, r.scopeValue, names)} → ${LEVEL_LABELS[r.level]}`;
   }
+  if (reason === 'remote-rate') return 'held: too many from this remote workspace this minute';
+  if (reason === 'remote-late') return 'held: arrived while this desktop was away';
   return reason;
 }
 

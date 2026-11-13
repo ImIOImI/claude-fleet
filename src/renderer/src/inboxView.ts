@@ -20,6 +20,16 @@ export function sourceLabel(s: TodoSource, names: Record<string, string>): strin
   return (s.id && names[s.id]) || 'automation';
 }
 
+/** The Inbox chip's counts: local plus every reachable host's (D137). */
+export function withRemoteCounts(local: InboxCounts, remote: Required<InboxCounts>): InboxCounts {
+  return {
+    open: local.open + remote.open,
+    urgent: local.urgent + remote.urgent,
+    high: local.high + remote.high,
+    approvals: (local.approvals ?? 0) + remote.approvals
+  };
+}
+
 export function chipSubline(c: InboxCounts): string {
   const approve = c.approvals ? ` · ${c.approvals} to approve` : '';
   if (c.open === 0) return c.approvals ? `${c.approvals} to approve` : 'nothing open';
@@ -40,9 +50,10 @@ export function relativeAgo(ms: number, now = Date.now()): string {
   return `${Math.floor(d / 86_400_000)}d ago`;
 }
 
-export function eventLabel(e: TodoEvent, names: Record<string, string>): string {
-  const who = sourceLabel(e.actor, names);
+/** `who` overrides the actor label (a remote todo's actor isn't "You"). */
+export function eventLabel(e: TodoEvent, names: Record<string, string>, who = sourceLabel(e.actor, names)): string {
   const d = e.detail ?? {};
+  const tags = Array.isArray(d.tags) ? d.tags.map(String) : [];
   switch (e.kind) {
     case 'created': return `Created by ${who}`;
     case 'seen': return `Seen again by ${who}`;
@@ -50,8 +61,8 @@ export function eventLabel(e: TodoEvent, names: Record<string, string>): string 
     case 'status': return `${who} marked it ${String(d.to)}`;
     case 'priority': return `${who} set priority to ${String(d.to)}`;
     case 'title': return `${who} renamed it`;
-    case 'tag_add': return `${who} added tag${(d.tags as string[]).length > 1 ? 's' : ''} ${(d.tags as string[]).join(', ')}`;
-    case 'tag_remove': return `${who} removed tag${(d.tags as string[]).length > 1 ? 's' : ''} ${(d.tags as string[]).join(', ')}`;
+    case 'tag_add': return `${who} added tag${tags.length > 1 ? 's' : ''} ${tags.join(', ')}`;
+    case 'tag_remove': return `${who} removed tag${tags.length > 1 ? 's' : ''} ${tags.join(', ')}`;
     case 'body_append': return `${who} added detail`;
   }
 }

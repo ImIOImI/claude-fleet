@@ -16,10 +16,16 @@ export type RpcRegistry = ReadonlyMap<string, RpcChannel>;
 export class RpcArgError extends Error {}
 export class RpcForbiddenError extends Error {}
 export class RpcUnavailableError extends Error {}
+export class RpcBusyError extends Error {
+  constructor(message: string, readonly retryAfterSec: number) {
+    super(message);
+  }
+}
 
 export interface RpcResponse {
   status: number;
   body: { ok: true; result: unknown } | { ok: false; error: string };
+  retryAfterSec?: number;
 }
 
 export async function dispatchRpc(reg: RpcRegistry, channel: string, body: unknown, caller: Principal, log?: Logger): Promise<RpcResponse> {
@@ -33,6 +39,7 @@ export async function dispatchRpc(reg: RpcRegistry, channel: string, body: unkno
   } catch (err) {
     if (err instanceof RpcArgError) return { status: 400, body: { ok: false, error: err.message } };
     if (err instanceof RpcForbiddenError) return { status: 403, body: { ok: false, error: err.message } };
+    if (err instanceof RpcBusyError) return { status: 429, body: { ok: false, error: err.message }, retryAfterSec: err.retryAfterSec };
     if (err instanceof RpcUnavailableError) return { status: 503, body: { ok: false, error: err.message } };
     log?.log('error', 'rpc handler failed', { channel, error: err });
     return { status: 500, body: { ok: false, error: 'internal error' } };

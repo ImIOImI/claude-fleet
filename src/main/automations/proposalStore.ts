@@ -46,4 +46,12 @@ export class ProposalStore {
       .set({ status: p.status, items: JSON.stringify(p.items), note: p.note, decided_at: p.decidedAt })
       .where('id', '=', p.id).execute();
   }
+
+  /** Compare-and-set: saves only while the row is still pending with the items as read; false when another decision landed first. */
+  async saveIfPending(p: Proposal, readItems: ProposalItem[]): Promise<boolean> {
+    const r = await this.db.updateTable('proposals')
+      .set({ status: p.status, items: JSON.stringify(p.items), note: p.note, decided_at: p.decidedAt })
+      .where('id', '=', p.id).where('status', '=', 'pending').where('items', '=', JSON.stringify(readItems)).executeTakeFirst();
+    return Number(r.numUpdatedRows) > 0;
+  }
 }

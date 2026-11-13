@@ -110,4 +110,18 @@ describe.skipIf(!isPg)('host automations under the lease', () => {
     expect(started).toBe(1);
     expect(a.broker.created).toEqual([]);
   });
+
+  it('a notice is a fenced write: a superseded holder cannot record one', async () => {
+    const lease = await setup();
+    const clock = { now: Date.parse('2026-11-06T02:00:00Z') };
+    const eb = (await lease.tryAcquire('b', 0, 60_000))!;
+    const b = await host('b', () => eb, clock);
+    await t!.pool.query(`UPDATE ${t!.schema}.host_lease SET expires_at = clock_timestamp() - interval '1 second'`);
+    const ea = (await lease.tryAcquire('a', 0, 60_000))!;
+    const a = await host('a', () => ea, clock);
+    await expect(b.h.notices.request({ kind: 'post', title: 'x', priority: 'normal', source: { kind: 'workspace', id: WS.id } })).rejects.toThrow(/lease|holder|epoch/i);
+    await a.h.notices.request({ kind: 'post', title: 'y', priority: 'normal', source: { kind: 'workspace', id: WS.id } });
+    const rows = await t!.pool.query(`SELECT title, delivered, held_reason FROM ${t!.schema}.notifications`);
+    expect(rows.rows).toEqual([{ title: 'y', delivered: 0, held_reason: 'remote' }]);
+  });
 });

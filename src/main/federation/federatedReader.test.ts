@@ -216,4 +216,46 @@ describe('FederatedReader', () => {
       expect(r.sources().map((s) => s.id)).toEqual([B]);
     });
   });
+
+  it('each: one bounded read per running source, sorted by origin; a parse failure is protocol', async () => {
+    const rpc = vi.fn(async (url: string) => (url === `http://${B}` ? { bad: 1 } : 7));
+    const r = createFederatedReader({ sources: () => [src(B, 'running'), src(A, 'running'), src(C, null)], rpc });
+    const out = await r.each('x:list', [], (v, s) => {
+      if (typeof v !== 'number') throw new Error('shape');
+      return `${s.id}:${v}`;
+    });
+    expect(out.values.map((x) => x.value)).toEqual([`${A}:7`]);
+    expect(out.unavailable).toEqual([{ origin: B, name: 'n1', reason: 'protocol' }, { origin: C, name: 'n2', reason: 'checking' }]);
+    expect(rpc).toHaveBeenCalledTimes(2);
+  });
+
+  it('one: undefined for an unknown origin; act is never shared with a concurrent identical call and uses the action bound', async () => {
+    const rpc = vi.fn(async () => ({ replayed: false, result: { id: 'T' }, error: null }));
+    const r = createFederatedReader({ sources: () => [src(A, 'running')], rpc });
+    expect(await r.one(B, 'x', [], (v) => v)).toBeUndefined();
+    const [x, y] = await Promise.all([r.act(A, 'inbox:create', { k: 1 }), r.act(A, 'inbox:create', { k: 1 })]);
+    expect(x).toEqual({ ok: true, replayed: false, result: { id: 'T' } });
+    expect(y).toEqual(x);
+    expect(rpc).toHaveBeenCalledTimes(2);
+    expect(rpc).toHaveBeenLastCalledWith(`http://${A}`, 'inbox:create', [{ k: 1 }], 15_000);
+  });
+
+  it('act on a not-yet-probed source says it is still being checked, not unreachable', async () => {
+    const r = createFederatedReader({ sources: () => [src(A, null)], rpc: vi.fn() });
+    expect(await r.act(A, 'inbox:create', { k: 1 })).toEqual({ ok: false, kind: 'unavailable', message: 'n0 is still being checked' });
+  });
+
+  it('act on a probed-down source keeps the "unreachable" wording', async () => {
+    const r = createFederatedReader({ sources: () => [src(A, 'unreachable')], rpc: vi.fn() });
+    expect(await r.act(A, 'inbox:create', { k: 1 })).toEqual({ ok: false, kind: 'unavailable', message: "n0 is unreachable; try again when it's back" });
+  });
+
+  it('act names the source in a write-timeout message, and keeps the request id (unavailable, not failed)', async () => {
+    const rpc = vi.fn(async () => { throw new RemoteError('unreachable', `http://${A} is not reachable (timed out); check your network or VPN`); });
+    const r = createFederatedReader({ sources: () => [src(A, 'running')], rpc });
+    expect(await r.act(A, 'inbox:create', { k: 1 })).toEqual({
+      ok: false, kind: 'unavailable', message: 'No answer from n0 in 15 s; it may have gone through. Retrying is safe (same request).'
+    });
+  });
 });
+

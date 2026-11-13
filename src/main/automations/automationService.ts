@@ -25,6 +25,8 @@ export interface AutomationDeps extends Omit<RunnerDeps, 'store'> {
   store: AutomationStore;
   /** Resolve a workspace id or name to an id. */
   resolveWorkspace(idOrName: string): string | null;
+  /** Why an unresolved workspace can't be targeted here (a remote bookmark); null = unknown. */
+  refuseWorkspace?(idOrName: string): string | null;
   notify?: (n: NotifyInput) => unknown;
   changed(): void;
   /** Injected for tests; default setTimeout/clearTimeout (event debounce). */
@@ -86,7 +88,7 @@ export function createAutomationService(deps: AutomationDeps) {
   const setTimer = deps.setTimer ?? ((fn: () => void, ms: number) => setTimeout(fn, ms));
   const clearTimer = deps.clearTimer ?? ((h: unknown) => clearTimeout(h as ReturnType<typeof setTimeout>));
 
-  const ctx = { workspace: (v: string) => deps.resolveWorkspace(v), get hostShells() { return deps.hostShells?.(); }, check: deps.checkDefinition };
+  const ctx = { workspace: (v: string) => deps.resolveWorkspace(v), refusal: (v: string) => deps.refuseWorkspace?.(v) ?? null, get hostShells() { return deps.hostShells?.(); }, check: deps.checkDefinition };
 
   /** Registers a background run for settle(); a failure goes to onError, never an unhandled rejection. */
   function track(p: Promise<unknown>): void {
