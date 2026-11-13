@@ -665,6 +665,20 @@ describe('callTool diagnostics', () => {
     await new Promise((r) => setTimeout(r, 20));
   });
 
+  it('a fire-and-forget client (sends, then ends its side) gets no dropped-reply warning', async () => {
+    harness = makeFileDb();
+    _setDbForTests(harness.db);
+    const writes: string[] = [];
+    const sock = Object.assign(new CloseEmitter(), { write: (x: string) => { writes.push(x); return true; }, destroyed: false, writableEnded: false });
+    trackConnection('tcp', WS_A, sock as never).rpcCount++;
+    dispatchLineForTests(JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'list_sessions', arguments: {} } }), sock, WS_A);
+    sock.emit('end');
+    sock.writableEnded = true;
+    await new Promise((r) => setTimeout(r, 50));
+    expect(writes).toEqual([]);
+    expect(rows.filter((r) => r.type === 'mcp-reply-dropped')).toEqual([]);
+  });
+
   it('a normal short call writes no connection rows', async () => {
     harness = makeFileDb();
     _setDbForTests(harness.db);

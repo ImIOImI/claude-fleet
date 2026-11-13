@@ -426,6 +426,7 @@ export function trackConnection(
   callerId: string,
   sock: Socket
 ): { rpcCount: number } {
+  sock.on('end', () => clientEnded.add(sock));
   const openedAt = Date.now();
   const conn = { rpcCount: 0 };
   let longLived = false;
@@ -461,6 +462,10 @@ export function trackConnection(
 const MAX_TOOL_ERROR_CHARS = 4_096;
 export const MAX_IN_FLIGHT_PER_CONNECTION = 16;
 const inFlight = new WeakMap<Out, number>();
+/** Connections whose client ended its side (FIN) on purpose. The runner's
+ *  hooks send one call through socat and never read the reply, so a reply
+ *  lost there isn't request loss. */
+const clientEnded = new WeakSet<object>();
 
 /** Test-only: dispatch one request line as `callerId` on a fake connection. */
 export function dispatchLineForTests(line: string, sock: Out, callerId: string): void {
@@ -491,6 +496,7 @@ export function dispatchLine(line: string, sock: Out, callerId: string): void {
     // After the client's FIN the socket is ended (not yet destroyed): a write would be lost too.
     const s = sock as Partial<Socket>;
     if (s.destroyed || s.writableEnded || s.writable === false) {
+      if (clientEnded.has(sock)) return;
       logError({
         source: 'main',
         type: 'mcp-reply-dropped',
