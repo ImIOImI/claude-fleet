@@ -73,7 +73,12 @@ async function download(fetchImpl: typeof fetch, url: string, dest: string, limi
     if (sha256 && got !== sha256) throw new Error(`download ${url}: sha256 ${got}, expected ${sha256}`);
     await rename(tmp, dest);
   } catch (e) {
-    out.destroy();
+    // The stream opens its file asynchronously: wait for close, or the open lands after the rm.
+    await new Promise<void>((resolve) => {
+      if (out.closed) { resolve(); return; }
+      out.once('close', () => resolve());
+      out.destroy();
+    });
     await rm(tmp, { force: true });
     throw ctl.signal.aborted ? ctl.signal.reason : e;
   } finally {
