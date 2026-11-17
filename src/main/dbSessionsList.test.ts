@@ -1,9 +1,13 @@
 // listSessions() tags enrichment: each row carries the tags of its LATEST
 // tagged summary chapter (ordered as emitted), [] when none exists.
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { ingestLine, listSessions, sessionsWithPendingTurns, latestActivityByWorkspace, latestSessionId } from './db.js';
+import {
+  ingestLine, listSessions, listSessionsQuery, LIST_TITLE_CHARS, sessionsWithPendingTurns, latestActivityByWorkspace, latestSessionId,
+  stateKysely, withRawSqlite,
+} from './db.js';
 import { EMBED_MODEL_ID } from './vectors.js';
-import { openTestState, type TestState } from './store/testStore.js';
+import { explainPlan } from './state/explainPlan.js';
+import { openTestState, isPg, type TestState } from './store/testStore.js';
 
 const WS = '01WS';
 const userLine = (uuid: string, content: string) =>
@@ -49,6 +53,25 @@ describe('listSessions tags', () => {
     expect(rows).toHaveLength(1);
     expect(rows[0].id).toBe('ses-a');
     expect(rows[0].tags).toEqual(['alpha']);
+  });
+});
+
+describe('listSessions title head', () => {
+  it(`returns at most ${LIST_TITLE_CHARS} chars of the first user message, short ones whole`, async () => {
+    const long = 'é'.repeat(LIST_TITLE_CHARS + 2000);
+    await ingestLine(WS, 'ses-long', userLine('u1', long));
+    await ingestLine(WS, 'ses-short', userLine('u2', 'short prompt'));
+    const byId = new Map((await listSessions()).map((r) => [r.id, r]));
+    expect(byId.get('ses-long')!.firstUserMessage).toBe('é'.repeat(LIST_TITLE_CHARS));
+    expect(byId.get('ses-short')!.firstUserMessage).toBe('short prompt');
+  });
+
+  it.skipIf(isPg)('session query is one scan plus the indexed headless probe (EXPLAIN QUERY PLAN pin)', async () => {
+    for (const ws of [undefined, WS]) {
+      const plan = await withRawSqlite((d) => explainPlan(d, listSessionsQuery(stateKysely(), ws)));
+      expect(plan).toMatch(/SEARCH b USING INDEX idx_broker_sessions_claude \(claude_session_id=\?\)/);
+      expect(plan).not.toMatch(/\bevents\b/);
+    }
   });
 });
 
