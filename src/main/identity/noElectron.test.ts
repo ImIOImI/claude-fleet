@@ -4,6 +4,7 @@
 //   - relative `.js` siblings that stay inside src/main/identity/;
 //   - `../vaultScopes.js` (pure);
 //   - `../../preload/identityTypes.js`, type-only (`import type` / `export type`);
+//   - `../../preload/githubClientId.js` (pure, import-free; checked below);
 //   - `node:*` builtins.
 // Anything else — electron, electron/main, ../vault.js, ../db.js, a bare
 // package, an extensionless path, a non-literal import()/require(), createRequire — fails.
@@ -52,6 +53,7 @@ function extractSpecifiers(src: string): Specifier[] {
 const ROOT = '/src/main/identity';
 const VAULT_SCOPES = '/src/main/vaultScopes.js';
 const PRELOAD_TYPES = '/src/preload/identityTypes.js';
+const PRELOAD_CLIENT_ID = '/src/preload/githubClientId.js';
 
 /** Null when allowed; otherwise why not. `fileRel` is the importing file's path relative to identity/. */
 function violation(fileRel: string, s: Specifier): string | null {
@@ -60,7 +62,7 @@ function violation(fileRel: string, s: Specifier): string | null {
   if (!s.spec.endsWith('.js')) return `relative specifier ${s.spec} must end in .js`;
   const resolved = posix.resolve(posix.dirname(posix.join(ROOT, fileRel)), s.spec);
   if (resolved.startsWith(`${ROOT}/`)) return null;
-  if (resolved === VAULT_SCOPES) return null;
+  if (resolved === VAULT_SCOPES || resolved === PRELOAD_CLIENT_ID) return null;
   if (resolved === PRELOAD_TYPES) return s.typeOnly ? null : `${s.spec} must be imported type-only`;
   return `${s.spec} leaves src/main/identity/`;
 }
@@ -106,6 +108,7 @@ describe('identity import guard (extractor + allowlist)', () => {
     ['type-only preload types', `import type { AccountStatus } from '../../preload/identityTypes.js';`],
     ['type-only preload re-export', `export type { AccountStatus } from '../../preload/identityTypes.js';`],
     ['a node: builtin', `import { createHash } from 'node:crypto';`],
+    ['../../preload/githubClientId.js', `import { resolveGithubClientId } from '../../preload/githubClientId.js';`],
     ['words in comments', `// imports it unchanged; require a token\nconst x = 1;`]
   ])('allows %s', (_label, src) => {
     expect(check(src)).toEqual([]);
@@ -125,6 +128,9 @@ function walk(dir: string): string[] {
 }
 
 describe('src/main/identity has no electron dependency', () => {
+  it('preload/githubClientId.ts imports nothing', () => {
+    expect(extractSpecifiers(readFileSync(join(__dirname, '../../preload/githubClientId.ts'), 'utf8'))).toEqual([]);
+  });
   const files = walk(__dirname);
   it('has modules to check', () => {
     expect(files.length).toBeGreaterThan(0);

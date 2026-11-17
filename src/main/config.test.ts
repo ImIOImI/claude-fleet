@@ -55,12 +55,15 @@ const {
   getKeepRunningInTray,
   setKeepRunningInTray,
   getGithubClientIdConfig,
+  setGithubClientIdConfig,
   getStoreConfig,
   setStoreChoice,
   configUnreadablePath,
   getUndeclaredToastAfterSec
 } = await import('./config.js');
 const { ConfigJsonError } = await import('./store/storeConfig.js');
+const { readGithubClientId } = await import('./githubClientIdIpc.js');
+const { IdentityService } = await import('./identity/identityService.js');
 
 const configPath = () => join(userDataDir, 'config.json');
 
@@ -632,6 +635,55 @@ describe('identity.github.clientId', () => {
     await setKeepRunningInTray(true);
     const disk = JSON.parse(await readFile(configPath(), 'utf8'));
     expect(disk.identity).toEqual({ github: { clientId: 'Iv1.orgowned1' } });
+  });
+
+  it('set and clear round-trip through config.json and keep other keys', async () => {
+    const root = join(userDataDir, 'fleet');
+    await setFleetRoot(root);
+    await setKeepRunningInTray(true);
+    await setGithubClientIdConfig('Ov23liOrgOwned');
+    _resetConfigCacheForTests();
+    expect(await getGithubClientIdConfig()).toBe('Ov23liOrgOwned');
+    let disk = JSON.parse(await readFile(configPath(), 'utf8'));
+    expect(disk).toMatchObject({ fleetRoot: root, keepRunningInTray: true, identity: { github: { clientId: 'Ov23liOrgOwned' } } });
+
+    await setGithubClientIdConfig(null);
+    _resetConfigCacheForTests();
+    expect(await getGithubClientIdConfig()).toBeNull();
+    disk = JSON.parse(await readFile(configPath(), 'utf8'));
+    expect(disk.identity).toBeUndefined();
+    expect(disk).toMatchObject({ fleetRoot: root, keepRunningInTray: true });
+  });
+
+  it('refuses an invalid value and leaves the file alone', async () => {
+    await setGithubClientIdConfig('Iv1.kept');
+    for (const bad of ['has space', 'x'.repeat(101), 'Iv1/abc']) {
+      await expect(setGithubClientIdConfig(bad)).rejects.toThrow(/client ID/);
+    }
+    _resetConfigCacheForTests();
+    expect(await getGithubClientIdConfig()).toBe('Iv1.kept');
+  });
+
+  it('the next sign-in uses a newly saved value without a restart', async () => {
+    const deps = { env: () => undefined, getConfig: getGithubClientIdConfig, setConfig: setGithubClientIdConfig, builtin: '' };
+    const requestDeviceCode = vi.fn(async () => ({
+      deviceCode: 'dc',
+      userCode: 'U-1',
+      verificationUri: 'https://github.com/login/device',
+      expiresAt: 900_000,
+      intervalMs: 5000
+    }));
+    const svc = new IdentityService({
+      vault: { isVaultAvailable: async () => false, getSecret: async () => null, setSecret: async () => {}, deleteAllForWorkspace: async () => {} },
+      clientId: async () => (await readGithubClientId(deps)).value,
+      github: { requestDeviceCode, pollDeviceToken: vi.fn(), probe: vi.fn() }
+    });
+    await expect(svc.signInStart()).rejects.toThrow(/not-configured/);
+    await setGithubClientIdConfig('Iv1.first');
+    await svc.signInStart();
+    await setGithubClientIdConfig('Ov23liSecond');
+    await svc.signInStart();
+    expect(requestDeviceCode.mock.calls.map((c) => (c as unknown[])[0])).toEqual(['Iv1.first', 'Ov23liSecond']);
   });
 });
 

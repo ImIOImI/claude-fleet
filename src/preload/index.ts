@@ -12,6 +12,8 @@ export type {
   Proposal, ProposalItem, ProposalKind, ProposalStatus, ItemDecision, LoadoutAutomationPreview, ScriptStepDef, PromptStepDef, HostShell, ScriptShell
 } from './inboxTypes';
 import type { AccountStatus, SignInStart, SignInPoll } from './identityTypes';
+import type { GithubClientIdSetting } from './githubClientId';
+export type { GithubClientIdSetting, GithubClientIdSource } from './githubClientId';
 export type { AccountStatus, AccountIdentity, AccountSso, SignInStart, SignInPoll } from './identityTypes';
 import type { OwnerCostRow, SessionOwner } from './sessionOwner';
 export type { OwnerCostRow, SessionOwner } from './sessionOwner';
@@ -709,7 +711,12 @@ const api = {
       ipcRenderer.invoke('config:setKnowledgeCapture', enabled),
     /** App-wide daily cap on knowledge-capture runs (#483 §5a); clamped 0–500 in main. */
     setKnowledgeCaptureDailyCap: (n: number): Promise<void> =>
-      ipcRenderer.invoke('config:setKnowledgeCaptureDailyCap', n)
+      ipcRenderer.invoke('config:setKnowledgeCaptureDailyCap', n),
+    /** Settings → Account: the effective GitHub OAuth client id and where it came from. */
+    getGithubClientId: (): Promise<GithubClientIdSetting> => ipcRenderer.invoke('config:getGithubClientId'),
+    /** Save (or clear, with null) the config value. Rejects on an invalid id or while the env var is set. */
+    setGithubClientId: (value: string | null): Promise<GithubClientIdSetting> =>
+      ipcRenderer.invoke('config:setGithubClientId', value)
   },
   usage: {
     /** Total tokens spent across the fleet in the trailing rolling window —

@@ -11,6 +11,7 @@ import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { assertValidWorkspaceId } from './paths.js';
 import { toggleFavorite } from './ociCore.js';
 import { clampDailyCap } from '../preload/captureSettings.js';
+import { isValidGithubClientId } from '../preload/githubClientId.js';
 import { ConfigJsonError, parseStoreConfig, type StoreConfig } from './store/storeConfig.js';
 
 /** Which plan the usage bar measures spend against. `custom` uses the
@@ -106,7 +107,7 @@ interface AppConfig {
   perfOtlp?: { enabled: boolean; endpoint: string };
   /** Closing the window keeps the app running in the tray (#407 Phase 2b). Default off. */
   keepRunningInTray?: boolean;
-  /** Hand-edited only: an org's own GitHub OAuth app. Env
+  /** Set from Settings → Account: an org's own GitHub OAuth app. Env
    *  CLAUDE_FLEET_GITHUB_CLIENT_ID wins (identity/clientId.ts). */
   identity?: { github?: { clientId?: string } };
   /** Background knowledge capture, global switch (#483). Absent ⇒ default ON;
@@ -420,6 +421,16 @@ export async function setStoreChoice(choice: 'sqlite' | 'managed'): Promise<void
 /** config.json identity.github.clientId, or null. Validation and precedence: identity/clientId.ts. */
 export async function getGithubClientIdConfig(): Promise<string | null> {
   return (await read()).identity?.github?.clientId ?? null;
+}
+
+/** Settings → Account. Null clears the key; an invalid id throws without writing. */
+export async function setGithubClientIdConfig(value: string | null): Promise<void> {
+  const v = value?.trim() || null;
+  if (v !== null && !isValidGithubClientId(v)) {
+    throw new Error("Invalid GitHub OAuth client ID: use 1-100 letters, digits, '.', '_' or '-'");
+  }
+  const cfg = await read();
+  await write({ ...cfg, identity: v ? { github: { clientId: v } } : undefined });
 }
 
 /** Seconds an undeclared scanned port must keep serving before fallback preview; 0 when absent/invalid. */

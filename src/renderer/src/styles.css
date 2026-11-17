@@ -1628,6 +1628,10 @@ button.obs-ws-row:hover .obs-ws-icon { opacity: 1; color: var(--ink); }
 }
 .input-with-button button:disabled { opacity: 0.5; cursor: not-allowed; }
 
+/* Settings → Account: GitHub OAuth client id field. */
+.client-id-block { margin-bottom: 14px; }
+.client-id-label { display: block; margin: 6px 0 4px; }
+
 /* ── SettingsModal: grouped sections + setting rows ─────────────────── */
 .settings-section { margin-bottom: 18px; }
 .settings-section-header {

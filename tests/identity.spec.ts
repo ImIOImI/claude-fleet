@@ -14,6 +14,11 @@ test('Settings › Account offers GitHub sign-in when a client id is set', async
     await expect(tab.getByRole('button', { name: 'Sign in with GitHub' })).toBeVisible(T);
     await expect(tab).toContainText('read:org');
     await expect(tab).toContainText('read:packages');
+    const field = tab.locator('#setting-github-client-id');
+    await expect(field).toHaveValue('Iv1.e2eplaceholder');
+    await expect(field).toHaveAttribute('readonly', '');
+    await expect(tab.locator('.client-id-override')).toContainText('CLAUDE_FLEET_GITHUB_CLIENT_ID');
+    await expect(tab.getByRole('button', { name: 'Save' })).toHaveCount(0);
   } finally {
     await app.close();
   }

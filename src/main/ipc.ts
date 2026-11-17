@@ -55,6 +55,7 @@ import {
   getKnowledgeCaptureDailyCap,
   setKnowledgeCaptureDailyCap,
   getGithubClientIdConfig,
+  setGithubClientIdConfig,
   configUnreadablePath,
   getUndeclaredToastAfterSec
 } from './config.js';
@@ -91,7 +92,8 @@ import * as vault from './vault.js';
 import { assertRendererWorkspaceId } from './vaultScopes.js';
 import { registerVaultIpc } from './vaultIpc.js';
 import { IdentityService } from './identity/identityService.js';
-import { pickGithubClientId, GITHUB_CLIENT_ID_ENV } from './identity/clientId.js';
+import { BUILTIN_GITHUB_CLIENT_ID, GITHUB_CLIENT_ID_ENV } from './identity/clientId.js';
+import { readGithubClientId, registerGithubClientIdIpc, type GithubClientIdDeps } from './githubClientIdIpc.js';
 import { registerIdentityIpc } from './identityIpc.js';
 import { createRemoteBackend } from './remote.js';
 import { createFederatedReader, type FederatedReader } from './federation/federatedReader.js';
@@ -2203,12 +2205,18 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
 
   // GitHub sign-in (identity:*). The token stays in the host-only vault scope
   // identity:github; private ghcr.io loadout sources borrow it via the hook.
+  const githubClientId: GithubClientIdDeps = {
+    env: () => process.env[GITHUB_CLIENT_ID_ENV],
+    getConfig: getGithubClientIdConfig,
+    setConfig: setGithubClientIdConfig,
+    builtin: BUILTIN_GITHUB_CLIENT_ID
+  };
   const identity = new IdentityService({
     vault,
-    clientId: async () =>
-      pickGithubClientId({ env: process.env[GITHUB_CLIENT_ID_ENV], config: await getGithubClientIdConfig() })
+    clientId: async () => (await readGithubClientId(githubClientId)).value
   });
   registerIdentityIpc(ipcMain, identity);
+  registerGithubClientIdIpc(ipcMain, githubClientId);
   remoteToken = () => identity.bearerToken();
   remoteLogin = () => identity.currentLogin();
   registerRemoteIpc(ipcMain, {
