@@ -8,8 +8,7 @@ import { DEFAULT_EMBED_DIR } from './config.js';
 import { startHostEmbedder } from './embedder.js';
 import { createLogger } from './log.js';
 
-/** HF commit of the baked weights; docker/host/Dockerfile's EMBED_HF_REVISION. */
-export const EMBED_HF_REVISION = 'ea104dacec62c0de699686887e3f920caeb4f3e3';
+export { EMBED_HF_REVISION } from '../main/vectors.js';
 
 export interface EmbedReference { model: string; dtype: string; revision: string; dim: number; texts: string[]; vectors: string }
 

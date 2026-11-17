@@ -64,6 +64,7 @@ import { ensureWorkspaceClaudeJson } from './docker.js';
 import { hardwareAccelDisabledAtStartup } from './config.js';
 import { setWorkspaceDefault } from './mirrorPolicy.js';
 import { makeEmbedder } from './embeddings.js';
+import { EmbedderUnavailable } from './embedderClient.js';
 import { runEmbedBackfill, storeIdentity, EMBED_BACKFILL_DELAY_MS } from './embedBackfill.js';
 import { indexSessionTurns, indexSessionSummaries, type EmbedFn } from './transcriptIndex.js';
 import { ClaimStore } from './claims/claimStore.js';
@@ -335,7 +336,7 @@ if (gotSingleInstanceLock) app.whenReady().then(async () => {
     const claims = claimService;
     void perfSpanAsync('claude_fleet.boot.capture_fail_running', () => runs.failRunning(Date.now(), 'interrupted by app restart')).catch((e) =>
       logError({ source: 'main', level: 'warn', type: 'capture-fail-running', message: String(e) }));
-    // Delayed: on the in-process fallback, embedding loads the model on main.
+    // Delayed: keeps the first embed and the sidecar spawn out of startup.
     const claimsTimer = setTimeout(() => {
       if (shuttingDown) return;
       void perfSpanAsync('claude_fleet.boot.claims_backfill', () => claims.backfillVectors()).catch((e) =>
@@ -591,7 +592,7 @@ if (gotSingleInstanceLock) app.whenReady().then(async () => {
     // read history (sessions/events/cost): its own read-only state.db
     // connection on SQLite; on Postgres the history tools wait for setReadSource.
     perfSpan('claude_fleet.boot.mcp_server', () => startMcpServer(userData, sqlite ? {} : { readSource: null }));
-    // Local embedder for semantic transcript search (native onnxruntime-node, on-host).
+    // Local embedder for semantic transcript search (the fleet-embedder sidecar, on-host).
     const embedFn = makeEmbedder(join(userData, 'models'));
     embed = embedFn;
     setQueryEmbedder(embedFn);
@@ -601,17 +602,19 @@ if (gotSingleInstanceLock) app.whenReady().then(async () => {
 
     // Index new turns/summaries as they land. Fire-and-forget: indexing must
     // never block ingest, and a failure degrades search silently (logged).
-    // Boot ingest is left to the deferred backfill, so the first embed (and on
-    // the fallback path, the in-process model load) stays out of startup.
+    // Boot ingest is left to the deferred backfill, so the first embed stays
+    // out of startup. An unavailable embedder is logged once by makeEmbedder.
     jsonlWatcher.on('ingest', ({ sessionId }) => {
       if (Date.now() < indexOpensAt) return;
-      indexSessionTurns(sessionId, embedFn).catch((e) =>
-        logError({ source: 'main', level: 'warn', type: 'transcript-index', message: String(e) }));
+      indexSessionTurns(sessionId, embedFn).catch((e) => {
+        if (!(e instanceof EmbedderUnavailable)) logError({ source: 'main', level: 'warn', type: 'transcript-index', message: String(e) });
+      });
     });
     jsonlWatcher.on('ingest', () => {
       if (Date.now() < indexOpensAt) return;
-      indexSessionSummaries(embedFn).catch((e) =>
-        logError({ source: 'main', level: 'warn', type: 'summary-index', message: String(e) }));
+      indexSessionSummaries(embedFn).catch((e) => {
+        if (!(e instanceof EmbedderUnavailable)) logError({ source: 'main', level: 'warn', type: 'summary-index', message: String(e) });
+      });
     });
     // Surface host MCP listener health to renderers as the "MCP unreachable"
     // sticky toast (#159 follow-up): fan the change-only status out to every

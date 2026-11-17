@@ -3,7 +3,7 @@
 import { spawn } from 'node:child_process';
 import { EMBED_DIM } from './vectors.js';
 
-/** Thrown once the sidecar is given up on; callers switch to the fallback. */
+/** Thrown once the sidecar is given up on; semantic search is off for the run. */
 export class EmbedderUnavailable extends Error {
   constructor(reason: string) {
     super(`embedder sidecar unavailable: ${reason}`);

@@ -75,7 +75,7 @@ natives-win: ## Cross-prepare native modules (better-sqlite3, keytar, node-pty) 
 #   EMBEDDER_TAG=v0.14.13   release to fetch from (default: v<package.json
 #                           version>, else the newest release, drafts included)
 #   EMBEDDER_WIN_ZIP=<path> use a local zip instead
-#   ALLOW_NO_EMBEDDER=1     build without it (the app then embeds in process)
+#   ALLOW_NO_EMBEDDER=1     build without it (the installer then has no semantic search)
 embedder-win: ## Fetch the Windows fleet-embedder from a GitHub release into embedder/bin
 	@command -v unzip >/dev/null || { echo "✗ unzip not found (sudo apt-get install unzip)"; exit 1; }
 	@rm -f embedder/bin/fleet-embedder.exe embedder/bin/*.dll
@@ -93,7 +93,7 @@ embedder-win: ## Fetch the Windows fleet-embedder from a GitHub release into emb
 	fi && unzip -oq "$$zip" -d embedder/bin \
 	&& rm -rf embedder/bin/.download && ls -l embedder/bin/fleet-embedder.exe \
 	|| { rm -rf embedder/bin/.download; \
-		if [ -n "$(ALLOW_NO_EMBEDDER)" ]; then echo "⚠ no fleet-embedder.exe: the installer will embed in process"; \
+		if [ -n "$(ALLOW_NO_EMBEDDER)" ]; then echo "⚠ no fleet-embedder.exe: the installer will have no semantic search"; \
 		else echo "✗ could not fetch fleet-embedder-windows-x64.zip (gh auth login? set EMBEDDER_TAG, EMBEDDER_WIN_ZIP, or ALLOW_NO_EMBEDDER=1)"; exit 1; fi; }
 
 .PHONY: build

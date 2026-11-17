@@ -3,6 +3,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
 import { runEmbedBackfill, storeIdentity } from './embedBackfill.js';
+import { EmbedderUnavailable } from './embedderClient.js';
 
 function deps(markerPath: string) {
   const order: string[] = [];
@@ -32,6 +33,16 @@ describe('runEmbedBackfill', () => {
     expect(d.deleteStale).toHaveBeenCalledOnce();
     expect(readFileSync(p, 'utf8')).toBe('S1 m@q8');
     expect(order).toEqual(['delete', 'yield', 's1', 'yield', 's2', 'yield', 'summaries']);
+  });
+
+  it('stops quietly once the embedder is unavailable', async () => {
+    const { d, order } = deps(marker());
+    d.indexTurns.mockImplementation(async () => { throw new EmbedderUnavailable('semantic search unavailable: x'); });
+    await runEmbedBackfill(d);
+    expect(d.indexTurns).toHaveBeenCalledOnce();
+    expect(d.indexSummaries).not.toHaveBeenCalled();
+    expect(d.onError).not.toHaveBeenCalled();
+    expect(order).toEqual(['delete', 'yield']);
   });
 
   it('creates the marker directory on a fresh install', async () => {
