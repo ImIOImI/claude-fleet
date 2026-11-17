@@ -2,7 +2,7 @@ import { readFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { dot } from '../main/vectors.js';
-import { EMBED_HF_REVISION, parseReference, runEmbedCheck } from './embedCheck.js';
+import { EMBED_HF_REVISION, EMBED_PARITY_THRESHOLDS, parseReference, runEmbedCheck } from './embedCheck.js';
 import { EMBED_MODEL_FILES } from './embedder.js';
 
 const ROOT = resolve(__dirname, '..', '..');
@@ -76,5 +76,14 @@ describe('runEmbedCheck', () => {
     const all = () => true;
     expect(await runEmbedCheck(rotated(0.9996, all), ref)).toMatchObject({ ok: true, meanCosine: expect.closeTo(0.9996, 5) });
     expect(await runEmbedCheck(rotated(0.9994, all), ref)).toMatchObject({ ok: false, minCosine: expect.closeTo(0.9994, 5), meanCosine: expect.closeTo(0.9994, 5) });
+  });
+
+  it('parity thresholds reject an onnxruntime drift the host defaults accept', async () => {
+    // ORT 1.24 measured min 0.9963 / mean ~0.9998 against transformers.js.
+    const drift = rotated(0.9963, (i) => i === 5);
+    expect((await runEmbedCheck(drift, ref)).ok).toBe(true);
+    expect(await runEmbedCheck(drift, ref, EMBED_PARITY_THRESHOLDS)).toMatchObject({ ok: false, minIndex: 5 });
+    expect((await runEmbedCheck(rotated(0.99932, (i) => i === 5), ref, EMBED_PARITY_THRESHOLDS)).ok).toBe(true);
+    expect((await runEmbedCheck(rotated(0.9999, () => true), ref, EMBED_PARITY_THRESHOLDS)).ok).toBe(false);
   });
 });

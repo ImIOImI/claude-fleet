@@ -4,6 +4,7 @@
 import { createHash } from 'node:crypto';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { dirname } from 'node:path';
+import { isEmbedderOff } from './embedderClient.js';
 import { perfSpanAsync } from './perf.js';
 
 export const EMBED_BACKFILL_DELAY_MS = 30_000;
@@ -43,10 +44,17 @@ export async function runEmbedBackfill(d: EmbedBackfillDeps): Promise<void> {
     await writeFile(d.markerPath, want);
   }
   const sessionIds = await perfSpanAsync('claude_fleet.index.pending_sessions', d.listPendingSessionIds);
+  // An embedder that's off (or waiting out a model-file retry) is logged by makeEmbedder; stop rather than fail every session.
   for (const id of sessionIds) {
     await yieldFn();
-    try { await d.indexTurns(id); } catch (e) { d.onError(`turns ${id}`, e); }
+    try { await d.indexTurns(id); } catch (e) {
+      if (isEmbedderOff(e)) return;
+      d.onError(`turns ${id}`, e);
+    }
   }
   await yieldFn();
-  try { await d.indexSummaries(); } catch (e) { d.onError('summaries', e); }
+  try { await d.indexSummaries(); } catch (e) {
+    if (isEmbedderOff(e)) return;
+    d.onError('summaries', e);
+  }
 }

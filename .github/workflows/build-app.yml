@@ -134,11 +134,11 @@ jobs:
       - name: install-zigbuild arch selection
         run: bash embedder/scripts/install-zigbuild.test.sh
 
-      # Model weights for the parity test (~35 MB); keyed by model + dtype.
+      # Model weights for the parity test (~35 MB); keyed by model, dtype and pinned revision.
       - uses: actions/cache@v4
         with:
           path: ${{ runner.temp }}/hf-cache
-          key: hf-bge-small-en-v1.5-q8
+          key: hf-bge-small-en-v1.5-q8-ea104dac
 
       # Not strictly part of #311, but this workflow never typechecked either —
       # `npm run dist` builds without running tsc. One line, same job.
@@ -153,7 +153,7 @@ jobs:
           FLEET_BROKER_BIN: ${{ runner.temp }}/broker
         run: npm run test:unit
 
-      # Sidecar vs transformers.js on a fixed corpus (cosine >= 0.999).
+      # Sidecar vs the committed reference vectors on the pinned model files.
       - name: fleet-embedder parity
         env:
           CF_EMBED_PARITY: '1'
@@ -272,7 +272,7 @@ jobs:
       - uses: actions/cache@v4
         with:
           path: ${{ runner.temp }}/hf-cache
-          key: hf-bge-small-en-v1.5-q8
+          key: hf-bge-small-en-v1.5-q8-ea104dac
 
       - name: Smoke-embed fleet-embedder
         shell: bash

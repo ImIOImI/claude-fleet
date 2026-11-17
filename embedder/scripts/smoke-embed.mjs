@@ -1,19 +1,29 @@
 // Real-embed smoke for a built fleet-embedder: loads the model and embeds two
 // texts. Usage: node smoke-embed.mjs <binary> <hf-cache-dir>
-// Fetches the two model files into the cache (transformers.js layout) if absent.
+// Fetches the two model files (pinned revision, sha256-checked) into the cache if absent.
 import { spawn } from 'node:child_process';
-import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
-import { dirname, join } from 'node:path';
+import { createHash } from 'node:crypto';
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { dirname, join, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 const [bin, cache] = process.argv.slice(2);
+const root = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..');
+const revision = /EMBED_HF_REVISION = '([0-9a-f]{40})'/.exec(readFileSync(join(root, 'src/main/vectors.ts'), 'utf8'))?.[1];
+if (!revision) throw new Error('EMBED_HF_REVISION not found in src/main/vectors.ts');
+const manifest = readFileSync(join(root, 'docker/host/embed-weights.sha256'), 'utf8').trim().split('\n').map((l) => l.split(/\s+/));
 const dir = join(cache, 'Xenova', 'bge-small-en-v1.5');
-for (const f of ['tokenizer.json', 'onnx/model_quantized.onnx']) {
+const sha = (p) => createHash('sha256').update(readFileSync(p)).digest('hex');
+for (const [want, f] of manifest) {
   const dest = join(dir, ...f.split('/'));
-  if (existsSync(dest)) continue;
-  const res = await fetch(`https://huggingface.co/Xenova/bge-small-en-v1.5/resolve/main/${f}`, { signal: AbortSignal.timeout(300_000) });
+  if (existsSync(dest) && sha(dest) === want) continue;
+  rmSync(dest, { force: true });
+  const res = await fetch(`https://huggingface.co/Xenova/bge-small-en-v1.5/resolve/${revision}/${f}`, { signal: AbortSignal.timeout(300_000) });
   if (!res.ok) throw new Error(`download ${f}: HTTP ${res.status}`);
   mkdirSync(dirname(dest), { recursive: true });
   writeFileSync(dest, Buffer.from(await res.arrayBuffer()));
+  const got = sha(dest);
+  if (got !== want) { rmSync(dest, { force: true }); throw new Error(`${f}: sha256 ${got}, expected ${want}`); }
 }
 
 const frame = (o) => { const b = Buffer.from(JSON.stringify(o)); const h = Buffer.alloc(4); h.writeUInt32LE(b.length); return Buffer.concat([h, b]); };

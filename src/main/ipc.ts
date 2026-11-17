@@ -179,6 +179,7 @@ import { registerPublishIpc } from './publish/publishIpc.js';
 import { publishSecretValues } from './publish/secretValues.js';
 import { revokePublishTarget } from './publish/revoke.js';
 import type { EmbedFn } from './vectors.js';
+import { EmbedderUnavailable } from './embedderClient.js';
 import { foldPlanUsage, type PlanUsageFold } from './planUsage.js';
 import { logError, getLogPath, flushErrorLogSync } from './errorLog.js';
 import { broadcastObservabilitySummary, latestWins } from './observabilityBroadcast.js';
@@ -456,7 +457,15 @@ export function setFederatedEmbedder(fn: EmbedFn): void {
 }
 const localManifests = async () => (await listWorkspaceManifests()).filter((m) => m.kind !== 'remote');
 const localSearch: LocalSearch = {
-  embed: async (q) => (fedEmbed ? ((await fedEmbed([q]))[0] ?? null) : null),
+  async embed(q) {
+    if (!fedEmbed) return null;
+    try {
+      return (await fedEmbed([q]))[0] ?? null;
+    } catch (e) {
+      if (e instanceof EmbedderUnavailable) throw new Error(`Semantic search is off this run: ${e.reason}`);
+      throw e;
+    }
+  },
   localIds: async () => new Set((await localManifests()).map((m) => m.id)),
   async hits(vector, scope, limit) {
     const manifests = await localManifests();

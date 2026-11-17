@@ -8,8 +8,7 @@ import { DEFAULT_EMBED_DIR } from './config.js';
 import { startHostEmbedder } from './embedder.js';
 import { createLogger } from './log.js';
 
-/** HF commit of the baked weights; docker/host/Dockerfile's EMBED_HF_REVISION. */
-export const EMBED_HF_REVISION = 'ea104dacec62c0de699686887e3f920caeb4f3e3';
+export { EMBED_HF_REVISION } from '../main/vectors.js';
 
 export interface EmbedReference { model: string; dtype: string; revision: string; dim: number; texts: string[]; vectors: string }
 
@@ -24,12 +23,20 @@ export function parseReference(v: unknown): { revision: string; texts: string[];
   return { revision: r.revision, texts: r.texts, vectors: decodeVectors(r.vectors, r.texts.length, EMBED_DIM) };
 }
 
+export interface EmbedCheckThresholds { minCosine: number; meanCosine: number }
+
 // Runner CPUs' int8 kernels differ by up to ~2e-3 per text; broken weights or tokenization score <= 0.967.
 export const EMBED_CHECK_MIN_COSINE = 0.995;
 export const EMBED_CHECK_MIN_MEAN_COSINE = 0.9995;
+/** Tight enough to catch an onnxruntime drift like 1.24's (min 0.9963, mean ~0.9998); CI's worst case is 0.99932. */
+export const EMBED_PARITY_THRESHOLDS: EmbedCheckThresholds = { minCosine: 0.999, meanCosine: 0.99995 };
 const CHECK_BATCH = 8;
 
-export async function runEmbedCheck(embed: EmbedFn, ref: { texts: string[]; vectors: Float32Array[] }): Promise<{ ok: boolean; n: number; minCosine: number; minIndex: number; meanCosine: number }> {
+export async function runEmbedCheck(
+  embed: EmbedFn,
+  ref: { texts: string[]; vectors: Float32Array[] },
+  t: EmbedCheckThresholds = { minCosine: EMBED_CHECK_MIN_COSINE, meanCosine: EMBED_CHECK_MIN_MEAN_COSINE },
+): Promise<{ ok: boolean; n: number; minCosine: number; minIndex: number; meanCosine: number }> {
   const cos: number[] = [];
   let unit = true;
   for (let i = 0; i < ref.texts.length; i += CHECK_BATCH) {
@@ -42,7 +49,7 @@ export async function runEmbedCheck(embed: EmbedFn, ref: { texts: string[]; vect
   const minCosine = Math.min(...cos);
   const minIndex = cos.indexOf(minCosine);
   const meanCosine = cos.reduce((a, b) => a + b, 0) / cos.length;
-  const ok = unit && cos.length === ref.texts.length && minCosine >= EMBED_CHECK_MIN_COSINE && meanCosine >= EMBED_CHECK_MIN_MEAN_COSINE;
+  const ok = unit && cos.length === ref.texts.length && minCosine >= t.minCosine && meanCosine >= t.meanCosine;
   return { ok, n: cos.length, minCosine, minIndex, meanCosine };
 }
 

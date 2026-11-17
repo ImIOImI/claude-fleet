@@ -1,13 +1,13 @@
 // Local, on-host embedder. Transcript text never leaves the machine. Runs in
 // the fleet-embedder sidecar (embedder/) so model load and inference stay off
-// the main thread (#464); falls back to transformers.js in process.
+// the main thread (#464). Without a working sidecar, semantic search and
+// indexing are off for the run: embeds reject with EmbedderUnavailable.
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { app } from 'electron';
-import { EmbedderClient, EmbedderUnavailable } from './embedderClient.js';
+import { EmbedderClient, EmbedderModelFilesUnavailable, EmbedderUnavailable } from './embedderClient.js';
 import { ensureModelFiles } from './embedderModelFiles.js';
 import { makeWorkerSpawner } from './embedderSpawnWorker.js';
-import { makeInProcessEmbedder } from './embeddingsInProcess.js';
 import { logError } from './errorLog.js';
 import { perfSpanAsync } from './perf.js';
 import type { EmbedFn } from './vectors.js';
@@ -45,9 +45,6 @@ function defaultBin(): string | null {
 export interface MakeEmbedderOptions {
   /** Overrides the lookup; null means "no binary". */
   bin?: string | null;
-  forceInProcess?: boolean;
-  /** For tests. */
-  inProcess?: () => EmbedFn;
   ensureFiles?: (cacheDir: string) => Promise<string>;
   now?: () => number;
 }
@@ -55,35 +52,29 @@ export interface MakeEmbedderOptions {
 /** After a failed model download, embeds reject for this long before retrying. */
 export const MODEL_FILES_RETRY_MS = 5 * 60_000;
 
-export class EmbedderModelFilesUnavailable extends Error {}
+export { EmbedderModelFilesUnavailable };
 
 export function makeEmbedder(cacheDir: string, opts: MakeEmbedderOptions = {}): EmbedFn {
-  let inProcess: EmbedFn | null = null;
   let clientP: Promise<EmbedderClient | null> | null = null;
-  let fallbackReason: string | null = null;
+  let offReason: string | null = null;
   let filesFailed: { at: number; reason: string } | null = null;
   const now = opts.now ?? Date.now;
 
-  const fallBack = (reason: string): EmbedFn => {
-    if (fallbackReason === null) {
-      fallbackReason = reason;
-      logError({ source: 'main', level: 'warn', type: 'embedder-fallback', message: reason });
-    }
-    return (inProcess ??= (opts.inProcess ?? (() => makeInProcessEmbedder(cacheDir)))());
+  const turnOff = (reason: string): void => {
+    if (offReason !== null) return;
+    offReason = reason;
+    logError({ source: 'main', level: 'warn', type: 'embedder-unavailable', message: `semantic search off until restart: ${reason}` });
   };
+  const off = (): EmbedderUnavailable => new EmbedderUnavailable(offReason ?? 'unknown');
 
   const startClient = async (): Promise<EmbedderClient | null> => {
-    if (opts.forceInProcess || process.env.CLAUDE_FLEET_EMBEDDER === 'inprocess') {
-      fallBack('CLAUDE_FLEET_EMBEDDER=inprocess');
-      return null;
-    }
     const bin = opts.bin !== undefined ? opts.bin : defaultBin();
-    if (!bin) { fallBack('fleet-embedder binary not found'); return null; }
+    if (!bin) { turnOff('fleet-embedder binary not found'); return null; }
     let dir: string;
     try {
       dir = await (opts.ensureFiles ?? ensureModelFiles)(cacheDir);
     } catch (e) {
-      // Transient (network): not a reason to give up on the sidecar for the run.
+      // Transient (network): retried after MODEL_FILES_RETRY_MS, not off for the run.
       filesFailed = { at: now(), reason: String(e) };
       logError({ source: 'main', level: 'warn', type: 'embedder-model-files', message: filesFailed.reason });
       throw new EmbedderModelFilesUnavailable(`embedding model files unavailable: ${filesFailed.reason}`);
@@ -91,7 +82,7 @@ export function makeEmbedder(cacheDir: string, opts: MakeEmbedderOptions = {}): 
     return new EmbedderClient({
       bin,
       args: ['--model-dir', dir],
-      onFatal: (why) => fallBack(`fleet-embedder crash loop: ${why}`),
+      onFatal: (why) => turnOff(`fleet-embedder crash loop: ${why}`),
       log: (message) => logError({ source: 'main', level: 'warn', type: 'embedder-stderr', message }),
       onSpawn: (ready) => { void perfSpanAsync('claude_fleet.embed.spawn', () => ready).catch(() => {}); },
       spawner: makeWorkerSpawner({
@@ -102,28 +93,25 @@ export function makeEmbedder(cacheDir: string, opts: MakeEmbedderOptions = {}): 
 
   return async function embed(texts: string[]): Promise<Float32Array[]> {
     if (texts.length === 0) return [];
-    if (fallbackReason === null) {
-      if (filesFailed && now() - filesFailed.at < MODEL_FILES_RETRY_MS) {
-        throw new EmbedderModelFilesUnavailable(`embedding model files unavailable: ${filesFailed.reason}`);
-      }
-      const p = (clientP ??= startClient());
-      let client: EmbedderClient | null;
-      try {
-        client = await p;
-      } catch (e) {
-        if (clientP === p) clientP = null;
-        throw e;
-      }
-      if (client && fallbackReason === null) {
-        const c = client;
-        try {
-          return await perfSpanAsync('claude_fleet.embed.run', () => c.embed(texts), { texts: texts.length });
-        } catch (e) {
-          if (!(e instanceof EmbedderUnavailable)) throw e;
-          fallBack(e.message);
-        }
-      }
+    if (offReason !== null) throw off();
+    if (filesFailed && now() - filesFailed.at < MODEL_FILES_RETRY_MS) {
+      throw new EmbedderModelFilesUnavailable(`embedding model files unavailable: ${filesFailed.reason}`);
     }
-    return fallBack(fallbackReason ?? 'unknown')(texts);
+    const p = (clientP ??= startClient());
+    let client: EmbedderClient | null;
+    try {
+      client = await p;
+    } catch (e) {
+      if (clientP === p) clientP = null;
+      throw e;
+    }
+    if (!client || offReason !== null) throw off();
+    const c = client;
+    try {
+      return await perfSpanAsync('claude_fleet.embed.run', () => c.embed(texts), { texts: texts.length });
+    } catch (e) {
+      if (e instanceof EmbedderUnavailable && offReason !== null) throw off();
+      throw e;
+    }
   };
 }

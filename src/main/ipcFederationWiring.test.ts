@@ -36,7 +36,8 @@ describe('ipc.ts federation wiring', () => {
   it('history:search embeds with the indexer\'s embedder and searches local manifests only', () => {
     const local = src.slice(src.indexOf('const localSearch: LocalSearch'), src.indexOf('registerFederationIpc(ipcMain'));
     expect(src).toContain("const localManifests = async () => (await listWorkspaceManifests()).filter((m) => m.kind !== 'remote');");
-    expect(local).toContain('embed: async (q) => (fedEmbed ? ((await fedEmbed([q]))[0] ?? null) : null)');
+    expect(local).toContain('return (await fedEmbed([q]))[0] ?? null;');
+    expect(local).toContain('if (e instanceof EmbedderUnavailable) throw new Error(`Semantic search is off this run: ${e.reason}`);');
     expect(local).toContain('localIds: async () => new Set((await localManifests()).map((m) => m.id))');
     expect(local).toContain("const ids = scope === 'all' ? [...names.keys()] : [scope];");
     const index = readFileSync(new URL('./index.ts', import.meta.url), 'utf8');
