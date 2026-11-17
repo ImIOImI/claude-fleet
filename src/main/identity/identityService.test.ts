@@ -103,7 +103,7 @@ describe('IdentityService status', () => {
     const { svc } = setup({ clientId: null });
     expect((await svc.status()).configured).toBe(false);
     await expect(svc.signInStart()).rejects.toThrow(
-      "not-configured: GitHub sign-in isn't configured: no OAuth client id. Set CLAUDE_FLEET_GITHUB_CLIENT_ID or identity.github.clientId in config.json."
+      "not-configured: GitHub sign-in isn't configured. Enter your organization's GitHub OAuth client ID in Settings → Account."
     );
   });
 });

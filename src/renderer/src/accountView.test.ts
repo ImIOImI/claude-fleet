@@ -1,6 +1,7 @@
+import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import type { AccountStatus, SignInPoll } from '../../preload/identityTypes';
-import { SIGN_IN_EXPIRED, accountAvatar, accountControls, countdown, driveSignIn, loadAccount, packagesNote, parseIdentityError, ssoPrompt, type SignInRun } from './accountView';
+import { SIGN_IN_EXPIRED, accountAvatar, clientIdDraftError, clientIdField, accountControls, countdown, driveSignIn, loadAccount, packagesNote, parseIdentityError, ssoPrompt, type SignInRun } from './accountView';
 
 describe('parseIdentityError', () => {
   it('unwraps the IPC prefix and recognises not-configured', () => {
@@ -254,5 +255,52 @@ describe('accountAvatar', () => {
     expect(accountAvatar({ avatarUrl: 'https://evil.io/a.png' })).toBeNull();
     expect(accountAvatar({ avatarUrl: 'http://avatars.githubusercontent.com/u/7' })).toBeNull();
     expect(accountAvatar({ avatarUrl: null })).toBeNull();
+  });
+});
+
+describe('clientIdField', () => {
+  it('is read-only with the override badge when the env var supplies the id', () => {
+    expect(clientIdField({ value: 'Iv1.env', source: 'env' })).toEqual({ readOnly: true, override: true, initial: 'Iv1.env', placeholder: '', note: null });
+  });
+
+  it('edits the saved value', () => {
+    expect(clientIdField({ value: 'Iv1.cfg', source: 'config' })).toEqual({ readOnly: false, override: false, initial: 'Iv1.cfg', placeholder: '', note: null });
+  });
+
+  it('shows the built-in id as a placeholder only', () => {
+    expect(clientIdField({ value: 'Iv1.bi', source: 'builtin' })).toEqual({ readOnly: false, override: false, initial: '', placeholder: 'Iv1.bi', note: null });
+  });
+
+  it('asks for the id when nothing is set, without naming env vars or config.json', () => {
+    const f = clientIdField({ value: null, source: 'none' });
+    expect(f).toEqual({ readOnly: false, override: false, initial: '', placeholder: '', note: "Enter your organization's GitHub OAuth client ID below." });
+    expect(f.note).not.toMatch(/CLAUDE_FLEET|config\.json|identity\.github|environment|json/i);
+  });
+});
+
+describe('clientIdDraftError', () => {
+  it('accepts an empty or valid draft and explains an invalid one', () => {
+    expect(clientIdDraftError('')).toBeNull();
+    expect(clientIdDraftError('  Iv1.0123456789abcdef ')).toBeNull();
+    expect(clientIdDraftError('Ov23liAbc')).toBeNull();
+    expect(clientIdDraftError('has space')).toMatch(/letters, digits/);
+    expect(clientIdDraftError('x'.repeat(101))).toMatch(/100/);
+  });
+});
+
+describe('Settings → Account source text', () => {
+  const src = readFileSync('src/renderer/src/components/AccountSettings.tsx', 'utf8');
+
+  it('never mentions config.json or the config key', () => {
+    expect(src).not.toMatch(/config\.json|identity\.github/);
+  });
+
+  it('names the env var only inside the override badge', () => {
+    const outside = src.replace(/<p className="setting-desc client-id-override">[\s\S]*?<\/p>/, '').replace(/^import .*$/gm, '');
+    expect(outside).toMatch(/<input/);
+    expect(src).toMatch(/client-id-override/);
+    expect(outside).not.toMatch(/CLAUDE_FLEET_|GITHUB_CLIENT_ID_ENV|environment variable/);
+    const badge = src.slice(src.indexOf('client-id-override'), src.indexOf('</p>', src.indexOf('client-id-override')));
+    expect(badge).toMatch(/Set by <code>\{GITHUB_CLIENT_ID_ENV\}<\/code>; the environment variable takes precedence\./);
   });
 });

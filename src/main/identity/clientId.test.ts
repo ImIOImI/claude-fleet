@@ -17,11 +17,11 @@ describe('pickGithubClientId', () => {
     expect(pickGithubClientId({ env: undefined, config: null, builtin: '' })).toBeNull();
   });
 
-  it('ships no real client id and names the overrides in the error', () => {
+  it('ships no real client id, and the error points at Settings, not env vars or config.json', () => {
     expect(BUILTIN_GITHUB_CLIENT_ID).toBe('');
     expect(GITHUB_CLIENT_ID_ENV).toBe('CLAUDE_FLEET_GITHUB_CLIENT_ID');
     expect(CLIENT_ID_MISSING).toBe(
-      "GitHub sign-in isn't configured: no OAuth client id. Set CLAUDE_FLEET_GITHUB_CLIENT_ID or identity.github.clientId in config.json."
+      "GitHub sign-in isn't configured. Enter your organization's GitHub OAuth client ID in Settings → Account."
     );
   });
 });

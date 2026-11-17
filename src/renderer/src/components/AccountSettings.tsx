@@ -1,8 +1,9 @@
 // Settings › Account: GitHub device-flow sign-in and sign-out. Each action
 // applies at once (no batch Save). This panel only ever sees AccountStatus.
 import { useEffect, useRef, useState } from 'react';
-import type { AccountStatus, SignInStart } from '../../../preload';
-import { accountAvatar, accountControls, countdown, driveSignIn, loadAccount, packagesNote, parseIdentityError, ssoPrompt, type SignInRun } from '../accountView';
+import type { AccountStatus, GithubClientIdSetting, SignInStart } from '../../../preload';
+import { GITHUB_CLIENT_ID_ENV } from '../../../preload/githubClientId';
+import { accountAvatar, accountControls, clientIdDraftError, clientIdField, countdown, driveSignIn, loadAccount, packagesNote, parseIdentityError, ssoPrompt, type SignInRun } from '../accountView';
 
 interface ActiveRun extends SignInRun {
   wake: () => void;
@@ -19,8 +20,41 @@ export function AccountSettings({ onStatus }: { onStatus?: (s: AccountStatus) =>
   const [busy, setBusy] = useState(false);
   const [copied, setCopied] = useState(false);
   const [now, setNow] = useState(() => Date.now());
+  const [clientId, setClientId] = useState<GithubClientIdSetting | null>(null);
+  const [clientIdDraft, setClientIdDraft] = useState('');
+  const [clientIdBusy, setClientIdBusy] = useState(false);
+  const [clientIdError, setClientIdError] = useState<string | null>(null);
   const run = useRef<ActiveRun | null>(null);
   const mounted = useRef(true);
+
+  function showClientId(s: GithubClientIdSetting): void {
+    setClientId(s);
+    setClientIdDraft(clientIdField(s).initial);
+  }
+
+  async function loadClientId(): Promise<void> {
+    try {
+      const s = await window.api.config.getGithubClientId();
+      if (mounted.current) showClientId(s);
+    } catch (e) {
+      if (mounted.current) setClientIdError(parseIdentityError(e).message);
+    }
+  }
+
+  async function saveClientId(value: string | null): Promise<void> {
+    setClientIdBusy(true);
+    setClientIdError(null);
+    try {
+      const s = await window.api.config.setGithubClientId(value);
+      if (!mounted.current) return;
+      showClientId(s);
+      setStatus(await window.api.identity.status());
+    } catch (e) {
+      if (mounted.current) setClientIdError(parseIdentityError(e).message);
+    } finally {
+      if (mounted.current) setClientIdBusy(false);
+    }
+  }
 
   async function load(): Promise<void> {
     setError(null);
@@ -34,6 +68,7 @@ export function AccountSettings({ onStatus }: { onStatus?: (s: AccountStatus) =>
   useEffect(() => {
     mounted.current = true;
     void load();
+    void loadClientId();
     return () => {
       mounted.current = false;
       // Leaving the tab abandons a half-done sign-in.
@@ -163,18 +198,57 @@ export function AccountSettings({ onStatus }: { onStatus?: (s: AccountStatus) =>
   const pkg = packagesNote(status.signedIn, status.packagesAccess);
   const who = status.identity;
   const avatar = who ? accountAvatar(who) : null;
+  const field = clientId ? clientIdField(clientId) : null;
+  const draftError = field && !field.readOnly ? clientIdDraftError(clientIdDraft) : null;
+  const canSaveClientId =
+    !!field && !field.readOnly && !clientIdBusy && draftError === null && clientIdDraft.trim() !== '' && clientIdDraft.trim() !== field.initial;
 
   return (
     <div className="new-tab account-tab" role="tabpanel">
       <div className="settings-section">
         <div className="settings-section-header">GitHub</div>
 
-        {!status.configured && (
-          <p className="setting-desc">
-            GitHub sign-in isn't configured in this build. Set <code>CLAUDE_FLEET_GITHUB_CLIENT_ID</code> or{' '}
-            <code>identity.github.clientId</code> in config.json.
-          </p>
+        {field && (
+          <div className="client-id-block">
+            <div className="setting-title">GitHub sign-in</div>
+            {field.note && <p className="setting-desc">{field.note}</p>}
+            <label className="setting-desc client-id-label" htmlFor="setting-github-client-id">
+              OAuth client ID
+            </label>
+            <div className="input-with-button">
+              <input
+                id="setting-github-client-id"
+                value={clientIdDraft}
+                onChange={(e) => setClientIdDraft(e.target.value)}
+                placeholder={field.placeholder}
+                readOnly={field.readOnly}
+                disabled={clientIdBusy}
+                spellCheck={false}
+                aria-invalid={draftError !== null}
+              />
+              {!field.readOnly && (
+                <>
+                  <button type="button" onClick={() => void saveClientId(clientIdDraft)} disabled={!canSaveClientId}>
+                    Save
+                  </button>
+                  <button type="button" onClick={() => void saveClientId(null)} disabled={clientIdBusy || clientId?.source !== 'config'}>
+                    Clear
+                  </button>
+                </>
+              )}
+            </div>
+            {field.override && (
+              <p className="setting-desc client-id-override">
+                Set by <code>{GITHUB_CLIENT_ID_ENV}</code>; the environment variable takes precedence.
+              </p>
+            )}
+            {!field.readOnly && status.signedIn && (
+              <p className="setting-desc">A saved client ID applies the next time you sign in.</p>
+            )}
+            {draftError && <div className="form-hint error-text">{draftError}</div>}
+          </div>
         )}
+        {clientIdError && <div className="form-hint error-text">{clientIdError}</div>}
 
         {status.signedIn && who && (
           <div className="account-card">

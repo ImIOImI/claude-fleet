@@ -1,6 +1,7 @@
 // Pure copy, control state and the poll loop for Settings → Account.
 import type { AccountSso, AccountStatus, SignInPoll, SignInStart } from '../../preload/identityTypes';
 import { githubAvatarUrl } from '../../preload/sessionOwner';
+import { isValidGithubClientId, type GithubClientIdSetting } from '../../preload/githubClientId';
 
 const IPC_PREFIX = /^Error invoking remote method '[^']+': (?:[A-Za-z]*Error: )?/;
 
@@ -112,4 +113,29 @@ export async function loadAccount(
 /** The signed-in avatar passes the same allowlist as owner avatars (D120). */
 export function accountAvatar(identity: { avatarUrl: string | null }): string | null {
   return githubAvatarUrl(identity.avatarUrl);
+}
+
+export interface ClientIdField {
+  readOnly: boolean;
+  /** Show the env-var override badge. */
+  override: boolean;
+  initial: string;
+  placeholder: string;
+  note: string | null;
+}
+
+/** The field edits the saved value only; a built-in id shows as a placeholder. */
+export function clientIdField(s: GithubClientIdSetting): ClientIdField {
+  const base = { readOnly: false, override: false, initial: '', placeholder: '', note: null };
+  if (s.source === 'env') return { ...base, readOnly: true, override: true, initial: s.value ?? '' };
+  if (s.source === 'config') return { ...base, initial: s.value ?? '' };
+  if (s.source === 'builtin') return { ...base, placeholder: s.value ?? '' };
+  return { ...base, note: "Enter your organization's GitHub OAuth client ID below." };
+}
+
+/** Inline mirror of main's check; empty is not an error (Save stays disabled). */
+export function clientIdDraftError(draft: string): string | null {
+  const t = draft.trim();
+  if (!t || isValidGithubClientId(t)) return null;
+  return "Use 1-100 letters, digits, '.', '_' or '-'.";
 }
