@@ -2519,6 +2519,37 @@ function compareCostRows(a: CostRow, b: CostRow): number {
     || compareBytes(a.service_tier ?? '', b.service_tier ?? '');
 }
 
+/** The list only shows `first_user_message` as a one-line title fallback; the
+ *  full prompt (up to tens of KB each) would be read, sorted and sent to the
+ *  renderer on every refresh. Same cap as remote rows (federation MAX_TITLE). */
+export const LIST_TITLE_CHARS = 500;
+
+export function listSessionsQuery(q: Kysely<StateDb>, workspaceId?: string) {
+  return q
+    .selectFrom('sessions')
+    .select((eb) => [
+      'id',
+      'workspace_id',
+      'ai_title',
+      eb.fn<string | null>('substr', ['first_user_message', eb.lit(1), eb.lit(LIST_TITLE_CHARS)]).as('first_user_message'),
+      'user_set_name',
+      'started_at',
+      'last_active_at',
+      eb
+        .exists(
+          eb
+            .selectFrom('broker_sessions as b')
+            .select('b.broker_session_id')
+            .whereRef('b.claude_session_id', '=', 'sessions.id')
+            .where('b.broker_session_id', 'like', `${HEADLESS_BROKER_PREFIX}%`),
+        )
+        .as('headless'),
+    ])
+    .$if(workspaceId !== undefined, (qb) => qb.where('workspace_id', '=', workspaceId as string))
+    .orderBy((eb) => eb.fn.coalesce('last_active_at', eb.lit(0)), 'desc')
+    .orderBy('id', 'asc');
+}
+
 /**
  * All sessions, newest-active first. Optionally scoped to one workspace.
  * Three queries total regardless of session count, in one read transaction:
@@ -2529,30 +2560,7 @@ function compareCostRows(a: CostRow, b: CostRow): number {
 export async function listSessions(workspaceId?: string): Promise<SessionListRow[]> {
   const scoped = workspaceId !== undefined && workspaceId !== '';
   return readTransaction(kyselyOrThrow(), async (trx) => {
-    const sessRows = await trx
-      .selectFrom('sessions')
-      .select((eb) => [
-        'id',
-        'workspace_id',
-        'ai_title',
-        'first_user_message',
-        'user_set_name',
-        'started_at',
-        'last_active_at',
-        eb
-          .exists(
-            eb
-              .selectFrom('broker_sessions as b')
-              .select('b.broker_session_id')
-              .whereRef('b.claude_session_id', '=', 'sessions.id')
-              .where('b.broker_session_id', 'like', `${HEADLESS_BROKER_PREFIX}%`),
-          )
-          .as('headless'),
-      ])
-      .$if(scoped, (qb) => qb.where('workspace_id', '=', workspaceId as string))
-      .orderBy((eb) => eb.fn.coalesce('last_active_at', eb.lit(0)), 'desc')
-      .orderBy('id', 'asc')
-      .execute();
+    const sessRows = await listSessionsQuery(trx, scoped ? workspaceId : undefined).execute();
 
     const costRows = await listSessionCostsQuery(trx, scoped ? workspaceId : undefined).execute();
 
