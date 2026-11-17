@@ -2280,6 +2280,13 @@ The holder runs its workspace's automations and serves the fleet-state MCP (§7 
   - `cost_by_owner` from a session agrees with the desktop's Cost by owner (the MCP scope also includes partitions);
   - the desktop shows owners on remote rows, and Mine filters to them.
 - **Owner follow-ups:** `CLOSE` owners stay in memory; seeding them from `session_owners` would keep `mine` across a fleet-host restart. `session_owners` has no retention, like the rest of the host store.
+- **Graceful drain (approved, not built):**
+  - When the workspace pod is replaced today, `CloseAll` SIGKILLs claude: a running turn is lost, and a cut-off fresh step reads as succeeded.
+  - The design is in [`superpowers/specs/2026-11-17-graceful-drain-design.md`](superpowers/specs/2026-11-17-graceful-drain-design.md), with decisions D142–D157 in the plan.
+  - The workspace pod gets a `preStop` broker drain over a local control socket: input is frozen, idle sessions close, busy turns finish until a 30 min soft deadline (Esc / SIGINT), and everything closes at a 35 min hard stop.
+  - Interrupted automation runs re-run once. Desktops resume their open tabs on the new pod.
+  - The host pod gets `/healthz` `draining`, a 20 s shutdown deadline and a 5 s preStop.
+  - The sections above change when it lands.
 - **`--mcp-config` precedence:** whether fleet-host's inline `claude-fleet-state` wins over a server of the same name in `~/.claude.json` on the shared volume is unverified (`claude mcp list`/`get` ignore `--mcp-config`); it is on the host checklist.
 
 Deployments keep one replica without overlap (`maxSurge: 0`, `maxUnavailable: 1`); with `db:` the fenced lease makes an overlap safe, but the invariant stays until it is deliberately relaxed. A host without `db:` must run one replica. `CLOSE` owners are in memory and lost on restart, so afterwards no session reports `mine` and the desktop offers End session for none. KILLPORT can still end a session whose root process itself listens on the port, because the broker's `LIST`/`LISTPORTS` don't expose session root pids (#489).
