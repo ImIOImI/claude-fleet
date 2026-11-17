@@ -40,14 +40,14 @@ describe('makeEmbedder without a working sidecar', () => {
   it('rejects with EmbedderUnavailable when the binary is missing, logging once', async () => {
     const embed = makeEmbedder(HF_CACHE, { bin: null, ensureFiles });
     await expect(embed(['a'])).rejects.toBeInstanceOf(EmbedderUnavailable);
-    await expect(embed(['b'])).rejects.toThrow(/semantic search unavailable: fleet-embedder binary not found/);
+    await expect(embed(['b'])).rejects.toThrow(/embedder sidecar unavailable: fleet-embedder binary not found/);
     expect(unavailable()).toBe(1);
   });
 
   it('turns off for the run after a sidecar crash loop', async () => {
     const embed = makeEmbedder(HF_CACHE, { bin: '/nonexistent/fleet-embedder', ensureFiles });
     for (let i = 0; i < 3; i++) await embed(['a']).catch(() => null);
-    await expect(embed(['b'])).rejects.toThrow(/semantic search unavailable: fleet-embedder crash loop/);
+    await expect(embed(['b'])).rejects.toThrow(/embedder sidecar unavailable: fleet-embedder crash loop/);
     expect(unavailable()).toBe(1);
   }, 30_000);
 

@@ -7,7 +7,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
-import { parseReference, runEmbedCheck } from '../host/embedCheck.js';
+import { EMBED_PARITY_THRESHOLDS, parseReference, runEmbedCheck } from '../host/embedCheck.js';
 import { EmbedderClient } from './embedderClient.js';
 import { ensureModelFiles, SIDECAR_MODEL_FILES } from './embedderModelFiles.js';
 import { EMBED_HF_REVISION, EMBED_MODEL_SHA256 } from './vectors.js';
@@ -38,7 +38,7 @@ describe('fleet-embedder parity with the reference vectors', () => {
       log: (m) => console.warn(m),
     });
     try {
-      const r = await runEmbedCheck((t) => client.embed(t), ref);
+      const r = await runEmbedCheck((t) => client.embed(t), ref, EMBED_PARITY_THRESHOLDS);
       console.log(`parity over ${r.n} texts: min cosine ${r.minCosine.toFixed(6)} (text ${r.minIndex}), mean ${r.meanCosine.toFixed(6)}`);
       expect(r.ok).toBe(true);
     } finally {

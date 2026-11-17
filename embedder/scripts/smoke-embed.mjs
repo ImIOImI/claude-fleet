@@ -16,7 +16,6 @@ const dir = join(cache, 'Xenova', 'bge-small-en-v1.5');
 const sha = (p) => createHash('sha256').update(readFileSync(p)).digest('hex');
 for (const [want, f] of manifest) {
   const dest = join(dir, ...f.split('/'));
-  // A cached file from before the pin may not match: refetch it.
   if (existsSync(dest) && sha(dest) === want) continue;
   rmSync(dest, { force: true });
   const res = await fetch(`https://huggingface.co/Xenova/bge-small-en-v1.5/resolve/${revision}/${f}`, { signal: AbortSignal.timeout(300_000) });

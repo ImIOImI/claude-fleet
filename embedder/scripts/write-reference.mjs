@@ -10,7 +10,7 @@
 // already updated.
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
@@ -44,17 +44,20 @@ for (const [sha, f] of manifest) {
 }
 
 const pkgDir = mkdtempSync(join(tmpdir(), 'fleet-transformers-'));
-execFileSync('npm', ['install', '--no-save', '--no-audit', '--no-fund', '--prefix', pkgDir, TRANSFORMERS], { stdio: 'inherit', shell: process.platform === 'win32' });
-const { pipeline, env } = createRequire(join(pkgDir, 'package.json'))('@huggingface/transformers');
-env.cacheDir = cache;
-env.allowRemoteModels = false;
-const extractor = await pipeline('feature-extraction', MODEL, { dtype: 'q8' });
-
-// One text per call, unpadded, like the sidecar: q8 activations are quantized per tensor.
 const buf = Buffer.alloc(corpus.length * DIM * 4);
-for (let i = 0; i < corpus.length; i++) {
-  const [row] = (await extractor([corpus[i]], { pooling: 'mean', normalize: true })).tolist();
-  for (let k = 0; k < DIM; k++) buf.writeFloatLE(row[k] ?? 0, (i * DIM + k) * 4);
+try {
+  execFileSync('npm', ['install', '--no-save', '--no-audit', '--no-fund', '--prefix', pkgDir, TRANSFORMERS], { stdio: 'inherit', shell: process.platform === 'win32' });
+  const { pipeline, env } = createRequire(join(pkgDir, 'package.json'))('@huggingface/transformers');
+  env.cacheDir = cache;
+  env.allowRemoteModels = false;
+  const extractor = await pipeline('feature-extraction', MODEL, { dtype: 'q8' });
+  // One text per call, unpadded, like the sidecar: q8 activations are quantized per tensor.
+  for (let i = 0; i < corpus.length; i++) {
+    const [row] = (await extractor([corpus[i]], { pooling: 'mean', normalize: true })).tolist();
+    for (let k = 0; k < DIM; k++) buf.writeFloatLE(row[k] ?? 0, (i * DIM + k) * 4);
+  }
+} finally {
+  rmSync(pkgDir, { recursive: true, force: true });
 }
 const out = { model: MODEL, dtype: 'q8', revision, dim: DIM, texts: corpus, vectors: buf.toString('base64') };
 writeFileSync(join(root, 'embedder/reference/bge-small-q8.json'), JSON.stringify(out, null, 1) + '\n');

@@ -1,8 +1,9 @@
 // Model files the fleet-embedder sidecar reads, under <cache>/<org>/<repo>/.
-// Downloads come from the pinned revision and are kept only if their sha256 matches.
+// Downloads come from the pinned revision and are kept only if their sha256
+// matches; files already cached are hashed once per pin set (a marker records it).
 import { createHash } from 'node:crypto';
-import { createWriteStream } from 'node:fs';
-import { access, mkdir, rename, rm } from 'node:fs/promises';
+import { createReadStream, createWriteStream } from 'node:fs';
+import { access, mkdir, readdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { EMBED_HF_ID, EMBED_HF_REVISION, EMBED_MODEL_SHA256 } from './vectors.js';
 
@@ -21,8 +22,26 @@ export interface DownloadLimits {
   sha256?: Readonly<Record<string, string>>;
 }
 
-/** Fetch any missing sidecar file from the Hub; returns the model dir. A
- *  download is aborted after `totalMs`, or when no bytes arrive for `stallMs`. */
+const exists = (p: string): Promise<boolean> => access(p).then(() => true, () => false);
+const removeQuietly = (p: string): Promise<void> => rm(p, { force: true, maxRetries: 3 }).catch(() => {});
+
+async function sha256File(p: string): Promise<string> {
+  const hash = createHash('sha256');
+  for await (const chunk of createReadStream(p)) hash.update(chunk as Buffer);
+  return hash.digest('hex');
+}
+
+/** Leftovers of a download killed mid-write; the single-instance lock means none is in flight. */
+async function sweepTemps(dirs: string[]): Promise<void> {
+  for (const d of dirs) {
+    const names = await readdir(d).catch(() => [] as string[]);
+    await Promise.all(names.filter((n) => n.endsWith('.tmp')).map((n) => removeQuietly(join(d, n))));
+  }
+}
+
+/** Make every sidecar file present and matching its pin; returns the model dir.
+ *  A cached file that doesn't match is deleted and fetched again. A download is
+ *  aborted after `totalMs`, or when no bytes arrive for `stallMs`. */
 export async function ensureModelFiles(
   cacheDir: string,
   fetchImpl: typeof fetch = fetch,
@@ -30,12 +49,22 @@ export async function ensureModelFiles(
 ): Promise<string> {
   const dir = modelDir(cacheDir);
   const pins = limits.sha256 ?? EMBED_MODEL_SHA256;
-  for (const file of SIDECAR_MODEL_FILES) {
-    const dest = join(dir, ...file.split('/'));
-    if (await access(dest).then(() => true, () => false)) continue;
+  const marker = join(dir, `.verified-${EMBED_HF_REVISION}`);
+  const want = SIDECAR_MODEL_FILES.map((f) => `${pins[f] ?? '-'}  ${f}`).join('\n');
+  const dests = SIDECAR_MODEL_FILES.map((f) => join(dir, ...f.split('/')));
+  if ((await readFile(marker, 'utf8').catch(() => null)) === want && (await Promise.all(dests.map(exists))).every(Boolean)) return dir;
+  await sweepTemps([...new Set(dests.map((d) => dirname(d)))]);
+  await removeQuietly(marker);
+  for (const [i, file] of SIDECAR_MODEL_FILES.entries()) {
+    const dest = dests[i];
+    if (await exists(dest)) {
+      if (!pins[file] || (await sha256File(dest)) === pins[file]) continue;
+      await removeQuietly(dest);
+    }
     await mkdir(dirname(dest), { recursive: true });
     await download(fetchImpl, `https://huggingface.co/${EMBED_HF_ID}/resolve/${EMBED_HF_REVISION}/${file}`, dest, limits, pins[file]);
   }
+  await writeFile(marker, want);
   return dir;
 }
 
@@ -50,6 +79,7 @@ async function download(fetchImpl: typeof fetch, url: string, dest: string, limi
   };
   const tmp = `${dest}.${process.pid}.tmp`;
   const out = createWriteStream(tmp);
+  out.on('error', (e) => ctl.abort(e));
   const hash = createHash('sha256');
   try {
     armStall();
@@ -79,7 +109,7 @@ async function download(fetchImpl: typeof fetch, url: string, dest: string, limi
       out.once('close', () => resolve());
       out.destroy();
     });
-    await rm(tmp, { force: true });
+    await removeQuietly(tmp);
     throw ctl.signal.aborted ? ctl.signal.reason : e;
   } finally {
     clearTimeout(total);

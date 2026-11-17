@@ -5,7 +5,7 @@
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { app } from 'electron';
-import { EmbedderClient, EmbedderUnavailable } from './embedderClient.js';
+import { EmbedderClient, EmbedderModelFilesUnavailable, EmbedderUnavailable } from './embedderClient.js';
 import { ensureModelFiles } from './embedderModelFiles.js';
 import { makeWorkerSpawner } from './embedderSpawnWorker.js';
 import { logError } from './errorLog.js';
@@ -52,7 +52,7 @@ export interface MakeEmbedderOptions {
 /** After a failed model download, embeds reject for this long before retrying. */
 export const MODEL_FILES_RETRY_MS = 5 * 60_000;
 
-export class EmbedderModelFilesUnavailable extends Error {}
+export { EmbedderModelFilesUnavailable };
 
 export function makeEmbedder(cacheDir: string, opts: MakeEmbedderOptions = {}): EmbedFn {
   let clientP: Promise<EmbedderClient | null> | null = null;
@@ -65,7 +65,7 @@ export function makeEmbedder(cacheDir: string, opts: MakeEmbedderOptions = {}): 
     offReason = reason;
     logError({ source: 'main', level: 'warn', type: 'embedder-unavailable', message: `semantic search off until restart: ${reason}` });
   };
-  const off = (): EmbedderUnavailable => new EmbedderUnavailable(`semantic search unavailable: ${offReason ?? 'unknown'}`);
+  const off = (): EmbedderUnavailable => new EmbedderUnavailable(offReason ?? 'unknown');
 
   const startClient = async (): Promise<EmbedderClient | null> => {
     const bin = opts.bin !== undefined ? opts.bin : defaultBin();

@@ -29,6 +29,8 @@ cargo build --release      # target/release/fleet-embedder[.exe]
 cargo test
 ```
 
+`npm run dev` runs `target/release/fleet-embedder` (or `FLEET_EMBEDDER_BIN`). Without a built binary, semantic search and indexing are off for that run (`embedder-unavailable` in the error log).
+
 `ort` links a prebuilt static onnxruntime. With the default `download-binaries` feature, ort-sys downloads it at build time (on Linux this needs OpenSSL headers, `libssl-dev`). Otherwise build with `--no-default-features` and `ORT_LIB_LOCATION=<dir containing libonnxruntime.a>`, from the tarball ort-sys's `dist.txt` lists for the target; `scripts/ci-build.sh` does this on Linux. The toolchain is pinned in `rust-toolchain.toml`.
 
 Runtime dependencies (onnxruntime itself is linked in):

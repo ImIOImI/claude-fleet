@@ -26,7 +26,7 @@ pub struct Embedder {
 type BoxErr = Box<dyn std::error::Error + Send + Sync>;
 
 impl Embedder {
-    /// `model_dir` is the HF repo dir in the transformers.js cache.
+    /// `model_dir` is the HF repo dir in the model cache.
     pub fn load(model_dir: &Path) -> Result<Self, BoxErr> {
         let mut tokenizer = Tokenizer::from_file(model_dir.join("tokenizer.json"))?;
         tokenizer.with_truncation(None)?;

@@ -5,10 +5,18 @@ import { EMBED_DIM } from './vectors.js';
 
 /** Thrown once the sidecar is given up on; semantic search is off for the run. */
 export class EmbedderUnavailable extends Error {
-  constructor(reason: string) {
+  constructor(readonly reason: string) {
     super(`embedder sidecar unavailable: ${reason}`);
     this.name = 'EmbedderUnavailable';
   }
+}
+
+/** Model files couldn't be fetched; embeds reject until the retry cooldown passes. */
+export class EmbedderModelFilesUnavailable extends Error {}
+
+/** Embedding can't run right now (logged where the state was entered), so callers skip quietly. */
+export function isEmbedderOff(e: unknown): boolean {
+  return e instanceof EmbedderUnavailable || e instanceof EmbedderModelFilesUnavailable;
 }
 
 export const MAX_FRAME = 64 * 1024 * 1024;

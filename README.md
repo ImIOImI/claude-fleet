@@ -125,6 +125,7 @@ On first run the window greets you with the screen above — hit **Launch your f
 
 ```bash
 npm install
+(cd embedder && cargo build --release)   # the embedding sidecar; without it semantic search is off
 npm run dev
 ```
 

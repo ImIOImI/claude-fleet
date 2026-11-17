@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
 import { runEmbedBackfill, storeIdentity } from './embedBackfill.js';
-import { EmbedderUnavailable } from './embedderClient.js';
+import { EmbedderModelFilesUnavailable, EmbedderUnavailable } from './embedderClient.js';
 
 function deps(markerPath: string) {
   const order: string[] = [];
@@ -43,6 +43,14 @@ describe('runEmbedBackfill', () => {
     expect(d.indexSummaries).not.toHaveBeenCalled();
     expect(d.onError).not.toHaveBeenCalled();
     expect(order).toEqual(['delete', 'yield']);
+  });
+
+  it('stops quietly while model files are unavailable', async () => {
+    const { d } = deps(marker());
+    d.indexTurns.mockImplementation(async () => { throw new EmbedderModelFilesUnavailable('offline'); });
+    await runEmbedBackfill(d);
+    expect(d.indexTurns).toHaveBeenCalledOnce();
+    expect(d.onError).not.toHaveBeenCalled();
   });
 
   it('creates the marker directory on a fresh install', async () => {

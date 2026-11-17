@@ -64,7 +64,7 @@ import { ensureWorkspaceClaudeJson } from './docker.js';
 import { hardwareAccelDisabledAtStartup } from './config.js';
 import { setWorkspaceDefault } from './mirrorPolicy.js';
 import { makeEmbedder } from './embeddings.js';
-import { EmbedderUnavailable } from './embedderClient.js';
+import { isEmbedderOff } from './embedderClient.js';
 import { runEmbedBackfill, storeIdentity, EMBED_BACKFILL_DELAY_MS } from './embedBackfill.js';
 import { indexSessionTurns, indexSessionSummaries, type EmbedFn } from './transcriptIndex.js';
 import { ClaimStore } from './claims/claimStore.js';
@@ -603,17 +603,17 @@ if (gotSingleInstanceLock) app.whenReady().then(async () => {
     // Index new turns/summaries as they land. Fire-and-forget: indexing must
     // never block ingest, and a failure degrades search silently (logged).
     // Boot ingest is left to the deferred backfill, so the first embed stays
-    // out of startup. An unavailable embedder is logged once by makeEmbedder.
+    // out of startup. An embedder that's off is logged by makeEmbedder.
     jsonlWatcher.on('ingest', ({ sessionId }) => {
       if (Date.now() < indexOpensAt) return;
       indexSessionTurns(sessionId, embedFn).catch((e) => {
-        if (!(e instanceof EmbedderUnavailable)) logError({ source: 'main', level: 'warn', type: 'transcript-index', message: String(e) });
+        if (!isEmbedderOff(e)) logError({ source: 'main', level: 'warn', type: 'transcript-index', message: String(e) });
       });
     });
     jsonlWatcher.on('ingest', () => {
       if (Date.now() < indexOpensAt) return;
       indexSessionSummaries(embedFn).catch((e) => {
-        if (!(e instanceof EmbedderUnavailable)) logError({ source: 'main', level: 'warn', type: 'summary-index', message: String(e) });
+        if (!isEmbedderOff(e)) logError({ source: 'main', level: 'warn', type: 'summary-index', message: String(e) });
       });
     });
     // Surface host MCP listener health to renderers as the "MCP unreachable"
