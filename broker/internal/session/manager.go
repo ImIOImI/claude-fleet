@@ -6,12 +6,15 @@ package session
 
 import (
 	"errors"
+	"sort"
 	"sync"
 )
 
 type ManagerConfig struct {
 	ClaudeExec   string // executable to run for each session ("claude")
 	RingBufBytes int    // per-session ring buffer size
+	// OnChange runs after a session is created, ends or is closed.
+	OnChange func()
 }
 
 type Manager struct {
@@ -30,28 +33,39 @@ func NewManager(cfg ManagerConfig) *Manager {
 	return &Manager{cfg: cfg, sessions: map[string]*Session{}}
 }
 
-// Create spawns a new claude PTY under id. ErrIDInUse if the id already
+// Create spawns an interactive claude PTY under id; see CreateWith.
+func (m *Manager) Create(id string, cols, rows uint16, args []string) (*Session, error) {
+	return m.CreateWith(id, cols, rows, args, false)
+}
+
+// CreateWith spawns a claude PTY under id. ErrIDInUse if the id already
 // has a session. The session lives until Close(id) or natural exit.
 // args, when non-empty, are appended to the claude exec (e.g.
 // ["--resume", "<uuid>"] to resume a prior session).
-func (m *Manager) Create(id string, cols, rows uint16, args []string) (*Session, error) {
+func (m *Manager) CreateWith(id string, cols, rows uint16, args []string, headless bool) (*Session, error) {
 	m.mu.Lock()
-	defer m.mu.Unlock()
 	if _, ok := m.sessions[id]; ok {
+		m.mu.Unlock()
 		return nil, ErrIDInUse
 	}
-	s, err := newSession(id, m.cfg.ClaudeExec, args, cols, rows, m.cfg.RingBufBytes)
+	s, err := newSession(id, m.cfg.ClaudeExec, args, cols, rows, m.cfg.RingBufBytes, headless)
 	if err != nil {
+		m.mu.Unlock()
 		return nil, err
 	}
+	s.onEnd = m.changed
 	m.sessions[id] = s
-	go func() {
-		s.wait()
-		// Don't remove from the map on natural exit — leave the session
-		// marked dead so a LIST still surfaces it (and ATTACH on it
-		// returns "ended"). Explicit Close removes.
-	}()
+	m.mu.Unlock()
+	// Dead sessions stay in the map (LIST shows them, ATTACH answers "ended"); Close removes.
+	go s.wait()
+	m.changed()
 	return s, nil
+}
+
+func (m *Manager) changed() {
+	if m.cfg.OnChange != nil {
+		m.cfg.OnChange()
+	}
 }
 
 // Get returns the session with the given id, or nil if not present.
@@ -71,6 +85,7 @@ func (m *Manager) Close(id string) {
 	if s != nil {
 		s.kill()
 	}
+	m.changed()
 }
 
 // List returns a snapshot of every session id + alive flag.
@@ -79,7 +94,7 @@ func (m *Manager) List() []SessionInfo {
 	defer m.mu.Unlock()
 	out := make([]SessionInfo, 0, len(m.sessions))
 	for id, s := range m.sessions {
-		out = append(out, SessionInfo{ID: id, Alive: s.Alive()})
+		out = append(out, SessionInfo{ID: id, Alive: s.Alive(), Ended: s.EndReason()})
 	}
 	return out
 }
@@ -117,6 +132,52 @@ func (m *Manager) CloseAll() {
 type SessionInfo struct {
 	ID    string
 	Alive bool
+	Ended string
+}
+
+type Snap struct {
+	ID       string
+	Alive    bool
+	Headless bool
+	Pid      int
+	Ended    string
+}
+
+// Snapshot lists every session, dead ones included, sorted by id.
+func (m *Manager) Snapshot() []Snap {
+	m.mu.Lock()
+	out := make([]Snap, 0, len(m.sessions))
+	for id, s := range m.sessions {
+		out = append(out, Snap{ID: id, Alive: s.Alive(), Headless: s.headless, Pid: s.Pid(), Ended: s.EndReason()})
+	}
+	m.mu.Unlock()
+	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
+	return out
+}
+
+func (m *Manager) Terminate(id, reason string) {
+	if s := m.Get(id); s != nil {
+		s.Terminate(reason, TerminateGrace)
+	}
+}
+
+func (m *Manager) Interrupt(id string) {
+	if s := m.Get(id); s != nil {
+		s.Interrupt()
+	}
+}
+
+// KillAll kills every live session with reason and keeps them listed (CloseAll drops them).
+func (m *Manager) KillAll(reason string) {
+	m.mu.Lock()
+	list := make([]*Session, 0, len(m.sessions))
+	for _, s := range m.sessions {
+		list = append(list, s)
+	}
+	m.mu.Unlock()
+	for _, s := range list {
+		s.KillWith(reason)
+	}
 }
 
 var (
