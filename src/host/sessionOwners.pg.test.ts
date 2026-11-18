@@ -82,6 +82,17 @@ describe.skipIf(!isPg)('sessionOwnerStore', () => {
       .toEqual([['tab-a', 50], ['tab-b', 20], ['tab-c', 5]]);
   });
 
+  it('latestSessionOf maps each broker session to its newest claude session in this workspace only', async () => {
+    const s = await rig();
+    await s.record(claim('tab1', S1, ann, 100));
+    await s.record(claim('tab1', S2, ann, 200));
+    await s.record(claim('tab2', S3, ann, 150));
+    await sessionOwnerStore(db.stateKysely, OTHER).record(claim('tab3', S1, bob, 300));
+    await sessionOwnerStore(db.stateKysely, OTHER).record(claim('tab2', S1, bob, 400));
+    expect(await s.latestSessionOf(['tab1', 'tab2', 'tab3', 'tab4'])).toEqual(new Map([['tab1', S2], ['tab2', S3]]));
+    expect(await s.latestSessionOf([])).toEqual(new Map());
+  });
+
   it('pinState: owned only by a row in this workspace; known by a sessions row here; published by any publish_sessions row', async () => {
     const s = await rig();
     expect(await s.pinState(S1)).toEqual({ owned: false, published: false, known: false });
