@@ -14,7 +14,8 @@ export const EVENT_CHANNELS = new Set([
   'automations:changed',
   'proposals:changed',
   'inbox:changed',
-  'notices:changed'
+  'notices:changed',
+  'broker:drain'
 ]);
 
 export interface Subscriber {
@@ -23,9 +24,12 @@ export interface Subscriber {
 
 export class EventHub {
   private readonly subs = new Set<Subscriber>();
+  /** channel → its last frame, sent to every new subscriber. */
+  private readonly sticky = new Map<string, string>();
 
   add(s: Subscriber): () => void {
     this.subs.add(s);
+    for (const text of this.sticky.values()) s.send(text);
     return () => this.subs.delete(s);
   }
 
@@ -34,10 +38,20 @@ export class EventHub {
   }
 
   publish(channel: string, payload: unknown): void {
+    const text = this.encode(channel, payload);
+    for (const s of this.subs) s.send(text);
+  }
+
+  publishSticky(channel: string, payload: unknown): void {
+    const text = this.encode(channel, payload);
+    this.sticky.set(channel, text);
+    for (const s of this.subs) s.send(text);
+  }
+
+  private encode(channel: string, payload: unknown): string {
     if (!EVENT_CHANNELS.has(channel)) throw new Error(`unknown event channel ${channel}`);
     // Titles and session text can carry a printed token. Strings first (escapes hide boundaries), the line as a backstop.
-    const text = redactSecrets(JSON.stringify({ channel, payload }, redactStrings));
-    for (const s of this.subs) s.send(text);
+    return redactSecrets(JSON.stringify({ channel, payload }, redactStrings));
   }
 }
 

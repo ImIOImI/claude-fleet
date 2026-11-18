@@ -1,7 +1,7 @@
 // The host's view of the in-container broker. One upstream attachment per
 // session (the broker allows one writer); control ops use a fresh connection
 // each, because BrokerClient allows one in-flight request per response type.
-import { BrokerClient, type BrokerPortInfo, type SessionInfo } from '../main/broker.js';
+import { BrokerClient, type BrokerPortInfo, type BrokerState, type SessionInfo } from '../main/broker.js';
 import type { HostPort } from './endpoint.js';
 
 /** A Unix socket path, or the workspace pod's broker on TCP. */
@@ -15,6 +15,8 @@ export interface UpstreamHandlers {
   onEnded(): void;
   /** The broker connection dropped. */
   onGone(): void;
+  /** The broker dropped input (code `draining`). */
+  onNotice?(code: string): void;
 }
 
 export interface Upstream {
@@ -28,10 +30,12 @@ export interface Upstream {
 
 export interface BrokerOps {
   attach(id: string, h: UpstreamHandlers): Promise<{ ok: true; upstream: Upstream } | { ok: false; error: string }>;
-  create(id: string, cols: number, rows: number, args: string[]): Promise<{ ok: boolean; error?: string }>;
+  create(id: string, cols: number, rows: number, args: string[], opts?: { headless?: boolean }): Promise<{ ok: boolean; error?: string }>;
   list(): Promise<SessionInfo[]>;
   listPorts(): Promise<BrokerPortInfo[]>;
   killPort(port: number): Promise<{ ok: boolean; error?: string }>;
+  /** One persistent WATCH connection; rejects when the broker can't be reached. */
+  watch?(h: { onState(s: BrokerState): void; onClose(): void }): Promise<{ stop(): void }>;
 }
 
 /**
@@ -67,6 +71,7 @@ export function brokerOps(endpoint: BrokerEndpoint): BrokerOps {
       c.on('history', (ch: number, b: Buffer) => ch === UPSTREAM_CHANNEL && h.onHistory(b));
       c.on('output', (ch: number, b: Buffer) => ch === UPSTREAM_CHANNEL && h.onOutput(b));
       c.on('ended', (ch: number) => ch === UPSTREAM_CHANNEL && h.onEnded());
+      c.on('notice', (ch: number, code: string) => ch === UPSTREAM_CHANNEL && h.onNotice?.(code));
       c.on('error', () => undefined);
       c.on('close', () => h.onGone());
       const r = await c.attachSession(id, UPSTREAM_CHANNEL).catch(() => ({ ok: false, error: 'attach failed' }));
@@ -91,7 +96,27 @@ export function brokerOps(endpoint: BrokerEndpoint): BrokerOps {
         }
       };
     },
-    create: (id, cols, rows, args) => withClient(endpoint, (c) => c.createSession(id, cols, rows, args)),
+    create: (id, cols, rows, args, opts) => withClient(endpoint, (c) => c.createSession(id, cols, rows, args, opts)),
+    // Never status() here: it shares STATE frames with watch(), and an old broker never answers it.
+    async watch(h) {
+      const c = new BrokerClient(endpoint);
+      try {
+        await c.ready();
+      } catch (err) {
+        c.close();
+        throw err;
+      }
+      c.on('state', (s: BrokerState) => h.onState(s));
+      c.on('error', () => undefined);
+      c.once('close', () => h.onClose());
+      c.watch();
+      return {
+        stop: () => {
+          c.removeAllListeners('close');
+          c.close();
+        }
+      };
+    },
     list: () => withClient(endpoint, (c) => c.listSessions()),
     listPorts: () => withClient(endpoint, (c) => c.listPorts()),
     killPort: (port) => withClient(endpoint, (c) => c.killPort(port))

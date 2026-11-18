@@ -89,3 +89,15 @@ describe('pruneDeadOwners', () => {
     expect([...hub.owners.keys()].sort()).toEqual(['late', 'live']);
   });
 });
+
+it('a sticky channel replays its last value to a new subscriber', () => {
+  const hub = new EventHub();
+  const a: string[] = [];
+  hub.add({ send: (t) => a.push(t) });
+  hub.publishSticky('broker:drain', { phase: 'draining', softAt: 1, hardAt: 2, instance: 'i' });
+  hub.publishSticky('broker:drain', { phase: 'serving', softAt: null, hardAt: null, instance: 'j' });
+  const b: string[] = [];
+  hub.add({ send: (t) => b.push(t) });
+  expect(a).toHaveLength(2);
+  expect(b.map((t) => JSON.parse(t))).toEqual([{ channel: 'broker:drain', payload: { phase: 'serving', softAt: null, hardAt: null, instance: 'j' } }]);
+});
