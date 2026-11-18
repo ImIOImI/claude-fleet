@@ -219,7 +219,10 @@ Dispatch is paused unless the gate is `serving` or `legacy`.
 
 ## Security (§9 additions)
 
-- The control socket is a Unix socket, 0600, owned by uid 1000, only in the workspace pod. It isn't reachable from other pods or from the mesh. `DRAIN` is refused (`NOTICE drain-refused`) unless the caller's ppid chain (`SO_PEERCRED`, then `/proc/<pid>/stat`, at most 64 hops) leaves the pid namespace (ppid 0) without passing a session root, the broker or pid 1: kubelet's preStop and `kubectl exec` pass; a session's processes, including orphans reparented to pid 1, don't. An unreadable chain is refused. `STATUS` is open to any caller. `/run/broker` is `1777`.
+- The control socket is a Unix socket, 0600, owned by uid 1000, only in the workspace pod. It isn't reachable from other pods or from the mesh. `/run/broker` is `1777`. `STATUS` is open to any caller.
+- `DRAIN` on the control socket is refused unless the caller's process chain reaches ppid 0 (exec'd by the container runtime); a session can still SIGTERM the broker (same uid), which drains and then restarts the container, so it can't leave the pod stuck.
+  - The chain is read from `SO_PEERCRED`, then `/proc/<pid>/stat`, at most 64 hops. Passing a session root, the broker or pid 1 refuses it (`NOTICE drain-refused`), so a session's processes, including orphans reparented to pid 1, can't drain; kubelet's preStop and `kubectl exec` can. An unreadable chain is refused.
+  - **Known residual:** a session runs as the same uid as the exec'd readiness probe (`broker ready`, every 5 s) and can `ptrace` it into sending `DRAIN`. Appendix B recommends `kernel.yama.ptrace_scope ≥ 1` or a seccomp profile that denies `ptrace`.
 - `STATUS` and `WATCH` are on :7070 under the existing mesh policy (host SA only). They expose session ids and drain timings, which fleet-host already sees through `LIST`.
 - `DRAIN` on :7070 is refused (`unknown frame`, dropped), so only the control socket starts a drain.
 - `STATE`, `NOTICE` and `broker:drain` carry no session content. Desktops treat `broker:drain` fields as untrusted: the phase must be one of the three, the times must be safe integers, and the strings are one-lined and capped at 32.
@@ -343,4 +346,6 @@ metadata:
 - During that drain, restart the host pod (`kubectl delete pod <host>`). The new host's log shows `broker drain state` with `phase: draining` (it reached the terminating pod), and the desktop's banner comes back. If it shows `unknown` instead, the terminating pod isn't routable: report it, and roll the host pod only after the workspace pod has finished (a sync wave) until it is.
 - An idle-only workspace: `kubectl delete pod` finishes within about 10 s.
 - `kubectl exec <workspace> -- /usr/local/bin/broker ready; echo $?` prints 0 while serving.
+- `kernel.yama.ptrace_scope` on the workspace nodes is `≥ 1` (`cat /proc/sys/kernel/yama/ptrace_scope` in the pod), or the workspace container runs a seccomp profile that denies `ptrace`. Otherwise a session can ptrace the exec'd readiness probe into sending `DRAIN` (§9 residual).
+- `hostPID` pods: preStop DRAIN is refused (the chain reaches the host's pid 1); SIGTERM still drains (D143).
 - In a workspace pod, an automation fresh step sent SIGINT (`kill -INT -<pgid>`) exits non-zero on the pinned claude. If it exits 0, report it (D145 depends on it).

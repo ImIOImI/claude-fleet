@@ -288,6 +288,8 @@ export function createAutomationService(deps: AutomationDeps) {
       if (!due) continue;
       // Conditional on the listed snapshot: a disable, edit or fresh run-chosen next fire since the list skips this fire.
       const guard = { version: a.version, enabled: true as const, nextRunAt: a.nextRunAt };
+      // A drain that started mid-tick must not consume this slot either.
+      if (deps.paused?.()) break;
       if (!(await store.setLastScheduled(a.id, now, guard))) continue;
       if (due.kind === 'rescheduled' && !(await store.setNextRun(a.id, null, null, guard))) continue;
       try {

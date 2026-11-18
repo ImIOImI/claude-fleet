@@ -166,7 +166,7 @@ export async function startHolder(o: HolderOptions): Promise<Holder> {
     if (indexer) void indexer.backfill().catch((err: Error) => o.log.log('warn', 'index backfill failed', { error: err.message }));
     automations = await startHostAutomations({
       inbox: stores.inbox, workspace: o.workspace, ops: o.ops, owners, mcpArgs: o.mcp.args, events: o.events, log: o.log,
-      ledger: pgActionLedger(ledgerK), gate: o.gate
+      ledger: pgActionLedger(ledgerK), gate: o.gate, drains
     });
     await automations.reconcile(o.automations());
     if (o.gate) drainHooks = startHostDrain({ gate: o.gate, drains, automations, owners, log: o.log });

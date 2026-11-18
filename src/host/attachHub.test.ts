@@ -680,15 +680,15 @@ describe('while the workspace pod drains', () => {
     expect(rec.frames.filter((f) => f.type === FrameType.NOTICE)).toEqual([]);
     expect(broker.sessions.get('s1')!.inputs).toEqual([]);
   });
-});
 
-it('a CREATE while draining writes no owner row', async () => {
-  const claims: OwnerClaim[] = [];
-  const broker = fakeBroker([]);
-  const hub = new AttachHub(broker.ops, { draining: () => true, recordOwner: async (c) => { claims.push(c); return true; } });
-  const rec = sinkRecorder();
-  const v = hub.viewer({ identity: alice, tier: 'session' }, rec.sink);
-  await v.receive(jsonFrame(FrameType.CREATE, { id: 'n', cols: 80, rows: 24 }));
-  expect(last(rec).json).toMatchObject({ ok: false, error: DRAINING_CREATE_ERROR });
-  expect(claims).toEqual([]);
+  it('a CREATE while draining writes no owner row', async () => {
+    const claims: OwnerClaim[] = [];
+    const broker = fakeBroker([]);
+    const hub = new AttachHub(broker.ops, { draining: () => true, recordOwner: async (c) => { claims.push(c); return true; } });
+    const rec = sinkRecorder();
+    const v = hub.viewer({ identity: alice, tier: 'session' }, rec.sink);
+    await v.receive(jsonFrame(FrameType.CREATE, { id: 'n', cols: 80, rows: 24 }));
+    expect(last(rec).json).toMatchObject({ ok: false, error: DRAINING_CREATE_ERROR });
+    expect(claims).toEqual([]);
+  });
 });

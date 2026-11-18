@@ -43,6 +43,7 @@ export const INBOX_TOOLS = ['post_todo', 'update_todo', 'list_todos', 'notify', 
 /** Added for automations that may set their own next run (#437). */
 export const SCHEDULE_NEXT_TOOL = 'mcp__claude-fleet-state__schedule_next';
 const FRESH_POLL_MS = 2000;
+/** Run errors read `<step>: ` + this; match with endsWith, never equality. */
 export const HOST_RESTART_ERROR = 'interrupted by host restart';
 const DEFAULT_SCRIPT_TIMEOUT_MS = 5 * 60_000;
 
@@ -55,7 +56,7 @@ const POLL_MS = 1000;
 /** A live step's target that never starts working within this window is treated as done. */
 const START_GRACE_MS = 30_000;
 
-class StepError extends Error {
+export class StepError extends Error {
   constructor(message: string, readonly status: RunStatus = 'failed') { super(message); }
 }
 

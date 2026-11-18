@@ -34,9 +34,11 @@ func peerPid(c net.Conn) (int, error) {
 	return int(cred.Pid), nil
 }
 
-// drainCallerErr allows only a caller whose ancestry leaves the pid namespace (ppid 0): kubelet's
-// preStop and `kubectl exec`/`docker exec` are spawned by the runtime outside it. A session's
-// descendants pass a session root, the broker, or pid 1 (where orphans are reparented) first.
+// drainCallerErr: DRAIN on the control socket is refused unless the caller's process chain reaches
+// ppid 0 (exec'd by the container runtime) without passing a session root, the broker, or pid 1
+// (where orphans are reparented). A session can still SIGTERM the broker (same uid), which drains and
+// then restarts the container, so it can't leave the pod stuck. Residual: a session can ptrace an
+// exec'd process such as the readiness probe (spec Appendix B: ptrace_scope >= 1 or seccomp).
 func drainCallerErr(pid, self int, roots map[int]string, ppid func(int) (int, bool)) error {
 	for hops := 0; hops < maxCallerHops; hops++ {
 		if id, ok := roots[pid]; ok {

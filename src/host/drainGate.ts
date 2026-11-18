@@ -9,6 +9,8 @@ export type GatePhase = 'serving' | 'draining' | 'unknown' | 'legacy';
 export const LEGACY_AFTER_MS = 5_000;
 export const WATCH_RETRY_MS = 1_000;
 export const WATCH_RETRY_MAX_MS = 10_000;
+/** 3 × the broker's 5 s STATE heartbeat: a half-open WATCH (node loss, partition) must not pin the phase. */
+export const WATCH_STALE_MS = 15_000;
 const ENDED_MEMORY = 1_000;
 
 export interface DrainEvent {
@@ -38,6 +40,7 @@ export interface DrainGateOptions {
   legacyMs?: number;
   retryMs?: number;
   retryMaxMs?: number;
+  staleMs?: number;
   schedule?: (fn: () => void, ms: number) => () => void;
 }
 
@@ -108,12 +111,38 @@ export function startDrainGate(o: DrainGateOptions): DrainGate {
     let gotState = false;
     let closed = false;
     let legacy: (() => void) | null = null;
+    let stale: (() => void) | null = null;
+    let handle: { stop(): void } | null = null;
+    const onClose = (): void => {
+      if (closed) return;
+      closed = true;
+      legacy?.();
+      legacy = null;
+      stale?.();
+      stale = null;
+      current = null;
+      if (stopped) return;
+      setPhase('unknown');
+      emit();
+      retry();
+    };
+    const armStale = (): void => {
+      stale?.();
+      stale = schedule(() => {
+        stale = null;
+        if (closed || stopped) return;
+        o.log.log('warn', 'broker watch went quiet; reconnecting', { ms: o.staleMs ?? WATCH_STALE_MS });
+        handle?.stop();
+        onClose();
+      }, o.staleMs ?? WATCH_STALE_MS);
+    };
     watch({
       onState: (s) => {
         if (stopped || closed) return;
         gotState = true;
         legacy?.();
         legacy = null;
+        armStale();
         delay = retryStart;
         last = s;
         remember(s);
@@ -121,20 +150,13 @@ export function startDrainGate(o: DrainGateOptions): DrainGate {
         setPhase(s.phase === 'serving' ? 'serving' : 'draining');
         emit();
       },
-      onClose: () => {
-        closed = true;
-        legacy?.();
-        legacy = null;
-        current = null;
-        if (stopped) return;
-        setPhase('unknown');
-        emit();
-        retry();
-      }
+      onClose
     }).then(
       (w) => {
         if (stopped) return w.stop();
-        if (closed) return;
+        // The watchdog fired before the connection resolved.
+        if (closed) return w.stop();
+        handle = w;
         current = w;
         if (!gotState) {
           legacy = schedule(() => {

@@ -8,6 +8,7 @@ import type { TodoSource } from '../preload/inboxTypes.js';
 import { DRAIN_CUT_REASONS } from '../main/broker.js';
 import { AutomationStore } from '../main/automations/automationStore.js';
 import { createAutomationService, type AutomationDeps } from '../main/automations/automationService.js';
+import { HOST_RESTART_ERROR, StepError } from '../main/automations/runner.js';
 import { createProposalService } from '../main/automations/proposalService.js';
 import { ProposalStore } from '../main/automations/proposalStore.js';
 import { definitionToYaml, validateDefinition } from '../main/automations/definition.js';
@@ -18,6 +19,8 @@ import type { InboxStore } from '../main/inbox/inboxDb.js';
 import { setAutomationHandlers, setInboxHandlers } from '../main/mcpCore.js';
 import type { BrokerOps } from './brokerOps.js';
 import { isOpen, type DrainGate } from './drainGate.js';
+import type { DrainStore } from './drainStore.js';
+import { freshRunId } from './hostDrain.js';
 import type { HostAutomationEntry } from './config.js';
 import type { EventHub } from './events.js';
 import { memoryActionLedger, type ActionLedger } from './hostActions.js';
@@ -59,6 +62,8 @@ export interface HostAutomationsOptions {
   /** The workspace pod's drain (D148); absent: never paused. */
   gate?: Pick<DrainGate, 'phase' | 'last' | 'ended' | 'waitServing'>;
   stepWaitMs?: number;
+  /** Re-run ledger: a CREATE the broker refuses as draining queues the run's one re-run (D150). */
+  drains?: Pick<DrainStore, 'markRetry'>;
   /** Tests: the service deps and the spawned-instance map. */
   onDeps?: (deps: AutomationDeps, spawnedOn: Map<string, string | null>) => void;
 }
@@ -129,6 +134,13 @@ export async function startHostAutomations(o: HostAutomationsOptions) {
       const r = await o.ops.create(sessionId, 120, 40, argv, { headless: true });
       if (!r.ok) {
         if (recorded) await o.owners?.release?.(sessionId, claudeId).catch(warn('session owner release failed'));
+        // The pod started draining after waitServing: interrupted, not failed.
+        if (r.error?.startsWith('draining')) {
+          const runId = freshRunId(sessionId);
+          const run = runId ? await store.getRun(runId) : null;
+          if (run && !run.trigger.retryOf) await o.drains?.markRetry(run.id, run.automationId, now());
+          throw new StepError(HOST_RESTART_ERROR, 'interrupted');
+        }
         throw new Error(`could not start a fresh session: ${r.error ?? 'unknown broker error'}`);
       }
       spawnedOn.set(sessionId, o.gate?.last()?.instance ?? null);

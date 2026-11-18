@@ -12,8 +12,8 @@ import type { AutomationRow, InboxDb, RunRowSql, StepRunRowSql } from '../store/
 
 type Q = Kysely<InboxDb> | Transaction<InboxDb>;
 
-
 export const APP_QUIT_MID_RUN = 'the app quit mid-run';
+
 export interface AutomationRecord {
   id: string;
   name: string;

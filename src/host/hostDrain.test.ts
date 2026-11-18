@@ -112,6 +112,20 @@ describe('host drain hooks', () => {
     await h.stop();
   });
 
+  it('a pending re-run whose original still reads running is skipped with a warning', async () => {
+    const r = await hostAutomationsRig();
+    const a = await r.createFreshAutomation('review');
+    const run = await r.runtime.store.startRun(a.raw, { kind: 'manual' }, {}, 'running', 1);
+    const drains = memoryDrainStore();
+    await drains.markRetry(run.id, a.id, 1);
+    const lines: Array<{ level: string; msg: string }> = [];
+    const log = createLogger((l) => lines.push(JSON.parse(l)));
+    const h = startHostDrain({ gate: fakeGate('serving'), drains, automations: r.runtime, owners: owners({}), log, now: () => 5 });
+    await h.idle();
+    expect(lines.filter((l) => l.msg === 'automation re-run skipped').map((l) => l.level)).toEqual(['warn']);
+    await h.stop();
+  });
+
   it('a session a viewer named like a run (not headless) queues nothing', async () => {
     const r = await hostAutomationsRig();
     const a = await r.createFreshAutomation('review');

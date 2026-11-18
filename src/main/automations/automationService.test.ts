@@ -524,6 +524,19 @@ steps:
     await svc.settle();
   });
 
+  it('a drain that starts mid-tick consumes no slot', async () => {
+    let calls = 0;
+    const { svc, store, advance } = await setup({ paused: () => (calls++ === 0 ? null : RESTARTING) });
+    const a = await svc.create(YAML(), USER);
+    const slot = (await store.get(a.id))!.lastScheduledAt;
+    advance(3 * 3_600_000);
+    calls = 0;
+    expect(await svc.tick()).toEqual([]);
+    expect(calls).toBeGreaterThan(1);
+    expect((await store.get(a.id))!.lastScheduledAt).toBe(slot);
+    expect((await svc.get(a.id))!.runs).toEqual([]);
+  });
+
   it('a retry carries retryOf, skips the per-minute cap, and keeps the original args', async () => {
     const { svc } = await setup();
     const a = await svc.create(YAML(), USER);

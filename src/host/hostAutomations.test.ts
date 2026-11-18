@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { AutomationStore } from '../main/automations/automationStore.js';
 import { definitionToYaml } from '../main/automations/definition.js';
-import { INBOX_TOOLS } from '../main/automations/runner.js';
+import { HOST_RESTART_ERROR, INBOX_TOOLS } from '../main/automations/runner.js';
 import { InboxStore } from '../main/inbox/inboxDb.js';
 import { NotifyStore } from '../main/inbox/notifyStore.js';
 import { NOTICE_RETENTION_MS } from './hostNotices.js';
@@ -14,6 +14,7 @@ import { hostMcpArgs } from './hostMcp.js';
 import { LeaseLostError } from './pgLease.js';
 import { HOST_CONFIG_ORIGIN, RESTARTING, startHostAutomations, type HostAutomations } from './hostAutomations.js';
 import { closeHostAutomationsRigs, hostAutomationsRig } from './testHostAutomations.js';
+import { memoryDrainStore } from './drainStore.js';
 import { automationOwner, type OwnerClaim } from './sessionOwners.js';
 import { automationRpcChannels, runtimeOf } from './automationRpc.js';
 import { dispatchRpc } from './rpc.js';
@@ -483,6 +484,26 @@ describe('while the workspace drains', () => {
     expect(await fs('ws', 'auto-D-s')).toBe('alive');
     r.gate.setPhase('legacy');
     expect(await fs('ws', 'auto-D-s')).toBe('missing');
+  });
+
+  it('a CREATE refused as draining after waitServing interrupts the run and queues one re-run', async () => {
+    const drains = memoryDrainStore();
+    const r = await hostAutomationsRig({ drains });
+    const a = await r.createFreshAutomation('review');
+    r.broker.ops.create = async () => ({ ok: false, error: 'draining: the workspace is restarting' });
+    const run = await r.runtime.automations.run(a.id, { kind: 'manual', by: USER, args: {} });
+    await r.runtime.automations.settle();
+    expect(await r.runtime.store.getRun(run.id)).toMatchObject({ status: 'interrupted', error: `review: ${HOST_RESTART_ERROR}` });
+    expect(await drains.claimPending(Date.now())).toMatchObject([{ runId: run.id, automationId: a.id }]);
+    const retry = await r.runtime.automations.run(a.id, { kind: 'manual', by: USER, args: {}, retryOf: run.id });
+    await r.runtime.automations.settle();
+    expect(await r.runtime.store.getRun(retry.id)).toMatchObject({ status: 'interrupted' });
+    expect(await drains.claimPending(Date.now())).toEqual([]);
+    r.broker.ops.create = async () => ({ ok: false, error: 'session: boom' });
+    const other = await r.runtime.automations.run(a.id, { kind: 'manual', by: USER, args: {} });
+    await r.runtime.automations.settle();
+    expect(await r.runtime.store.getRun(other.id)).toMatchObject({ status: 'failed' });
+    expect(await drains.claimPending(Date.now())).toEqual([]);
   });
 
   it('freshState on a legacy gate falls back to LIST and reads its end reason', async () => {

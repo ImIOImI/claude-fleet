@@ -123,6 +123,51 @@ describe('DrainGate', () => {
   });
 });
 
+describe('DrainGate watchdog', () => {
+  it('a WATCH silent for 15 s after a STATE is closed and redialled; every STATE resets it', async () => {
+    const { broker, gate, fire, timers } = rig();
+    await tick();
+    expect(timers.some((t) => t.live && t.ms === 15_000)).toBe(false);
+    broker.pushState(st('draining'));
+    const first = timers.find((t) => t.live && t.ms === 15_000)!;
+    broker.pushState(st('draining'));
+    expect(first.live).toBe(false);
+    expect(timers.filter((t) => t.live && t.ms === 15_000)).toHaveLength(1);
+    fire(15_000);
+    expect(gate.phase()).toBe('unknown');
+    expect(broker.watchers.size).toBe(0);
+    expect(timers.some((t) => t.live && t.ms === 1000)).toBe(true);
+    fire(1000);
+    await tick();
+    expect(broker.watchers.size).toBe(1);
+    broker.pushState(st('serving', 'i2'));
+    expect(gate.phase()).toBe('serving');
+  });
+
+  it('a legacy connection that never sent STATE is exempt', async () => {
+    const { broker, gate, fire, timers } = rig();
+    await tick();
+    fire(5000);
+    expect(gate.phase()).toBe('legacy');
+    expect(timers.some((t) => t.live && t.ms === 15_000)).toBe(false);
+    expect(broker.watchers.size).toBe(1);
+  });
+
+  it('a close after the watchdog fired is ignored', async () => {
+    const { broker, gate, fire, timers } = rig();
+    await tick();
+    broker.pushState(st('serving'));
+    const h = [...broker.watchers][0];
+    const seen: GatePhase[] = [];
+    gate.subscribe((p) => seen.push(p));
+    fire(15_000);
+    h.onClose();
+    expect(seen).toEqual(['unknown']);
+    expect(timers.filter((t) => t.live && t.ms === 1000)).toHaveLength(1);
+    expect(gate.phase()).toBe('unknown');
+  });
+});
+
 describe('DrainGate edge cases', () => {
   it('a watch that closes before it resolves never turns legacy', async () => {
     const timers: Array<{ fn: () => void; ms: number; live: boolean }> = [];

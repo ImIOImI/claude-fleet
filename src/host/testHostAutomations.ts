@@ -4,6 +4,7 @@ import type { AutomationDeps } from '../main/automations/automationService.js';
 import type { AutomationRecord } from '../main/automations/automationStore.js';
 import { openTestInbox } from '../main/store/testStore.js';
 import { isOpen, type GatePhase } from './drainGate.js';
+import type { DrainStore } from './drainStore.js';
 import { startHostAutomations, type HostAutomations } from './hostAutomations.js';
 import { createLogger } from './log.js';
 import { fakeBroker } from './testFakes.js';
@@ -36,7 +37,7 @@ export async function closeHostAutomationsRigs(): Promise<void> {
   for (const close of live.splice(0).reverse()) await close().catch(() => undefined);
 }
 
-export async function hostAutomationsRig(o: { phase?: GatePhase; stepWaitMs?: number } = {}) {
+export async function hostAutomationsRig(o: { phase?: GatePhase; stepWaitMs?: number; drains?: DrainStore } = {}) {
   const inbox = await openTestInbox();
   const broker = fakeBroker([]);
   const gate = fakeDrainGate(o.phase ?? 'serving');
@@ -44,7 +45,7 @@ export async function hostAutomationsRig(o: { phase?: GatePhase; stepWaitMs?: nu
   let spawned: Map<string, string | null> | null = null;
   const runtime: HostAutomations = await startHostAutomations({
     inbox, workspace: () => RIG_WS, ops: broker.ops, mcpArgs: [], events: { publish: () => undefined },
-    log: createLogger(() => undefined), tickMs: 3_600_000, settleMs: 50, gate, stepWaitMs: o.stepWaitMs,
+    log: createLogger(() => undefined), tickMs: 3_600_000, settleMs: 50, gate, stepWaitMs: o.stepWaitMs, drains: o.drains,
     onDeps: (d, m) => { deps = d; spawned = m; }
   });
   live.push(async () => { await runtime.stop(); inbox.close(); });

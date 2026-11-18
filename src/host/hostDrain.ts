@@ -86,7 +86,8 @@ export function startHostDrain(d: HostDrainDeps): { stop(): Promise<void>; idle(
         : null;
       if (why || !run || !a) {
         await d.drains.settle(p.runId, { skipped: why ?? 'unknown' }, now());
-        d.log.log('info', 'automation re-run skipped', { runId: p.runId, why });
+        // Still running when the new pod serves: the cut wasn't seen as an end, so no re-run follows.
+        d.log.log(run?.status === 'running' ? 'warn' : 'info', 'automation re-run skipped', { runId: p.runId, why });
         continue;
       }
       try {
