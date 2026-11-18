@@ -2,7 +2,9 @@
 # The two-pod layout with plain Docker: wiring only. Docker has no mesh, so
 # D73 is a cluster check. A container answering the sidecar readiness URL owns
 # each "pod" network namespace, as istio-proxy would.
-set -euo pipefail
+set -Eeuo pipefail
+# Under -e a check without `|| fail` would exit silently; name the line instead.
+trap 'echo "FAIL: line $LINENO: $BASH_COMMAND"' ERR
 image=$1
 pg_image=pgvector/pgvector:0.8.7-pg16@sha256:0dd3149a06e4579a0d70d8fef9945636cd514005e7237deb27f9b67886f8dc4f
 n=split-$$
@@ -89,7 +91,8 @@ ids+=("$(docker run -d --name "$n-host" --network "container:$n-hostnet" -u 1001
   -e CLAUDE_FLEET_BROKER_ADDR=workspace-svc:7070 -e FLEET_HOST_MCP_ADDR=host-svc:8082 -e FLEET_DB_PASSWORD=app-pw \
   -v "$tmp/cfg:/etc/fleet-host:ro" -v "$tmp/key:/var/run/secrets/github-app:ro" \
   "$image" fleet-host-entry host)")
-port=$(docker port "$n-hostnet" 8080/tcp | head -1 | sed 's/.*://')
+port=$(docker port "$n-hostnet" 8080/tcp | head -1 | sed 's/.*://') || fail "no published host port"
+[ -n "$port" ] || fail "no published host port"
 
 healthy() {
   local body=
@@ -121,7 +124,7 @@ mcp_js="const s=require('net').connect(8082,'host-svc',()=>s.write(JSON.stringif
 until_eq 20 docker exec "$n-ws" node -e "$mcp_js" || fail "tools/list on :8082 from the workspace pod"
 
 # The MCP caller is the hosted workspace, whatever the wire says.
-ws_id=$(docker exec -e PGPASSWORD=app-pw "$n-pg" psql -h 127.0.0.1 -U fleet_agent -d fleet -Atc 'SELECT workspace_id FROM host_meta')
+ws_id=$(docker exec -e PGPASSWORD=app-pw "$n-pg" psql -h 127.0.0.1 -U fleet_agent -d fleet -Atc 'SELECT workspace_id FROM host_meta') || fail "host_meta query"
 [ -n "$ws_id" ] || fail "no hosted workspace id in host_meta"
 docker exec "$n-host" test -s /var/lib/fleet-host/state/workspace-id.json || fail "host mode did not use the image's state dir"
 caller_js="const s=require('net').connect(8082,'host-svc');let b='',n=0;s.setEncoding('utf8');
@@ -131,7 +134,7 @@ s.on('data',(d)=>{b+=d;let i;while((i=b.indexOf('\\n'))!==-1){const m=JSON.parse
 if(m.error||m.result.isError){console.log('error: '+JSON.stringify(m.error||m.result.content));s.destroy();return}
 if(m.id===1)call(2,'list_todos',{});else{console.log(JSON.parse(m.result.content[0].text).map((t)=>t.source.id).join(','));s.destroy()}}});
 s.on('error',(e)=>console.log(e.code))"
-got=$(docker exec "$n-ws" node -e "$caller_js")
+got=$(docker exec "$n-ws" node -e "$caller_js") || fail "MCP caller script: $got"
 [ "$got" = "$ws_id" ] || fail "MCP caller over :8082 is '$got', want the hosted workspace $ws_id"
 
 # What each pod holds.
@@ -142,22 +145,24 @@ docker exec "$n-ws" sh -c 'for p in /proc/[0-9]*; do tr "\0" " " < "$p/cmdline" 
   || fail "fleet-host runs in the workspace pod"
 
 # Restarting the host pod leaves the broker and its sessions running.
-ws_pid=$(docker inspect -f '{{.State.Pid}}' "$n-ws")
-docker restart -t 15 "$n-host" >/dev/null
+ws_pid=$(docker inspect -f '{{.State.Pid}}' "$n-ws") || fail "inspect the workspace pod"
+docker restart -t 15 "$n-host" >/dev/null || fail "docker restart host"
 healthy || fail "host did not recover after a restart"
 test "$(docker inspect -f '{{.State.Running}} {{.State.Pid}}' "$n-ws")" = "true $ws_pid" || fail "workspace pod restarted with the host"
 bctl list | grep -q '{"id":"split1","alive":true}' || fail "session lost across a host restart"
-docker logs "$n-host" 2>&1 | grep -q '"msg":"shutting down"' || fail "host restart was not a clean shutdown"
+grep -q '"msg":"shutting down"' <<<"$(docker logs "$n-host" 2>&1)" || fail "host restart was not a clean shutdown"
 
 # Drain (D142–D147): an idle session closes at once, a busy one is killed at the hard deadline, then the preStop returns.
 bctl create drainidle | grep -q '"ok":true' || fail "CREATE drainidle"
 bctl create drainbusy | grep -q '"ok":true' || fail "CREATE drainbusy"
 docker exec "$n-ws" /usr/local/bin/broker ready || fail "broker not ready before the drain"
 test "$(docker exec "$n-ws" stat -c '%a %U %F' /run/broker/ctl.sock)" = "600 fleet socket" || fail "control socket is not 0600 fleet"
-idle_pid=$(docker exec "$n-ws" sh -c 'for p in /proc/[0-9]*; do [ "$(cat $p/environ 2>/dev/null | tr "\0" "\n" | grep -x CLAUDE_FLEET_BROKER_SESSION_ID=drainidle)" ] && basename $p; done' | head -1)
+# `; true`: the loop's last `[ ] && …` is usually false, which would fail the pipeline under pipefail.
+idle_pid=$(docker exec "$n-ws" sh -c 'for p in /proc/[0-9]*; do [ "$(cat $p/environ 2>/dev/null | tr "\0" "\n" | grep -x CLAUDE_FLEET_BROKER_SESSION_ID=drainidle)" ] && basename $p; done; true' | head -1) || true
 [ -n "$idle_pid" ] || fail "no drainidle process"
 # The broker matches procStart to /proc/<pid>/stat field 22 (a stale file reads busy).
-docker exec "$n-ws" sh -c "mkdir -p ~/.claude/sessions && ps=\$(cut -d')' -f2- /proc/$idle_pid/stat | awk '{print \$20}') && printf '{\"pid\":$idle_pid,\"procStart\":\"%s\",\"sessionId\":\"x\",\"status\":\"idle\"}' \"\$ps\" > ~/.claude/sessions/$idle_pid.json"
+docker exec "$n-ws" sh -c "mkdir -p ~/.claude/sessions && ps=\$(cut -d')' -f2- /proc/$idle_pid/stat | awk '{print \$20}') && printf '{\"pid\":$idle_pid,\"procStart\":\"%s\",\"sessionId\":\"x\",\"status\":\"idle\"}' \"\$ps\" > ~/.claude/sessions/$idle_pid.json" \
+  || fail "write the drainidle status file"
 start=$SECONDS
 docker exec "$n-ws" /usr/local/bin/broker drain > "$tmp/drain.out" || fail "broker drain exited non-zero"
 grep -q '"phase":"done"' "$tmp/drain.out" || fail "drain never reported done"
@@ -166,11 +171,11 @@ docker exec "$n-ws" /usr/local/bin/broker ready && fail "broker ready while drai
 bctl status | grep -q '"id":"drainidle","alive":false,"ended":"drain-idle"' || fail "idle session not closed as drain-idle"
 bctl status | grep -q '"id":"drainbusy","alive":false,"ended":"drain-killed"' || fail "busy session not killed at the hard deadline"
 bctl create late | grep -q 'draining: the workspace is restarting' || fail "CREATE accepted while drained"
-docker stop -t 15 "$n-ws" >/dev/null
+docker stop -t 15 "$n-ws" >/dev/null || fail "docker stop workspace"
 test "$(docker inspect -f '{{.State.ExitCode}}' "$n-ws")" = 0 || fail "drained broker did not exit 0 on SIGTERM"
 
 # The sidecar-less workspace pod gives up after 60 s and exits 1.
 for _ in $(seq 1 90); do [ "$(docker inspect -f '{{.State.Running}}' "$n-nomesh")" = false ] && break; sleep 1; done
 test "$(docker inspect -f '{{.State.ExitCode}}' "$n-nomesh")" = 1 || fail "workspace without a sidecar did not exit 1"
-docker logs "$n-nomesh" 2>&1 | grep -q 'refusing to listen: no Istio sidecar' || fail "no-sidecar refusal not logged"
+grep -q 'refusing to listen: no Istio sidecar' <<<"$(docker logs "$n-nomesh" 2>&1)" || fail "no-sidecar refusal not logged"
 echo "runner-host two-pod split: OK"
