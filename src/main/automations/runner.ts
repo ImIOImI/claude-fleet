@@ -20,7 +20,8 @@ export interface RunnerDeps {
   busy(id: string): boolean;
   /** Fresh headless sessions (#407 Phase 4). */
   spawnFresh(id: string, sessionId: string, args: string[]): Promise<void>;
-  freshState(id: string, sessionId: string): Promise<'alive' | 'ended' | 'missing'>;
+  /** `interrupted`: a host restart's drain cut the session off (fleet-host only). */
+  freshState(id: string, sessionId: string): Promise<'alive' | 'ended' | 'missing' | 'interrupted'>;
   closeFresh(id: string, sessionId: string): Promise<void>;
   /** Script steps (#407 Phase 7). */
   execScript?(
@@ -42,6 +43,7 @@ export const INBOX_TOOLS = ['post_todo', 'update_todo', 'list_todos', 'notify', 
 /** Added for automations that may set their own next run (#437). */
 export const SCHEDULE_NEXT_TOOL = 'mcp__claude-fleet-state__schedule_next';
 const FRESH_POLL_MS = 2000;
+export const HOST_RESTART_ERROR = 'interrupted by host restart';
 const DEFAULT_SCRIPT_TIMEOUT_MS = 5 * 60_000;
 
 export interface RunOutcome {
@@ -75,6 +77,7 @@ async function waitFresh(deps: RunnerDeps, ws: string, sessionId: string, timeou
   const start = deps.now();
   for (;;) {
     const st = await deps.freshState(ws, sessionId);
+    if (st === 'interrupted') throw new StepError(HOST_RESTART_ERROR, 'interrupted');
     if (st !== 'alive') return;
     if (deps.now() - start >= timeoutMs) {
       throw new StepError(`the fresh session in ${deps.workspaceName(ws)} was still running after ${Math.round(timeoutMs / 60_000)}m`, 'timed-out');

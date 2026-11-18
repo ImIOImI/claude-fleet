@@ -13,7 +13,7 @@ afterEach(() => inbox?.close());
 const USER = { kind: 'user' as const, id: null };
 const WSS: Record<string, string> = { 'ops-oncall': 'W1', 'webex-triage': 'W2' };
 
-async function setup(opts: { state?: WorkspaceState; postGate?: Promise<void>; exec?: (script: string) => { exitCode: number; stdout: string }; checkDefinition?: (def: AutomationDef) => string[]; mayRun?: (a: AutomationRecord) => string | null; onError?: (e: unknown) => void } = {}) {
+async function setup(opts: { state?: WorkspaceState; postGate?: Promise<void>; exec?: (script: string) => { exitCode: number; stdout: string }; checkDefinition?: (def: AutomationDef) => string[]; mayRun?: (a: AutomationRecord) => string | null; onError?: (e: unknown) => void; paused?: () => string | null } = {}) {
   inbox = (await openTestInbox());
   const store = new AutomationStore(inbox.kysely);
   let t = new Date(2026, 9, 19, 10, 0).getTime();
@@ -35,11 +35,12 @@ async function setup(opts: { state?: WorkspaceState; postGate?: Promise<void>; e
     automationsWorkspace: () => 'W1',
     checkDefinition: opts.checkDefinition,
     mayRun: opts.mayRun,
+    paused: opts.paused,
     onError: opts.onError,
     execScript: async (_target, o) => ({ ...(opts.exec ?? (() => ({ exitCode: 0, stdout: '' })))(o.script), stderr: '', timedOut: false })
   });
   const fire = async (ms: number) => { t += ms; for (const h of timers) if (!h.dead && h.at <= t) { h.dead = true; h.fn(); } await flush(); };
-  return { store, svc, posts, notes, fire, advance: (ms: number) => { t += ms; }, at: () => t };
+  return { store, svc, posts, notes, fire, timers, advance: (ms: number) => { t += ms; }, at: () => t };
 }
 
 const YAML = (extra = '') => `name: log-watch
@@ -485,5 +486,56 @@ describe('check-then-act stays atomic across awaits', () => {
     const r = await svc.run(a.id, { kind: 'manual', by: USER });
     expect(r.status).toBe('running');
     await svc.settle();
+  });
+});
+
+describe('paused (fleet-host draining)', () => {
+  const RESTARTING = "the workspace is restarting; try again when it's back";
+  const EV = `name: on-event
+triggers:
+  - event: { on: todo.created, debounce: 2m }
+steps:
+  - id: look
+    prompt: { workspace: ops-oncall, mode: live, message: "look" }
+`;
+  it('skips the tick without consuming the slot, re-arms event debounces, refuses manual and MCP starts', async () => {
+    let paused: string | null = RESTARTING;
+    const { svc, store, fire, advance, timers, at } = await setup({ paused: () => paused });
+    const a = await svc.create(YAML(), USER);
+    const slot = (await store.get(a.id))!.lastScheduledAt;
+    advance(3 * 3_600_000);
+    expect(await svc.tick()).toEqual([]);
+    expect((await store.get(a.id))!.lastScheduledAt).toBe(slot);
+    await expect(svc.run(a.id, { kind: 'manual', by: USER })).rejects.toThrow(`log-watch can't start now: ${RESTARTING}`);
+    await expect(svc.run(a.id, { kind: 'manual', by: { kind: 'workspace', id: 'W2' }, callerSupplied: true })).rejects.toThrow(`can't start now`);
+    const e = await svc.create(EV, USER);
+    await svc.onEvent({ on: 'todo.created', todo: { id: 't', title: 'x', tags: [], source: { kind: 'user', id: null } } });
+    await fire(120_000);
+    expect(timers.filter((h) => !h.dead).map((h) => h.at - at())).toEqual([30_000]);
+    expect((await svc.get(e.id))!.runs).toEqual([]);
+    await fire(30_000);
+    expect(timers.filter((h) => !h.dead).map((h) => h.at - at())).toEqual([30_000]);
+    paused = null;
+    await fire(30_000);
+    await svc.settle();
+    expect((await svc.get(e.id))!.runs).toHaveLength(1);
+    expect((await svc.get(a.id))!.runs).toEqual([]);
+    expect((await svc.tick()).map((r) => r.automationId)).toEqual([a.id]);
+    await svc.settle();
+  });
+
+  it('a retry carries retryOf, skips the per-minute cap, and keeps the original args', async () => {
+    const { svc } = await setup();
+    const a = await svc.create(YAML(), USER);
+    const first = await svc.run(a.id, { kind: 'schedule', args: { since: '6h' } });
+    await svc.settle();
+    const capped = await svc.run(a.id, { kind: 'schedule', args: { since: '6h' } });
+    expect(capped).toMatchObject({ status: 'skipped', error: 'rate limit: at most one run per minute' });
+    const again = await svc.run(a.id, { kind: 'schedule', args: { since: '6h' }, retryOf: first.id });
+    expect(again.status).toBe('running');
+    expect(again.trigger).toEqual({ kind: 'schedule', retryOf: first.id });
+    expect(again.args).toEqual({ since: '6h' });
+    await svc.settle();
+    expect((await svc.get(a.id))!.runs.find((r) => r.id === again.id)!.trigger.retryOf).toBe(first.id);
   });
 });

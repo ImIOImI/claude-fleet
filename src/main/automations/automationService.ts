@@ -34,6 +34,8 @@ export interface AutomationDeps extends Omit<RunnerDeps, 'store'> {
   clearTimer?(h: unknown): void;
   /** A timer-started run failed to record (automationIpc logs it). */
   onError?(e: unknown): void;
+  /** Why runs may not start now (fleet-host: the workspace pod is draining); null runs them. */
+  paused?(): string | null;
 }
 
 export interface FleetEvent {
@@ -59,6 +61,8 @@ export interface RunRequest {
   /** Coerce string args (the Run-now form). */
   coerce?: boolean;
   event?: RunRow['trigger']['event'];
+  /** Re-run of this run after a host restart (D150): skips the per-minute cap. */
+  retryOf?: string;
 }
 
 /** A non-manual start of a disabled automation; timer callers skip it quietly. */
@@ -69,6 +73,13 @@ class DisabledError extends Error {
 /** This runtime refuses the automation; timer callers skip it without recording a run. */
 class RefusedError extends Error {
   constructor(name: string, reasons: string[]) { super(`${name} can't run here: ${reasons.join('; ')}`); }
+}
+
+export const PAUSE_RETRY_MS = 30_000;
+
+/** The runtime is paused; timer callers try again later. */
+class PausedError extends Error {
+  constructor(name: string, reason: string) { super(`${name} can't start now: ${reason}`); }
 }
 
 export function createAutomationService(deps: AutomationDeps) {
@@ -222,7 +233,12 @@ export function createAutomationService(deps: AutomationDeps) {
     const gate = deps.mayRun?.(a);
     const refused = [...(deps.checkDefinition?.(a.definition) ?? []), ...(gate ? [gate] : [])];
     if (refused.length) throw new RefusedError(a.name, refused);
-    const trigger = { kind: req.kind, ...(req.by ? { by: req.by } : {}), ...(req.cron ? { cron: req.cron } : {}), ...(req.event ? { event: req.event } : {}) };
+    const paused = deps.paused?.();
+    if (paused) throw new PausedError(a.name, paused);
+    const trigger = {
+      kind: req.kind, ...(req.by ? { by: req.by } : {}), ...(req.cron ? { cron: req.cron } : {}), ...(req.event ? { event: req.event } : {}),
+      ...(req.retryOf ? { retryOf: req.retryOf } : {})
+    };
     const now = deps.now();
     // --- synchronous from here to each store call: read + claim atomically ---
     // Only a manual run may start a disabled automation (the user's Run now; MCP checks enabled itself).
@@ -230,7 +246,7 @@ export function createAutomationService(deps: AutomationDeps) {
     const running = claimed.has(id);
     const userManual = req.kind === 'manual' && req.by?.kind === 'user';
     const last = lastStart.get(id);
-    if (!userManual && last !== undefined && now - last < RATE_MS && !running) {
+    if (!userManual && !req.retryOf && last !== undefined && now - last < RATE_MS && !running) {
       return store.startRun(a, trigger, args.value, 'skipped', now, 'rate limit: at most one run per minute');
     }
     if (running) {
@@ -263,6 +279,8 @@ export function createAutomationService(deps: AutomationDeps) {
   }
 
   async function tickOnce(): Promise<RunRow[]> {
+    // Before any slot is consumed: the first tick after the pause fires it (one catch-up).
+    if (deps.paused?.()) return [];
     const now = deps.now();
     const started: RunRow[] = [];
     for (const a of await store.list()) {
@@ -275,7 +293,7 @@ export function createAutomationService(deps: AutomationDeps) {
       try {
         started.push(await start(a.id, { kind: due.kind, ...(due.cron ? { cron: due.cron } : {}), args: due.args }));
       } catch (e) {
-        if (e instanceof DisabledError) continue;
+        if (e instanceof DisabledError || e instanceof PausedError) continue;
         if (e instanceof RefusedError) {
           deps.onError?.(e);
           continue;
@@ -361,26 +379,32 @@ export function createAutomationService(deps: AutomationDeps) {
         }
         const event = { on: e.on, ...(ws ? { workspaceId: ws } : {}), ...(e.todo ? { todoId: e.todo.id, todoTitle: e.todo.title } : {}), count: 1 };
         const ms = parseDuration(trig.event.debounce) ?? DEFAULT_DEBOUNCE_MS;
-        pending.set(a.id, {
-          event,
-          timer: setTimer(() => {
-            const fired = pending.get(a.id);
-            pending.delete(a.id);
-            if (!fired) return;
-            const p = (async () => {
-              try {
-                await start(a.id, { kind: 'event', event: fired.event });
-              } catch (err) {
-                if (err instanceof DisabledError) return;
-                if (err instanceof RefusedError) throw err;
-                const cur = await store.get(a.id);
-                if (cur) await failedStart(cur, { kind: 'event', event: fired.event }, (err as Error).message);
+        const fire = (): void => {
+          const fired = pending.get(a.id);
+          if (!fired) return;
+          if (deps.paused?.()) {
+            fired.timer = setTimer(fire, PAUSE_RETRY_MS);
+            return;
+          }
+          pending.delete(a.id);
+          const p = (async () => {
+            try {
+              await start(a.id, { kind: 'event', event: fired.event });
+            } catch (err) {
+              if (err instanceof DisabledError) return;
+              if (err instanceof RefusedError) throw err;
+              if (err instanceof PausedError) {
+                if (!pending.has(a.id)) pending.set(a.id, { event: fired.event, timer: setTimer(fire, PAUSE_RETRY_MS) });
+                return;
               }
-              deps.changed();
-            })().catch((err) => deps.onError?.(err));
-            track(p);
-          }, ms)
-        });
+              const cur = await store.get(a.id);
+              if (cur) await failedStart(cur, { kind: 'event', event: fired.event }, (err as Error).message);
+            }
+            deps.changed();
+          })().catch((err) => deps.onError?.(err));
+          track(p);
+        };
+        pending.set(a.id, { event, timer: setTimer(fire, ms) });
       }
       return matched;
     },

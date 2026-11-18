@@ -1,6 +1,6 @@
 import { describe, it, expect, afterEach } from 'vitest';
 import { InboxStore } from '../inbox/inboxDb.js';
-import { AutomationStore } from './automationStore.js';
+import { APP_QUIT_MID_RUN, AutomationStore } from './automationStore.js';
 import type { AutomationDef } from '../../preload/inboxTypes.js';
 import { openTestInbox, countQueries } from '../store/testStore.js';
 
@@ -117,5 +117,23 @@ describe('optimistic version check', () => {
     await expect(s.update(a.id, def, { kind: 'user', id: null }, 3, 1)).rejects.toThrow(/changed \(now v2\)/);
     expect((await s.get(a.id))?.version).toBe(2);
     expect((await s.versions(a.id)).map((v) => v.version)).toEqual([2, 1]);
+  });
+});
+
+describe('noteInterrupted', () => {
+  it("rewrites only an interrupted run's error", async () => {
+    inbox = (await openTestInbox());
+    const store = new AutomationStore(inbox.kysely);
+    const a = await store.create(def(), USER, 1);
+    const r = await store.startRun(a, { kind: 'manual' }, {}, 'running', 1);
+    await store.markInterrupted(2);
+    expect((await store.getRun(r.id))!.error).toBe(APP_QUIT_MID_RUN);
+    expect(APP_QUIT_MID_RUN).toBe('the app quit mid-run');
+    expect(await store.noteInterrupted(r.id, 'review: interrupted by host restart')).toBe(true);
+    expect((await store.getRun(r.id))!).toMatchObject({ status: 'interrupted', error: 'review: interrupted by host restart' });
+    const ok = await store.startRun(a, { kind: 'manual' }, {}, 'succeeded', 3);
+    expect(await store.noteInterrupted(ok.id, 'x')).toBe(false);
+    expect((await store.getRun(ok.id))!.error).toBeNull();
+    expect(await store.noteInterrupted('nope', 'x')).toBe(false);
   });
 });
