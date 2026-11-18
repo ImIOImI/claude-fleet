@@ -13,10 +13,13 @@ trap cleanup EXIT
 
 cat > "$tmp/broker" <<'SH'
 #!/usr/bin/env bash
+# As the preStop hook: `broker drain` / `broker ready` record their call and succeed.
+if [ $# -gt 0 ]; then echo "cli $*" >> "$FAKE_DIR/events"; exit 0; fi
 trap 'echo broker-term >> "$FAKE_DIR/events"; exit 0' TERM
 echo $$ >> "$FAKE_DIR/pids"
 echo broker-start >> "$FAKE_DIR/events"
 echo "env ${CLAUDE_FLEET_BROKER_TCP_PORT:-} ${CLAUDE_FLEET_BROKER_REQUIRE_MESH:-} ${FLEET_HOST_CRED_ADDR:-}" >> "$FAKE_DIR/events"
+echo "drain ${CLAUDE_FLEET_BROKER_DRAIN:-}" >> "$FAKE_DIR/events"
 if [ -n "${FAKE_BROKER_EXIT:-}" ]; then sleep 0.3; exit "$FAKE_BROKER_EXIT"; fi
 while :; do sleep 0.05; done
 SH
@@ -54,7 +57,7 @@ run() {
   dir="$tmp/case-$1"; local mode=$2; shift 2
   mkdir -p "$dir"; : > "$dir/events"
   local args=("$mode"); [ "$mode" = none ] && args=()
-  env -u CLAUDE_FLEET_BROKER_TCP_PORT -u CLAUDE_FLEET_BROKER_REQUIRE_MESH -u FLEET_HOST_CRED_ADDR -u CLAUDE_FLEET_BROKER_ADDR \
+  env -u CLAUDE_FLEET_BROKER_TCP_PORT -u CLAUDE_FLEET_BROKER_REQUIRE_MESH -u CLAUDE_FLEET_BROKER_DRAIN -u FLEET_HOST_CRED_ADDR -u CLAUDE_FLEET_BROKER_ADDR \
     -u FLEET_HOST_MCP_ADDR -u FLEET_HOST_CRED_TCP_PORT -u FLEET_HOST_MCP_TCP_PORT -u FLEET_HOST_REQUIRE_MESH -u FLEET_HOST_RESCAN_MS \
     -u FLEET_MESH_READY_URL -u FLEET_HOST_STATE -u FLEET_HOST_PROJECTS \
     PATH="$tmp/bin:$PATH" FAKE_UID=1001 HOME=/home/fleet FAKE_DIR="$dir" FLEET_BROKER_BIN="$tmp/broker" FLEET_HOST_JS="$tmp/host.mjs" FLEET_HOST_PORT="$(free_port)" \
@@ -345,5 +348,21 @@ for u in 0 1001; do
   assert "$(count broker-start)" "0" "no broker as uid $u"
   grep -q "workspace mode refuses to run as uid $u" "$dir/log"; assert "$?" "0" "workspace uid $u refusal logged"
 done
+
+# 30. workspace turns the drain on (the preStop's `broker drain` needs the control socket); single doesn't.
+run wsdrain workspace FAKE_UID=1000 FLEET_HOST_CRED_ADDR=h:1 CLAUDE_FLEET_BROKER_DRAIN=0
+until_count broker-start 1
+assert "$(grep '^drain ' "$dir/events")" "drain 1" "workspace forces CLAUDE_FLEET_BROKER_DRAIN=1"
+kill -TERM "$pid"; finish
+assert "$st" "0" "workspace drain run exits with the broker"
+run singledrain single
+until_count broker-start 1
+assert "$(grep '^drain ' "$dir/events")" "drain " "single runs no drain"
+kill -TERM "$pid"; finish
+
+# 31. The preStop hook is the broker binary itself; the entry script plays no part in it.
+: > "$tmp/events"
+FAKE_DIR="$tmp" "$tmp/broker" drain; assert "$?" "0" "preStop command runs"
+grep -qx 'cli drain' "$tmp/events"; assert "$?" "0" "preStop reaches the broker CLI"
 
 [ "$fails" -eq 0 ] && echo "ALL PASS" || exit 1

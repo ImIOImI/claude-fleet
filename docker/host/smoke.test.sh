@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 # Smoke-test a runner-host image: probes on 8080, auth required, uid 1000 under `single`, the no-mode refusal, the `fleet-host` user,
+# `broker ready`/`broker drain` with no broker and the drain-settings refusal,
 # `fleet-host init`, the bootstrap/migrate subcommands, the MCP bridge file and /run/fleet,
 # the embedder files and embed-check, and a clean SIGTERM that reaches fleet-host.
 set -euo pipefail
@@ -13,6 +14,15 @@ rc=0; docker run --rm "$image" >/dev/null 2>&1 || rc=$?
 test "$rc" = 2
 test "$(docker run --rm --entrypoint id "$image" -u fleet-host)" = 1001
 test "$(docker run --rm --entrypoint stat "$image" -c '%a %u' /var/lib/fleet-host/state)" = '700 1001'
+# No broker running: the readiness probe fails and the preStop drain reports it can't connect.
+fail() { echo "FAIL: $*"; exit 1; }
+docker run --rm --entrypoint /usr/local/bin/broker "$image" ready && fail "broker ready passed with no broker"
+rc=0; out=$(docker run --rm --entrypoint /usr/local/bin/broker "$image" drain 2>&1) || rc=$?
+test "$rc" = 1 || fail "broker drain without a broker exited $rc"
+grep -q 'broker drain:' <<<"$out" || fail "broker drain without a broker: $out"
+# An out-of-range drain setting refuses to start.
+rc=0; docker run --rm --entrypoint /usr/local/bin/broker -e CLAUDE_FLEET_BROKER_DRAIN_SOFT=40m "$image" >/dev/null 2>&1 || rc=$?
+test "$rc" = 1 || fail "broker started with CLAUDE_FLEET_BROKER_DRAIN_SOFT=40m (rc $rc)"
 port=$(docker port "$cid" 8080/tcp | head -1 | sed 's/.*://')
 for _ in $(seq 1 30); do
   curl -fsS "http://127.0.0.1:$port/healthz" >/dev/null 2>&1 && break

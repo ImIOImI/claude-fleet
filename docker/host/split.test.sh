@@ -35,7 +35,7 @@ YAML
 chmod 0755 "$tmp/cfg" "$tmp/key"; chmod 0444 "$tmp/key/key.pem" "$tmp/cfg/config.yaml"
 
 cat > "$tmp/brokerctl.js" <<'JS'
-// OP=list|create [ID=…]: one broker request over CLAUDE_FLEET_BROKER_ADDR; prints the reply's JSON.
+// OP=list|create|status [ID=…]: one broker request over CLAUDE_FLEET_BROKER_ADDR; prints the reply's JSON.
 const net = require('net');
 const [h, p] = process.env.CLAUDE_FLEET_BROKER_ADDR.split(':');
 const frame = (t, o) => {
@@ -46,9 +46,10 @@ const frame = (t, o) => {
   b.copy(f, 5);
   return f;
 };
-const create = process.env.OP === 'create';
-const want = create ? 0x02 : 0x0b;
-const c = net.connect(Number(p), h, () => c.write(create ? frame(0x01, { id: process.env.ID, cols: 80, rows: 24 }) : frame(0x0a)));
+const op = process.env.OP;
+const want = op === 'create' ? 0x02 : op === 'status' ? 0x1b : 0x0b;
+const req = op === 'create' ? frame(0x01, { id: process.env.ID, cols: 80, rows: 24 }) : op === 'status' ? frame(0x1a, {}) : frame(0x0a);
+const c = net.connect(Number(p), h, () => c.write(req));
 let buf = Buffer.alloc(0);
 c.on('data', (d) => {
   buf = Buffer.concat([buf, d]);
@@ -78,6 +79,7 @@ ids+=("$(docker run -d --name "$n-nomesh" --network "$n" -u 1000:1000 -e FLEET_H
 ids+=("$(docker run -d --name "$n-wsnet" --network "$n" --network-alias workspace-svc --entrypoint node "$image" -e "$ready_js")")
 ids+=("$(docker run -d --name "$n-ws" --network "container:$n-wsnet" -u 1000:1000 \
   -e FLEET_HOST_CRED_ADDR=host-svc:8081 -e CLAUDE_FLEET_BROKER_CLAUDE=/bin/cat \
+  -e CLAUDE_FLEET_BROKER_DRAIN_SOFT=3s -e CLAUDE_FLEET_BROKER_DRAIN_HARD=8s \
   "$image" fleet-host-entry workspace)")
 ids+=("$(docker run -d --name "$n-hostnet" --network "$n" --network-alias host-svc -p 127.0.0.1::8080 --entrypoint node "$image" -e "$ready_js")")
 # No state, projects or HOME overrides: host mode must find the image's own directories (D94).
@@ -146,6 +148,26 @@ healthy || fail "host did not recover after a restart"
 test "$(docker inspect -f '{{.State.Running}} {{.State.Pid}}' "$n-ws")" = "true $ws_pid" || fail "workspace pod restarted with the host"
 bctl list | grep -q '{"id":"split1","alive":true}' || fail "session lost across a host restart"
 docker logs "$n-host" 2>&1 | grep -q '"msg":"shutting down"' || fail "host restart was not a clean shutdown"
+
+# Drain (D142–D147): an idle session closes at once, a busy one is killed at the hard deadline, then the preStop returns.
+bctl create drainidle | grep -q '"ok":true' || fail "CREATE drainidle"
+bctl create drainbusy | grep -q '"ok":true' || fail "CREATE drainbusy"
+docker exec "$n-ws" /usr/local/bin/broker ready || fail "broker not ready before the drain"
+test "$(docker exec "$n-ws" stat -c '%a %U %F' /run/broker/ctl.sock)" = "600 fleet socket" || fail "control socket is not 0600 fleet"
+idle_pid=$(docker exec "$n-ws" sh -c 'for p in /proc/[0-9]*; do [ "$(cat $p/environ 2>/dev/null | tr "\0" "\n" | grep -x CLAUDE_FLEET_BROKER_SESSION_ID=drainidle)" ] && basename $p; done' | head -1)
+[ -n "$idle_pid" ] || fail "no drainidle process"
+# The broker matches procStart to /proc/<pid>/stat field 22 (a stale file reads busy).
+docker exec "$n-ws" sh -c "mkdir -p ~/.claude/sessions && ps=\$(cut -d')' -f2- /proc/$idle_pid/stat | awk '{print \$20}') && printf '{\"pid\":$idle_pid,\"procStart\":\"%s\",\"sessionId\":\"x\",\"status\":\"idle\"}' \"\$ps\" > ~/.claude/sessions/$idle_pid.json"
+start=$SECONDS
+docker exec "$n-ws" /usr/local/bin/broker drain > "$tmp/drain.out" || fail "broker drain exited non-zero"
+grep -q '"phase":"done"' "$tmp/drain.out" || fail "drain never reported done"
+(( SECONDS - start <= 20 )) || fail "drain took longer than the hard deadline allows"
+docker exec "$n-ws" /usr/local/bin/broker ready && fail "broker ready while drained"
+bctl status | grep -q '"id":"drainidle","alive":false,"ended":"drain-idle"' || fail "idle session not closed as drain-idle"
+bctl status | grep -q '"id":"drainbusy","alive":false,"ended":"drain-killed"' || fail "busy session not killed at the hard deadline"
+bctl create late | grep -q 'draining: the workspace is restarting' || fail "CREATE accepted while drained"
+docker stop -t 15 "$n-ws" >/dev/null
+test "$(docker inspect -f '{{.State.ExitCode}}' "$n-ws")" = 0 || fail "drained broker did not exit 0 on SIGTERM"
 
 # The sidecar-less workspace pod gives up after 60 s and exits 1.
 for _ in $(seq 1 90); do [ "$(docker inspect -f '{{.State.Running}}' "$n-nomesh")" = false ] && break; sleep 1; done

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # fleet-host-entry <mode> (SPEC §4 Host images):
 #   host       fleet-host alone (host pod, uid 1001): credentials :8081, MCP :8082
-#   workspace  the broker and its sessions (workspace pod, uid 1000): broker :7070
+#   workspace  the broker and its sessions (workspace pod, uid 1000): broker :7070, drain on preStop/SIGTERM
 #   single     broker and fleet-host in one container under one uid; local and dev only
 set -u
 mode=${1:-}
@@ -78,6 +78,8 @@ run_workspace() {
   export FLEET_HOST_CRED_ADDR
   export CLAUDE_FLEET_BROKER_TCP_PORT=${CLAUDE_FLEET_BROKER_TCP_PORT:-7070}
   export CLAUDE_FLEET_BROKER_REQUIRE_MESH=1
+  # The preStop `broker drain` needs the control socket; SIGTERM then drains too (D142, D143).
+  export CLAUDE_FLEET_BROKER_DRAIN=1
   exec "$broker_bin"
 }
 
