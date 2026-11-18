@@ -13,11 +13,14 @@ import { historyReader, type HistoryReader } from './historyRead.js';
 import { HostIngest } from './hostIngest.js';
 import type { HostDb } from './hostSchema.js';
 import type { BrokerOps } from './brokerOps.js';
+import type { DrainGate } from './drainGate.js';
+import { pgDrainStore, type DrainStore } from './drainStore.js';
 import type { HostAutomationEntry } from './config.js';
 import { startHostEmbedder, type HostEmbedder, type HostEmbedderOptions } from './embedder.js';
 import type { EventHub } from './events.js';
 import { pgActionLedger } from './hostActions.js';
 import { startHostAutomations, type HostAutomations } from './hostAutomations.js';
+import { startHostDrain } from './hostDrain.js';
 import { startHostIndexer } from './hostIndexer.js';
 import type { ListenTarget } from './endpoint.js';
 import { hostUsageRecorder, startHostMcp, type HostMcp } from './hostMcp.js';
@@ -53,6 +56,8 @@ export interface HolderOptions {
   embedDir: string;
   /** Tests: a stand-in sidecar. */
   embedder?: Pick<HostEmbedderOptions, 'launch' | 'env'>;
+  /** The workspace pod's drain (D148). */
+  gate?: DrainGate;
 }
 
 export interface Holder {
@@ -61,6 +66,8 @@ export interface Holder {
   history: HistoryReader;
   publish: PublishStore;
   owners: SessionOwnerStore;
+  /** Fenced like the ledger: only the holder writes the drain tables. */
+  drains: DrainStore;
   stop(): Promise<void>;
 }
 
@@ -118,6 +125,7 @@ export async function startHolder(o: HolderOptions): Promise<Holder> {
   // Fenced although only read: offsets are written inside ingest's chunk transaction.
   const offsetsRead = postgresKysely<HostDb>(stores.pool, { afterBeginWrite: fence });
   const ledgerK = postgresKysely<HostDb>(stores.pool, { afterBeginWrite: fence });
+  const drains = pgDrainStore(ledgerK);
   const embedder: HostEmbedder | null = o.search.embedder ? startHostEmbedder({ dir: o.embedDir, log: o.log, ...o.embedder }) : null;
   const indexer = embedder?.state() === 'ready'
     ? startHostIndexer({ embed: embedder.embed, log: o.log, paused: () => embedder.state() !== 'ready' })
@@ -130,6 +138,7 @@ export async function startHolder(o: HolderOptions): Promise<Holder> {
     onIngested: (id) => { hint.bump(); indexer?.bump(id); }
   });
   let automations: HostAutomations | null = null;
+  let drainHooks: { stop(): Promise<void> } | null = null;
   let retention: { stop(): void } | null = null;
   // Fenced: provisioning and each call's mcp_grants rewrite are writes on the state handle.
   const mcp = mcpServer(o, embedder?.embed, publish, owners, () =>
@@ -140,6 +149,7 @@ export async function startHolder(o: HolderOptions): Promise<Holder> {
     retention?.stop();
     hint.stop();
     await mcp.stop();
+    await drainHooks?.stop();
     await automations?.stop();
     await indexer?.stop();
     embedder?.close();
@@ -156,9 +166,10 @@ export async function startHolder(o: HolderOptions): Promise<Holder> {
     if (indexer) void indexer.backfill().catch((err: Error) => o.log.log('warn', 'index backfill failed', { error: err.message }));
     automations = await startHostAutomations({
       inbox: stores.inbox, workspace: o.workspace, ops: o.ops, owners, mcpArgs: o.mcp.args, events: o.events, log: o.log,
-      ledger: pgActionLedger(ledgerK)
+      ledger: pgActionLedger(ledgerK), gate: o.gate
     });
     await automations.reconcile(o.automations());
+    if (o.gate) drainHooks = startHostDrain({ gate: o.gate, drains, automations, owners, log: o.log });
   } catch (err) {
     await stopAll();
     throw err;
@@ -172,6 +183,7 @@ export async function startHolder(o: HolderOptions): Promise<Holder> {
     history: historyReader(stateKysely, o.workspaceId, owners),
     publish,
     owners,
+    drains,
     stop() {
       stopping ??= stopAll();
       return stopping;
