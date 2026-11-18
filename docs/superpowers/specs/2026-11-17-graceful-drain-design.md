@@ -43,7 +43,7 @@ When Kubernetes replaces the workspace pod (an image rollout, a node drain, an e
 2. **Each pass:**
    - An interactive session whose activity is `idle` or `waiting` is closed: SIGTERM to its process group, then SIGKILL after 5 s. Its end reason is `drain-idle`, or `drain-interrupted` if it was sent Esc.
    - A busy interactive session is left alone until `softAt`. From then on it gets Esc (`\x1b`) once, and again every 60 s while it stays busy. claude stops at a safe point and goes idle, and the next pass closes it.
-   - A **headless** session (an automation fresh step) is busy until it exits. At `softAt` its process group gets SIGINT, once. If it then exits with a non-zero status or by a signal, the end reason is `drain-interrupted`. If it exits 0, the reason is `exit`: it finished.
+   - A **headless** session (an automation fresh step) is busy until it exits. At `softAt` its process group gets SIGINT, once. From then on its end reason is `drain-interrupted`, whatever its exit status (owner decision 1A: `claude -p` 2.1.281 exits 0 on SIGINT mid-request and writes no `result`). A headless session that exits before any signal ends `exit`: it finished.
    - When no session is alive, the phase becomes `done`.
 3. **Hard stop at `hardAt`:** every PTY still alive is closed (the current `CloseAll`) with reason `drain-killed`, and the phase becomes `done`.
 4. Ended sessions stay listed (`LIST`, `STATE`) with their end reason until the broker exits, so fleet-host can read why each one ended.
@@ -124,7 +124,8 @@ Dispatch is paused unless the gate is `serving` or `legacy`.
   - The retry skips the per-minute rate cap and keeps the concurrency rules.
   - A row whose original run isn't `interrupted`, whose automation is gone or disabled, or which is older than 24 h becomes `skipped`, with a note.
   - Claiming first makes the re-run at-most-once, even across a holder change.
-- **No double posting.** The retry starts from the beginning. The original was cut off before it ended (a non-zero exit after SIGINT, or SIGKILL), and reviews post at the end, so nothing was posted. A session that exited 0 counts as finished and is never retried.
+- **No double posting.** The retry starts from the beginning. The original was signalled or killed by the drain (1A), and reviews post at the end, so it almost never posted; a run SIGINT'd after posting but before exiting is the remaining window, and the review-pr loadout closes it by skipping when a review for the PR's current head SHA already exists (SumerSports/claude-fleet-loadouts#7, open). A session that ended on its own (`exit`) counts as finished and is never retried.
+- **A `CREATE` refused as `draining`** (the gate flipped after `waitServing`) records the step and run `interrupted` and queues the one re-run, like a cut session.
 - **No loop.** A retry that is itself interrupted is recorded `interrupted` and is not retried again.
 - **If the host pod also restarts during the drain:**
   - The new holder's `recover()` marks the run `interrupted` (`the app quit mid-run`).
@@ -328,6 +329,8 @@ metadata:
         EXIT_ON_ZERO_ACTIVE_CONNECTIONS: "true"
 ```
 
+**Routing question for Work.** fleet-host holds one WATCH connection per pod lifetime, opened while the workspace pod is ready. A host pod restarted during a drain must open a new one to a pod that is not ready and terminating. `publishNotReadyAddresses: true` keeps that pod in the Service's EndpointSlice as `ready`; whether the cluster's Istio still routes the host's proxy to it is the open question (Appendix B). With native sidecars the workspace proxy stays up until the app container exits; with the fallback, whether pilot-agent accepts new inbound connections during `terminationDrainDuration` is version-dependent.
+
 **Probe interplay:**
 - Host: readiness `/healthz` goes 503 `draining` at SIGTERM. Liveness stays off (or `tcpSocket :8080`, per the handoff). The 5 s preStop lets the endpoint removal propagate before the app stops.
 - Workspace: readiness `broker ready` fails from the start of a drain. `publishNotReadyAddresses` keeps the pod routable for fleet-host. Keep no liveness probe: a draining broker must not be restarted.
@@ -348,4 +351,7 @@ metadata:
 - `kubectl exec <workspace> -- /usr/local/bin/broker ready; echo $?` prints 0 while serving.
 - `kernel.yama.ptrace_scope` on the workspace nodes is `≥ 1` (`cat /proc/sys/kernel/yama/ptrace_scope` in the pod), or the workspace container runs a seccomp profile that denies `ptrace`. Otherwise a session can ptrace the exec'd readiness probe into sending `DRAIN` (§9 residual).
 - `hostPID` pods: preStop DRAIN is refused (the chain reaches the host's pid 1); SIGTERM still drains (D143).
-- In a workspace pod, an automation fresh step sent SIGINT (`kill -INT -<pgid>`) exits non-zero on the pinned claude. If it exits 0, report it (D145 depends on it).
+- In a workspace pod, an automation fresh step sent SIGINT (`kill -INT -<pgid>`) exits promptly on the pinned claude. Its status doesn't matter (1A: the broker records `drain-interrupted` once it signalled the session); report a claude that keeps running.
+- **Control-socket reach on a scratch pod:** `kubectl exec <workspace> -- /usr/local/bin/broker drain` is accepted (the exec'd process has ppid 0) and starts a drain, so run it only on a scratch workspace pod; the same command typed in a workspace terminal prints `broker drain: refused: …` and exits 1.
+- `fleet-host migrate` reports `host` 5, and the `query` login gets `permission denied` on `host_run_retries` and `host_drained_sessions`.
+- The host pod's `/healthz` turns 503 `draining` as soon as `kubectl delete pod <host>` is issued (watch it from a second pod), and the pod is gone within 25 s.
