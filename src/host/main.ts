@@ -8,6 +8,8 @@ import { buildAuthContext, githubProviderFactory, type AuthContext, type Provide
 import { brokerOps as realBrokerOps, type BrokerOps } from './brokerOps.js';
 import { HostConfigError, loadHostConfig, readHostEnv, type HostConfig } from './config.js';
 import { createReloader, watchConfigDir } from './configReload.js';
+import { startDrainGate } from './drainGate.js';
+import { drainRpcChannels } from './drainRpc.js';
 import type { ListenTarget } from './endpoint.js';
 import { startCredHelper, type CredServer } from './credServer.js';
 import { brokerWatch, EventHub, pruneDeadOwners } from './events.js';
@@ -35,6 +37,8 @@ export const FATAL_STOP_MS = 2_000;
 export const STORE_CLOSE_MS = 5_000;
 /** EX_TEMPFAIL: the host DB is unreachable. fleet-host-entry restarts it without counting toward its crash-loop give-up. */
 export const EXIT_DB_UNAVAILABLE = 75;
+/** The whole SIGTERM path, inside the host pod's 45 s grace after its 5 s preStop (D154). */
+export const SHUTDOWN_DEADLINE_MS = 20_000;
 
 const PG_CONN_ERRNO = new Set(['ECONNREFUSED', 'ECONNRESET', 'ETIMEDOUT', 'EHOSTUNREACH', 'ENETUNREACH', 'ENOTFOUND', 'EAI_AGAIN', 'EPIPE']);
 const NO_MESH = 'no Istio sidecar: credential and MCP ports stay closed; broker connections are plaintext and a STRICT peer will refuse them';
@@ -72,6 +76,7 @@ export interface RunHostOptions {
   embedder?: { launch?: { bin: string; args: string[] }; env?: NodeJS.ProcessEnv };
   /** Tests: how long to wait for the sidecar. */
   meshWaitMs?: number;
+  shutdownDeadlineMs?: number;
 }
 
 export interface RunningHost {
@@ -82,7 +87,13 @@ export interface RunningHost {
 export async function runHost(opts: RunHostOptions = {}): Promise<RunningHost> {
   const log = createLogger(opts.logSink);
   const proc = opts.proc ?? process;
-  const exit = opts.exit ?? ((code: number) => process.exit(code));
+  const exitRaw = opts.exit ?? ((code: number) => process.exit(code));
+  let exited = false;
+  const exit = (code: number): void => {
+    if (exited) return;
+    exited = true;
+    exitRaw(code);
+  };
   // Node's default SIGHUP action exits; the handler stays for the life of the process.
   let onHup = (): void => undefined;
   proc.on('SIGHUP', () => onHup());
@@ -194,9 +205,13 @@ export async function runHost(opts: RunHostOptions = {}): Promise<RunningHost> {
   const ops = opts.brokerOps ?? realBrokerOps(env.brokerAddr ?? env.brokerSocket);
   const mcpListen: ListenTarget = env.mcpPort !== null ? { port: env.mcpPort } : { path: env.mcpSocket };
   const mcpArgs = hostMcpArgs(env.mcpAddr ? { tcp: `${env.mcpAddr.host}:${env.mcpAddr.port}` } : { unix: env.mcpSocket });
+  const events = new EventHub();
+  const gate = startDrainGate({ ops, log, events });
   const hub = new AttachHub(ops, {
     hostPort: env.port,
     log,
+    // Only a known drain refuses; while unknown the broker itself still refuses (D147).
+    draining: () => gate.phase() === 'draining',
     createArgs: config.db ? (a) => [...a, ...mcpArgs] : undefined,
     ...(config.db
       ? {
@@ -206,7 +221,6 @@ export async function runHost(opts: RunHostOptions = {}): Promise<RunningHost> {
         }
       : {})
   });
-  const events = new EventHub();
   const holderId = `${hostname()}:${process.pid}:${randomUUID().slice(0, 8)}`;
   // Set by bringUp(); with db the server listens before they exist.
   let hostDb: HostDbHandle | null = null;
@@ -222,11 +236,13 @@ export async function runHost(opts: RunHostOptions = {}): Promise<RunningHost> {
     mesh: () => mesh,
     db: () => (!config.db ? 'none' : !dbHealth ? 'connecting' : dbHealth.ok() ? 'ok' : 'down'),
     starting: () => !started,
+    draining: () => draining,
     hub,
     events,
     rpc: new Map([
       ...brokerRpcChannels(ops, hub.owners, env.port),
       ...historyRpcChannels(() => holderNow?.history ?? null, { search: () => config.search.embedder }),
+      ...drainRpcChannels(() => holderNow?.drains ?? null, { db: !!config.db }),
       ...automationRpcChannels(() => (holderNow ? runtimeOf(holderNow.automations, () => ({ id: workspaceId as string, name: config.workspace.name })) : null))
     ]),
     // db can't change on reload, so the host's secret values are read once.
@@ -277,12 +293,22 @@ export async function runHost(opts: RunHostOptions = {}): Promise<RunningHost> {
   }
 
   let stopping: Promise<void> | null = null;
+  let draining = false;
   function shutdown(code: number): Promise<void> {
     stopping ??= (async () => {
+      draining = true;
+      const deadlineMs = opts.shutdownDeadlineMs ?? SHUTDOWN_DEADLINE_MS;
+      const deadline = setTimeout(() => {
+        log.log('warn', 'shutdown deadline passed; exiting', { ms: deadlineMs });
+        uninstallGuards();
+        exit(code);
+      }, deadlineMs);
+      deadline.unref?.();
       log.log('info', 'shutting down', { code, lease: leaseMgr?.state ?? 'standby' });
       startAbort.abort();
       clearInterval(poller);
       clearInterval(pruner);
+      gate.stop();
       stopWatch();
       onHup = () => undefined;
       proc.off('SIGTERM', onTerm);
@@ -299,6 +325,7 @@ export async function runHost(opts: RunHostOptions = {}): Promise<RunningHost> {
       const pool = hostDb;
       if (pool) await closeWithin('host pool', () => pool.end());
       uninstallGuards();
+      clearTimeout(deadline);
       if (!fatal) exit(code);
     })();
     return stopping;
@@ -353,7 +380,8 @@ export async function runHost(opts: RunHostOptions = {}): Promise<RunningHost> {
         mcpRetryMs: opts.mcpRetryMs,
         search: config.search,
         embedDir: env.embedDir,
-        embedder: opts.embedder
+        embedder: opts.embedder,
+        gate
       })
         .catch((err: Error) => {
           log.log('error', 'holder start failed; giving up the lease', { error: err.message });
@@ -380,6 +408,7 @@ export async function runHost(opts: RunHostOptions = {}): Promise<RunningHost> {
       await bringUp();
     } catch (err) {
       startAbort.abort();
+      gate.stop();
       await cred?.close();
       uninstallGuards();
       throw err;
@@ -395,6 +424,7 @@ export async function runHost(opts: RunHostOptions = {}): Promise<RunningHost> {
     });
   } catch (err) {
     startAbort.abort();
+    gate.stop();
     await cred?.close();
     uninstallGuards();
     throw err;
