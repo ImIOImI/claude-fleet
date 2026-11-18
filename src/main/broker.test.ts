@@ -212,7 +212,9 @@ describe('drain frames', () => {
   it('parses STATE strictly', () => {
     expect(parseBrokerState('{"instance":"i","phase":"draining","softAt":5,"hardAt":9,"sessions":[{"id":"a","alive":false,"ended":"drain-idle"},{"id":"h","alive":true,"headless":true}]}'))
       .toEqual({ instance: 'i', phase: 'draining', softAt: 5, hardAt: 9, sessions: [{ id: 'a', alive: false, ended: 'drain-idle' }, { id: 'h', alive: true, headless: true }] });
-    expect(parseBrokerState('{"instance":"i","phase":"weird","sessions":[]}')).toBeNull();
+    // A phase this client doesn't know is not serving (fail safe).
+    expect(parseBrokerState('{"instance":"i","phase":"weird","sessions":[]}')).toEqual({ instance: 'i', phase: 'draining', sessions: [] });
+    expect(parseBrokerState('{"instance":"i","phase":7,"sessions":[]}')).toBeNull();
     expect(parseBrokerState('{"instance":"i","phase":"serving","sessions":[{"id":1}]}')).toBeNull();
     expect(parseBrokerState('{"instance":"i","phase":"serving","sessions":[{"id":1,"alive":true}]}')).toBeNull();
     expect(parseBrokerState('{"instance":"i","phase":"serving","sessions":[{"id":"a","alive":"yes"}]}')).toBeNull();

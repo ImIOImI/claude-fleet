@@ -47,6 +47,8 @@ type Server struct {
 	Drain    *drain.Drainer
 	Bus      *notify.Bus
 	Instance string
+	// ProcRoot is where a DRAIN caller's ancestry is read; "" is /proc.
+	ProcRoot string
 }
 
 const ErrDraining = "draining: the workspace is restarting"

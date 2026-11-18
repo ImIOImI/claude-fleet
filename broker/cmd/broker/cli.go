@@ -9,6 +9,7 @@ import (
 
 	"github.com/ImIOImI/claude-fleet/broker/internal/drain"
 	"github.com/ImIOImI/claude-fleet/broker/internal/proto"
+	"github.com/ImIOImI/claude-fleet/broker/internal/server"
 )
 
 // runCLI serves the preStop hook (drain) and the readiness probe (ready).
@@ -41,6 +42,14 @@ func cliDrain(path string, stdout, stderr io.Writer) int {
 			// The broker is gone: nothing is left to wait for.
 			fmt.Fprintln(stdout, `{"phase":"gone"}`)
 			return 0
+		}
+		if ft == proto.FrameNotice {
+			var n proto.Notice
+			if json.Unmarshal(payload, &n) == nil && n.Code == server.NoticeDrainRefused {
+				fmt.Fprintln(stderr, "broker drain: refused: run it from outside the workspace's sessions (preStop or kubectl exec)")
+				return 1
+			}
+			continue
 		}
 		if ft != proto.FrameState {
 			continue

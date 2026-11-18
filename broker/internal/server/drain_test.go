@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net"
+	"os"
 	"path/filepath"
 	"testing"
 	"time"
@@ -38,6 +39,7 @@ func startDrainRigCfg(t *testing.T, act func(int) activity.Kind, cfg drain.Confi
 	d := drain.New(cfg, mgr, act, time.Now, "inst1", bus)
 	srv := New(mgr)
 	srv.Drain, srv.Bus, srv.Instance = d, bus, "inst1"
+	srv.ProcRoot = fakeProc(t, map[int]int{os.Getpid(): 0})
 	r := &drainRig{srv: srv, mgr: mgr, d: d, main: filepath.Join(dir, "b.sock"), ctl: filepath.Join(dir, "ctl.sock")}
 	ln, err := net.Listen("unix", r.main)
 	if err != nil {

@@ -180,7 +180,7 @@ export function parseBrokerState(raw: string): BrokerState | null {
   }
   if (!o || typeof o !== 'object') return null;
   const r = o as Record<string, unknown>;
-  if (typeof r.instance !== 'string' || typeof r.phase !== 'string' || !DRAIN_PHASES.has(r.phase) || !Array.isArray(r.sessions)) return null;
+  if (typeof r.instance !== 'string' || typeof r.phase !== 'string' || !Array.isArray(r.sessions)) return null;
   const sessions: BrokerStateSession[] = [];
   for (const s of r.sessions) {
     if (!s || typeof s !== 'object') return null;
@@ -188,7 +188,9 @@ export function parseBrokerState(raw: string): BrokerState | null {
     if (typeof x.id !== 'string' || typeof x.alive !== 'boolean') return null;
     sessions.push({ id: x.id, alive: x.alive, ...(x.headless === true ? { headless: true } : {}), ...(typeof x.ended === 'string' ? { ended: x.ended } : {}) });
   }
-  const out: BrokerState = { instance: r.instance, phase: r.phase as DrainPhase, sessions };
+  // A phase from a newer broker is not serving: fail safe. Dropping the STATE would read as legacy (serving) after 5 s.
+  const phase: DrainPhase = DRAIN_PHASES.has(r.phase) ? (r.phase as DrainPhase) : 'draining';
+  const out: BrokerState = { instance: r.instance, phase, sessions };
   for (const k of ['startedAt', 'softAt', 'hardAt'] as const) {
     const v = r[k];
     if (typeof v === 'number' && Number.isSafeInteger(v) && v > 0) out[k] = v;

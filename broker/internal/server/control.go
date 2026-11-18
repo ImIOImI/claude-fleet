@@ -28,6 +28,9 @@ func (s *Server) ServeControl(ctx context.Context, ln net.Listener) error {
 	}
 }
 
+// NoticeDrainRefused answers a DRAIN from a session's own process tree.
+const NoticeDrainRefused = "drain-refused"
+
 func (s *Server) handleControl(c net.Conn) {
 	defer c.Close()
 	cw := &connWriter{w: c}
@@ -43,6 +46,11 @@ func (s *Server) handleControl(c net.Conn) {
 			}
 		case proto.FrameDrain:
 			if s.Drain == nil {
+				return
+			}
+			if err := s.vetDrainCaller(c); err != nil {
+				log.Printf("drain refused: %v", err)
+				_ = cw.writeJSON(proto.FrameNotice, proto.Notice{Code: NoticeDrainRefused})
 				return
 			}
 			if s.Drain.Start() {

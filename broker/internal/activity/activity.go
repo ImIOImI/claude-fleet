@@ -6,10 +6,12 @@ package activity
 import (
 	"encoding/json"
 	"io"
+	"log"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 )
 
@@ -33,6 +35,12 @@ func (k Kind) String() string {
 
 const maxFileBytes = 64 << 10
 
+// A claude format change that drops procStart would make every session busy; say so once.
+var (
+	missingProcStart sync.Once
+	logf             = log.Printf
+)
+
 type Reader struct {
 	Dir string
 	// ProcStart returns /proc/<pid>/stat field 22; nil reads /proc.
@@ -52,7 +60,11 @@ func (r Reader) Of(pid int) Kind {
 		ProcStart *string `json:"procStart"`
 		Status    string  `json:"status"`
 	}
-	if json.Unmarshal(b, &f) != nil || f.Pid == nil || *f.Pid != pid || f.ProcStart == nil {
+	if json.Unmarshal(b, &f) != nil || f.Pid == nil || *f.Pid != pid {
+		return Busy
+	}
+	if f.ProcStart == nil {
+		missingProcStart.Do(func() { logf("activity: status file for pid %d has no procStart; such sessions read busy", pid) })
 		return Busy
 	}
 	ps := r.ProcStart

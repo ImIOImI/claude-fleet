@@ -30,7 +30,7 @@ When Kubernetes replaces the workspace pod (an image rollout, a node drain, an e
   - A Unix socket can't be reached from another pod, so drain is never on :7070. The mesh gates :7070 to the host SA only, and drain must not be reachable there: fleet-host has no reason to drain, and a preStop hook has no mesh identity to dial :7070 with.
   - kubelet's `httpGet` hook can't use a Unix socket, so the hook is an `exec`.
   - A loopback HTTP port was rejected: it adds a listener whose reachability depends on how the sidecar forwards inbound traffic, which is the class of exposure D96 rules out.
-  - Sessions run as the broker's uid (1000) and can open the socket. They can already `kill` the broker, which has the same effect (§9).
+  - Sessions run as the broker's uid (1000) and can open the socket, so `DRAIN` checks the caller's ancestry (§9 below): a drain never ends on its own, so a session draining its pod would leave it unusable until the pod is deleted.
 - **SIGTERM also drains** when `CLAUDE_FLEET_BROKER_DRAIN=1`. If the hook fails (a bad image, the binary missing), kubelet sends SIGTERM early and the drain still runs, with its deadlines counted from then. While draining, a further SIGTERM is logged and ignored. SIGINT still closes everything at once, as an escape hatch for operators.
 - After `done` the broker waits for SIGTERM, then exits 0. When SIGTERM started the drain, the broker exits as soon as the drain is `done`.
 - **Readiness:** `readinessProbe.exec.command: ["/usr/local/bin/broker", "ready"]` exits 0 only while the broker is `serving`. It fails before the broker listens (the mesh wait) and from the first moment of a drain.
@@ -219,7 +219,7 @@ Dispatch is paused unless the gate is `serving` or `legacy`.
 
 ## Security (§9 additions)
 
-- The control socket is a Unix socket, 0600, owned by uid 1000, only in the workspace pod. It isn't reachable from other pods or from the mesh. A session can drain its own pod, which is no more than its existing power to kill the broker.
+- The control socket is a Unix socket, 0600, owned by uid 1000, only in the workspace pod. It isn't reachable from other pods or from the mesh. `DRAIN` is refused (`NOTICE drain-refused`) unless the caller's ppid chain (`SO_PEERCRED`, then `/proc/<pid>/stat`, at most 64 hops) leaves the pid namespace (ppid 0) without passing a session root, the broker or pid 1: kubelet's preStop and `kubectl exec` pass; a session's processes, including orphans reparented to pid 1, don't. An unreadable chain is refused. `STATUS` is open to any caller. `/run/broker` is `1777`.
 - `STATUS` and `WATCH` are on :7070 under the existing mesh policy (host SA only). They expose session ids and drain timings, which fleet-host already sees through `LIST`.
 - `DRAIN` on :7070 is refused (`unknown frame`, dropped), so only the control socket starts a drain.
 - `STATE`, `NOTICE` and `broker:drain` carry no session content. Desktops treat `broker:drain` fields as untrusted: the phase must be one of the three, the times must be safe integers, and the strings are one-lined and capped at 32.

@@ -3,9 +3,11 @@ package main
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"net"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"syscall"
@@ -19,7 +21,32 @@ import (
 	"github.com/ImIOImI/claude-fleet/broker/internal/session"
 )
 
+// procWithPpid fakes /proc with this process's parent set to ppid; 0 is outside the pid namespace.
+func procWithPpid(t *testing.T, ppid int) string {
+	t.Helper()
+	root := t.TempDir()
+	writeStat(t, root, ppid)
+	return root
+}
+
+func writeStat(t *testing.T, root string, ppid int) {
+	t.Helper()
+	dir := filepath.Join(root, strconv.Itoa(os.Getpid()))
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "stat"), []byte(fmt.Sprintf("%d (go) S %d 0 0", os.Getpid(), ppid)), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func controlRig(t *testing.T) (string, *drain.Drainer) {
+	t.Helper()
+	path, d, _ := controlServer(t)
+	return path, d
+}
+
+func controlServer(t *testing.T) (string, *drain.Drainer, *server.Server) {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "ctl.sock")
 	bus := &notify.Bus{}
@@ -28,6 +55,7 @@ func controlRig(t *testing.T) (string, *drain.Drainer) {
 		mgr, func(int) activity.Kind { return activity.Idle }, time.Now, "i", bus)
 	srv := server.New(mgr)
 	srv.Drain, srv.Bus = d, bus
+	srv.ProcRoot = procWithPpid(t, 0)
 	ln, err := listenCtl(context.Background(), path)
 	if err != nil {
 		t.Fatal(err)
@@ -36,7 +64,7 @@ func controlRig(t *testing.T) (string, *drain.Drainer) {
 	go func() { _ = srv.ServeControl(ctx, ln) }()
 	go d.Run(ctx)
 	t.Cleanup(func() { cancel(); ln.Close(); mgr.CloseAll() })
-	return path, d
+	return path, d, srv
 }
 
 func TestReadyThenDrainReturnsWhenDone(t *testing.T) {
@@ -54,6 +82,19 @@ func TestReadyThenDrainReturnsWhenDone(t *testing.T) {
 	}
 	if code := runCLI([]string{"ready"}, env, &out, &errOut); code != 1 {
 		t.Fatalf("ready after drain: %d", code)
+	}
+}
+
+func TestDrainFromInsideTheNamespaceFails(t *testing.T) {
+	path, d, srv := controlServer(t)
+	writeStat(t, srv.ProcRoot, 1)
+	env := envOf(map[string]string{"CLAUDE_FLEET_BROKER_CTL_SOCKET": path})
+	var out, errOut bytes.Buffer
+	if code := runCLI([]string{"drain"}, env, &out, &errOut); code != 1 || !strings.Contains(errOut.String(), "broker drain: refused") {
+		t.Fatalf("drain: %d %q", code, errOut.String())
+	}
+	if d.Phase() != drain.PhaseServing {
+		t.Fatal("drain started")
 	}
 }
 

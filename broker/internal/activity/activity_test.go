@@ -2,9 +2,13 @@ package activity
 
 import (
 	"bytes"
+	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -159,5 +163,27 @@ func TestProcStartFromProc(t *testing.T) {
 	write(t, dir, strconv.Itoa(pid)+".json", `{"pid":`+strconv.Itoa(pid)+`,"procStart":"1`+got+`","status":"idle"}`)
 	if (Reader{Dir: dir}).Of(pid) != Busy {
 		t.Fatal("stale procStart must read busy")
+	}
+}
+
+func TestMissingProcStartIsLoggedOnce(t *testing.T) {
+	var lines []string
+	missingProcStart, logf = sync.Once{}, func(f string, a ...any) { lines = append(lines, fmt.Sprintf(f, a...)) }
+	t.Cleanup(func() { missingProcStart, logf = sync.Once{}, log.Printf })
+	dir := t.TempDir()
+	write(t, dir, "10.json", `{"pid":10,"status":"idle"}`)
+	write(t, dir, "11.json", `{"pid":11,"status":"idle"}`)
+	write(t, dir, "12.json", `{"pid":12,"procStart":"100","status":"idle"}`)
+	for _, pid := range []int{10, 11, 10, 12} {
+		want := Busy
+		if pid == 12 {
+			want = Idle
+		}
+		if got := rd(dir).Of(pid); got != want {
+			t.Fatalf("pid %d: %v", pid, got)
+		}
+	}
+	if len(lines) != 1 || !strings.Contains(lines[0], "no procStart") {
+		t.Fatalf("logged %q", lines)
 	}
 }
