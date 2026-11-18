@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { FrameType, MAX_FRAME_PAYLOAD, encodeChannelData, encodeFrame } from '../main/broker.js';
 import type { Tier } from '../main/identity/grants.js';
-import { AttachHub, MAX_PENDING_BYTES, MAX_PENDING_FRAMES, ReplayBuffer, trimToSafeStart, type AttachHubOptions } from './attachHub.js';
+import { AttachHub, DRAINING_CREATE_ERROR, MAX_PENDING_BYTES, MAX_PENDING_FRAMES, ReplayBuffer, trimToSafeStart, type AttachHubOptions } from './attachHub.js';
 import { sessionSettings } from './attribution.js';
 import { ownerOfIdentity, type OwnerClaim } from './sessionOwners.js';
 import { createLogger } from './log.js';
@@ -606,4 +606,89 @@ describe('pending bytes cap', () => {
     void v.receive(big);
     expect(rec.closes).toEqual([[1008, 'too many pending bytes']]);
   });
+});
+
+describe('while the workspace pod drains', () => {
+  it('drops INPUT with one NOTICE per channel per 5 s, refuses CREATE, and fans broker NOTICEs out', async () => {
+    let draining = false;
+    let now = 0;
+    const broker = fakeBroker(['s1']);
+    const hub = new AttachHub(broker.ops, { draining: () => draining, now: () => now });
+    const rec = sinkRecorder();
+    const v = hub.viewer({ identity: alice, tier: 'session' }, rec.sink);
+    await v.receive(jsonFrame(FrameType.ATTACH, { id: 's1', channel: 2 }));
+    draining = true;
+    await v.receive(inputFrame(2, 'a'));
+    await v.receive(inputFrame(2, 'b'));
+    now += 5_000;
+    await v.receive(inputFrame(2, 'c'));
+    expect(broker.sessions.get('s1')!.inputs).toEqual([]);
+    const notices = () => rec.frames.filter((f) => f.type === FrameType.NOTICE).map((f) => f.json);
+    expect(notices()).toEqual([{ channel: 2, code: 'draining' }, { channel: 2, code: 'draining' }]);
+    await v.receive(jsonFrame(FrameType.CREATE, { id: 's9', cols: 80, rows: 24 }));
+    expect(last(rec).json).toMatchObject({ id: 's9', ok: false, error: DRAINING_CREATE_ERROR });
+    expect(DRAINING_CREATE_ERROR).toBe('draining: the workspace is restarting');
+    expect(broker.created).toEqual([]);
+    broker.sessions.get('s1')!.handlers!.onNotice!('draining');
+    expect(notices()).toHaveLength(3);
+    expect(notices()[2]).toEqual({ channel: 2, code: 'draining' });
+    draining = false;
+    await v.receive(inputFrame(2, 'd'));
+    expect(broker.sessions.get('s1')!.inputs.map(String)).toEqual(['d']);
+  });
+
+  it('rate-limits NOTICEs per channel, not per viewer', async () => {
+    const broker = fakeBroker(['s1', 's2']);
+    const hub = new AttachHub(broker.ops, { draining: () => true, now: () => 0 });
+    const rec = sinkRecorder();
+    const v = hub.viewer({ identity: alice, tier: 'session' }, rec.sink);
+    await v.receive(jsonFrame(FrameType.ATTACH, { id: 's1', channel: 1 }));
+    await v.receive(jsonFrame(FrameType.ATTACH, { id: 's2', channel: 2 }));
+    await v.receive(inputFrame(1, 'x'));
+    await v.receive(inputFrame(2, 'y'));
+    await v.receive(inputFrame(1, 'z'));
+    await v.receive(inputFrame(77, 'unattached'));
+    expect(rec.frames.filter((f) => f.type === FrameType.NOTICE).map((f) => f.json!.channel)).toEqual([1, 2]);
+    expect(broker.sessions.get('s1')!.inputs).toEqual([]);
+    expect(broker.sessions.get('s2')!.inputs).toEqual([]);
+  });
+
+  it('a drain that starts while CREATE records its owner refuses it and releases the row', async () => {
+    let draining = false;
+    const released: OwnerClaim[] = [];
+    const broker = fakeBroker([]);
+    const hub = new AttachHub(broker.ops, {
+      draining: () => draining,
+      recordOwner: async () => { draining = true; return true; },
+      releaseOwner: async (c) => { released.push(c); }
+    });
+    const rec = sinkRecorder();
+    const v = hub.viewer({ identity: alice, tier: 'session' }, rec.sink);
+    await v.receive(jsonFrame(FrameType.CREATE, { id: 'n', cols: 80, rows: 24 }));
+    expect(last(rec).json).toMatchObject({ id: 'n', ok: false, error: DRAINING_CREATE_ERROR });
+    expect(broker.created).toEqual([]);
+    expect(released.map((c) => c.brokerSessionId)).toEqual(['n']);
+  });
+
+  it('a read viewer gets no NOTICE (its INPUT is denied before the drain check)', async () => {
+    const broker = fakeBroker(['s1']);
+    const hub = new AttachHub(broker.ops, { draining: () => true });
+    const rec = sinkRecorder();
+    const v = hub.viewer({ identity: bob, tier: 'read' }, rec.sink);
+    await v.receive(jsonFrame(FrameType.ATTACH, { id: 's1', channel: 1 }));
+    await v.receive(inputFrame(1, 'x'));
+    expect(rec.frames.filter((f) => f.type === FrameType.NOTICE)).toEqual([]);
+    expect(broker.sessions.get('s1')!.inputs).toEqual([]);
+  });
+});
+
+it('a CREATE while draining writes no owner row', async () => {
+  const claims: OwnerClaim[] = [];
+  const broker = fakeBroker([]);
+  const hub = new AttachHub(broker.ops, { draining: () => true, recordOwner: async (c) => { claims.push(c); return true; } });
+  const rec = sinkRecorder();
+  const v = hub.viewer({ identity: alice, tier: 'session' }, rec.sink);
+  await v.receive(jsonFrame(FrameType.CREATE, { id: 'n', cols: 80, rows: 24 }));
+  expect(last(rec).json).toMatchObject({ ok: false, error: DRAINING_CREATE_ERROR });
+  expect(claims).toEqual([]);
 });
