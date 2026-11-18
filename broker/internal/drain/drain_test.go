@@ -327,15 +327,10 @@ func TestRealManagerEndReasons(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("drain never finished")
 	}
+	// No polling: the reasons must already be recorded when Done fires.
 	got := map[string]string{}
-	for i := 0; i < 100; i++ {
-		for _, s := range d.State().Sessions {
-			got[s.ID] = s.Ended
-		}
-		if got["tab"] != "" && got["auto"] != "" {
-			break
-		}
-		time.Sleep(10 * time.Millisecond)
+	for _, s := range d.State().Sessions {
+		got[s.ID] = s.Ended
 	}
 	if got["auto"] != session.ReasonInterrupted || got["tab"] != session.ReasonKilled {
 		t.Fatalf("end reasons %v", got)

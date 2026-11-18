@@ -149,3 +149,52 @@ func TestOnChangeOnCreateAndExit(t *testing.T) {
 		t.Fatalf("OnChange fired %d times, want create + exit", got)
 	}
 }
+
+func TestKillAllReturnsAfterReasonsAreRecorded(t *testing.T) {
+	m := NewManager(ManagerConfig{ClaudeExec: "/bin/cat", RingBufBytes: 1024})
+	m.CreateWith("a", 80, 24, nil, false)
+	m.CreateWith("b", 80, 24, nil, true)
+	m.KillAll(ReasonKilled)
+	for _, x := range m.Snapshot() {
+		if x.Alive || x.Ended != ReasonKilled {
+			t.Fatalf("not recorded when KillAll returned: %+v", x)
+		}
+	}
+}
+
+// The child exits but wait() hasn't run yet: a drain action in that window must not mark it.
+func TestExitedButUnreapedIsNotMarked(t *testing.T) {
+	for name, act := range map[string]func(*Session){
+		"terminate": func(s *Session) { s.Terminate(ReasonIdle, time.Hour) },
+		"interrupt": func(s *Session) { s.Interrupt() },
+		"kill":      func(s *Session) { s.KillWith(ReasonKilled) },
+	} {
+		t.Run(name, func(t *testing.T) {
+			s, err := newSession("x", "/bin/sh", []string{"-c", "exit 0"}, 80, 24, 1024, true)
+			if err != nil {
+				t.Fatal(err)
+			}
+			deadline := time.Now().Add(5 * time.Second)
+			for !s.exited() {
+				if time.Now().After(deadline) {
+					t.Fatal("child never exited")
+				}
+				time.Sleep(5 * time.Millisecond)
+			}
+			act(s)
+			s.wait()
+			if got := s.EndReason(); got != ReasonExit {
+				t.Fatalf("reason %q, want exit", got)
+			}
+		})
+	}
+}
+
+func TestLiveSessionIsNotExited(t *testing.T) {
+	m := NewManager(ManagerConfig{ClaudeExec: "/bin/cat", RingBufBytes: 1024})
+	defer m.CloseAll()
+	s, _ := m.CreateWith("a", 80, 24, nil, false)
+	if s.exited() {
+		t.Fatal("live session reads exited")
+	}
+}

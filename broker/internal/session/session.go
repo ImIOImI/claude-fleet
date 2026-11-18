@@ -1,11 +1,13 @@
 package session
 
 import (
+	"errors"
 	"os"
 	"os/exec"
 	"sync"
 	"syscall"
 	"time"
+	"unsafe"
 
 	"github.com/creack/pty"
 )
@@ -253,7 +255,7 @@ func (s *Session) EndReason() string {
 // An interrupted or killed session keeps that reason.
 func (s *Session) Terminate(reason string, grace time.Duration) {
 	s.mu.Lock()
-	if s.dead || s.terminating {
+	if s.dead || s.terminating || s.exited() {
 		s.mu.Unlock()
 		return
 	}
@@ -276,7 +278,7 @@ func (s *Session) Terminate(reason string, grace time.Duration) {
 // Either way the session is recorded as interrupted.
 func (s *Session) Interrupt() {
 	s.mu.Lock()
-	if s.dead {
+	if s.dead || s.exited() {
 		s.mu.Unlock()
 		return
 	}
@@ -293,7 +295,7 @@ func (s *Session) Interrupt() {
 
 func (s *Session) KillWith(reason string) {
 	s.mu.Lock()
-	if s.dead {
+	if s.dead || s.exited() {
 		s.mu.Unlock()
 		return
 	}
@@ -308,9 +310,26 @@ func (s *Session) killGroup() {
 	s.kill()
 }
 
-// Setsid made the root pid the group leader.
+// Setsid made the root pid the group leader; its pgid can only be reused after pid wraparound.
 func (s *Session) signalGroup(sig syscall.Signal) {
 	if pid := s.Pid(); pid > 0 {
 		_ = syscall.Kill(-pid, sig)
 	}
+}
+
+const pPID = 1
+
+// exited reports whether claude has exited, reaped or not, without reaping it, so a
+// run that just finished isn't marked as cut short (and re-run).
+func (s *Session) exited() bool {
+	pid := s.Pid()
+	if pid <= 0 {
+		return true
+	}
+	var info [128]byte // siginfo_t; si_signo (offset 0) stays 0 while the child runs
+	_, _, e := syscall.Syscall6(syscall.SYS_WAITID, pPID, uintptr(pid), uintptr(unsafe.Pointer(&info[0])), syscall.WEXITED|syscall.WNOHANG|syscall.WNOWAIT, 0, 0)
+	if e != 0 {
+		return errors.Is(e, syscall.ECHILD)
+	}
+	return *(*int32)(unsafe.Pointer(&info[0])) != 0
 }

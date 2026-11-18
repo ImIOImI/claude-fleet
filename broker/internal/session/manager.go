@@ -8,6 +8,7 @@ import (
 	"errors"
 	"sort"
 	"sync"
+	"time"
 )
 
 type ManagerConfig struct {
@@ -167,7 +168,11 @@ func (m *Manager) Interrupt(id string) {
 	}
 }
 
+// KillAllWait bounds how long KillAll waits for killed sessions to record their reason.
+const KillAllWait = 2 * time.Second
+
 // KillAll kills every live session with reason and keeps them listed (CloseAll drops them).
+// It returns once each has recorded its end reason, or after KillAllWait.
 func (m *Manager) KillAll(reason string) {
 	m.mu.Lock()
 	list := make([]*Session, 0, len(m.sessions))
@@ -177,6 +182,15 @@ func (m *Manager) KillAll(reason string) {
 	m.mu.Unlock()
 	for _, s := range list {
 		s.KillWith(reason)
+	}
+	t := time.NewTimer(KillAllWait)
+	defer t.Stop()
+	for _, s := range list {
+		select {
+		case <-s.Done():
+		case <-t.C:
+			return
+		}
 	}
 }
 
