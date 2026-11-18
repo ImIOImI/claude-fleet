@@ -5,8 +5,8 @@ import { WebSocketServer, type WebSocket } from 'ws';
 import { encodeFrame, encodeJSONFrame, FrameType } from './broker.js';
 import { person, TOKEN } from '../host/testFakes.js';
 import { startTestHost } from '../host/testHost.js';
-import { attachRemotePty } from './remoteAttach.js';
-import { RemoteClient } from './remoteClient.js';
+import { attachRemotePty, DRAIN_NOTICE_TEXT, fetchDrained } from './remoteAttach.js';
+import { RemoteClient, RemoteError } from './remoteClient.js';
 
 const READER = `${TOKEN}r`;
 const OWNER = `${TOKEN}x`;
@@ -163,5 +163,105 @@ describe('attachRemotePty', () => {
       });
       expect(Date.now() - started).toBeLessThan(2000);
     });
+  });
+});
+
+describe('drained sessions (D151)', () => {
+  const CID = '0b6f8f0e-4b1c-4c2a-9a0e-1f2e3d4c5b6a';
+
+  it('resumes a drained session with its claude id under the same broker id', async () => {
+    const { broker, client } = await rig([]);
+    const h = await attachRemotePty({
+      client: client(OWNER), sessionId: 'tab1', cols: 80, rows: 24, canCreate: true,
+      drained: async () => [{ brokerSessionId: 'other', sessionId: '1b6f8f0e-4b1c-4c2a-9a0e-1f2e3d4c5b6a' }, { brokerSessionId: 'tab1', sessionId: CID }]
+    });
+    expect(broker.created[0]).toMatchObject({ id: 'tab1' });
+    expect(broker.created[0].args).toContain('--resume');
+    expect(broker.created[0].args).toContain(CID);
+    expect(broker.created[0].args).not.toContain('--session-id');
+    h.detach();
+  });
+
+  it('a tab missing from the list starts fresh, as before', async () => {
+    const { broker, client } = await rig([]);
+    const h = await attachRemotePty({ client: client(OWNER), sessionId: 'tab1', cols: 80, rows: 24, canCreate: true, drained: async () => [{ brokerSessionId: 'other', sessionId: CID }] });
+    expect(broker.created[0].args).toContain('--session-id');
+    expect(broker.created[0].args).not.toContain(CID);
+    h.detach();
+  });
+
+  it('attaches instead when another viewer resumed first', async () => {
+    const { broker, client } = await rig([]);
+    const realCreate = broker.ops.create;
+    broker.ops.create = async (id, c, r, args, opts) => { await realCreate(id, c, r, args, opts); return { ok: false, error: 'session: id already in use' }; };
+    const h = await attachRemotePty({ client: client(OWNER), sessionId: 'tab1', cols: 80, rows: 24, canCreate: true, drained: async () => [] });
+    await expect.poll(() => broker.sessions.get('tab1')?.handlers ?? null).not.toBeNull();
+    h.detach();
+  });
+
+  it('another CREATE refusal still fails', async () => {
+    const { broker, client } = await rig([]);
+    broker.ops.create = async () => ({ ok: false, error: 'draining: the workspace is restarting' });
+    await expect(attachRemotePty({ client: client(OWNER), sessionId: 'tab1', cols: 80, rows: 24, canCreate: true, drained: async () => [] }))
+      .rejects.toThrow(/host refused to start the session: draining/);
+  });
+
+  it('a failed drained lookup never starts a fresh claude', async () => {
+    const { broker, client } = await rig([]);
+    await expect(attachRemotePty({ client: client(OWNER), sessionId: 'tab1', cols: 80, rows: 24, canCreate: true, drained: async () => { throw new Error('503'); } }))
+      .rejects.toThrow('The host is starting; reopen this tab in a moment.');
+    expect(broker.created).toEqual([]);
+  });
+
+  it('an explicit resumeOf wins and skips the lookup', async () => {
+    const { broker, client } = await rig([]);
+    let asked = 0;
+    const own = '2b6f8f0e-4b1c-4c2a-9a0e-1f2e3d4c5b6a';
+    const h = await attachRemotePty({ client: client(OWNER), sessionId: 'tab1', cols: 80, rows: 24, canCreate: true, resumeOf: own, drained: async () => { asked++; return [{ brokerSessionId: 'tab1', sessionId: CID }]; } });
+    expect(asked).toBe(0);
+    expect(broker.created[0].args).toContain(own);
+    h.detach();
+  });
+
+  it('a running session never consults the list', async () => {
+    const { broker, client } = await rig(['s1']);
+    let asked = 0;
+    const h = await attachRemotePty({ client: client(OWNER), sessionId: 's1', cols: 80, rows: 24, canCreate: true, drained: async () => { asked++; return []; } });
+    expect(asked).toBe(0);
+    expect(broker.created).toEqual([]);
+    h.detach();
+  });
+
+  it('prints the fixed notice when the host drops input', async () => {
+    const { broker, client } = await rig(['s1']);
+    const h = await attachRemotePty({ client: client(OWNER), sessionId: 's1', cols: 80, rows: 24, canCreate: true });
+    const out = collect(h);
+    await expect.poll(() => broker.sessions.get('s1')!.handlers !== null).toBe(true);
+    broker.sessions.get('s1')!.handlers!.onNotice!('draining');
+    await expect.poll(() => out.text()).toContain("[host is restarting; your input wasn't sent]");
+    expect(DRAIN_NOTICE_TEXT).toBe("[host is restarting; your input wasn't sent]");
+    h.detach();
+  });
+});
+
+describe('fetchDrained', () => {
+  const ok = '0b6f8f0e-4b1c-4c2a-9a0e-1f2e3d4c5b6a';
+  const client = (rpc: () => Promise<unknown>) => ({ rpc: rpc as never });
+
+  it('keeps well-formed rows, at most 200, and drops the rest', async () => {
+    const rows = [
+      { brokerSessionId: 'a', sessionId: ok }, { brokerSessionId: 'b', sessionId: 'not-a-uuid' }, { brokerSessionId: 7, sessionId: ok },
+      null, 'x', { brokerSessionId: 'c', sessionId: ok.toUpperCase() }, { brokerSessionId: 'd', sessionId: `${ok}\n` }
+    ];
+    expect(await fetchDrained(client(async () => ({ rows })))).toEqual([{ brokerSessionId: 'a', sessionId: ok }]);
+    expect(await fetchDrained(client(async () => ({ rows: 'nope' })))).toEqual([]);
+    expect(await fetchDrained(client(async () => null))).toEqual([]);
+    const many = Array.from({ length: 250 }, (_, i) => ({ brokerSessionId: `s${i}`, sessionId: ok }));
+    expect(await fetchDrained(client(async () => ({ rows: many })))).toHaveLength(200);
+  });
+
+  it('an older host without the channel (404) has none; other errors propagate', async () => {
+    expect(await fetchDrained(client(async () => { throw new RemoteError('protocol', 'not found', 404); }))).toEqual([]);
+    await expect(fetchDrained(client(async () => { throw new RemoteError('unreachable', 'host starting', 503); }))).rejects.toThrow('host starting');
   });
 });

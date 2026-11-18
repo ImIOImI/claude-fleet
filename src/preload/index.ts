@@ -17,7 +17,7 @@ export type { GithubClientIdSetting, GithubClientIdSource } from './githubClient
 export type { AccountStatus, AccountIdentity, AccountSso, SignInStart, SignInPoll } from './identityTypes';
 import type { OwnerCostRow, SessionOwner } from './sessionOwner';
 export type { OwnerCostRow, SessionOwner } from './sessionOwner';
-import type { RemoteAddOptions, RemoteLiveSession, RemoteProbe } from './remoteTypes';
+import type { RemoteAddOptions, RemoteDrain, RemoteLiveSession, RemoteProbe } from './remoteTypes';
 import type { StoreChoice, StoreSettings, StoreStatus } from './storeTypes';
 import type { FederatedSearchResult, RemoteSessionsResult, SessionCursor } from './federation';
 import type { BackfillCount, BackfillResult, UnpublishResult } from './publish';
@@ -30,7 +30,7 @@ export type {
 } from './remoteAutomations';
 export type { BackfillCount, BackfillResult, UnpublishResult, WorkspacePublish } from './publish';
 export type { ImportProgress, StoreChoice, StorePhase, StoreSettings, StoreStatus } from './storeTypes';
-export type { RemoteAddOptions, RemoteLiveSession, RemoteProbe, RemoteProbeOk, RemoteProbeErr, RemoteProbeErrorKind, RemoteTier } from './remoteTypes';
+export type { RemoteAddOptions, RemoteDrain, RemoteLiveSession, RemoteProbe, RemoteProbeOk, RemoteProbeErr, RemoteProbeErrorKind, RemoteTier } from './remoteTypes';
 export type { ExtraMount } from './extraMounts';
 
 /** Outcome of a `pty:resize`. Lives here because preload is the IPC contract
@@ -794,6 +794,14 @@ const api = {
     rename: (id: string, name: string): Promise<void> => ipcRenderer.invoke('remote:rename', id, name),
     /** Broker sessions live on the host (any tier may watch them). */
     liveSessions: (id: string): Promise<RemoteLiveSession[]> => ipcRenderer.invoke('remote:liveSessions', id),
+    /** Last known drain state per remote workspace. */
+    drainStates: (): Promise<Record<string, RemoteDrain>> => ipcRenderer.invoke('remote:drainStates'),
+    /** A remote workspace pod started or finished restarting (D152). */
+    onDrain: (cb: (u: { workspaceId: string; drain: RemoteDrain }) => void): (() => void) => {
+      const h = (_e: IpcRendererEvent, u: { workspaceId: string; drain: RemoteDrain }) => cb(u);
+      ipcRenderer.on('remote:drain', h);
+      return () => ipcRenderer.removeListener('remote:drain', h);
+    },
     /** A remote host's automations, proposals, todos or notices changed (debounced 1 s per host and channel); refetch. */
     onChanged: (cb: (c: RemoteChange) => void): (() => void) => {
       const h = (_e: IpcRendererEvent, c: RemoteChange) => cb(c);
