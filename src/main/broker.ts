@@ -46,7 +46,12 @@ export enum FrameType {
   LISTPORTS = 0x16,
   PORTS = 0x17,
   KILLPORT = 0x18,
-  KILLED = 0x19
+  KILLED = 0x19,
+  STATUS = 0x1a,
+  STATE = 0x1b,
+  WATCH = 0x1c,
+  DRAIN = 0x1d,
+  NOTICE = 0x1e
 }
 
 export const MAX_FRAME_PAYLOAD = 1 << 20; // mirror proto.MaxFramePayload
@@ -152,6 +157,53 @@ interface DialResponse {
 export interface SessionInfo {
   id: string;
   alive: boolean;
+  /** exit | drain-idle | drain-interrupted | drain-killed, once ended (drain-capable brokers). */
+  ended?: string;
+}
+
+export type DrainPhase = 'serving' | 'draining' | 'done';
+export interface BrokerStateSession { id: string; alive: boolean; headless?: boolean; ended?: string }
+/** Times are epoch ms, present once a drain started. */
+export interface BrokerState { instance: string; phase: DrainPhase; startedAt?: number; softAt?: number; hardAt?: number; sessions: BrokerStateSession[] }
+/** End reasons that cut a turn short (the drain's Esc/SIGINT, or its hard stop). */
+export const DRAIN_CUT_REASONS: ReadonlySet<string> = new Set(['drain-interrupted', 'drain-killed']);
+
+const DRAIN_PHASES = new Set<string>(['serving', 'draining', 'done']);
+
+/** Broker replies are untrusted (SPEC §9): anything off-shape is null. */
+export function parseBrokerState(raw: string): BrokerState | null {
+  let o: unknown;
+  try {
+    o = JSON.parse(raw);
+  } catch {
+    return null;
+  }
+  if (!o || typeof o !== 'object') return null;
+  const r = o as Record<string, unknown>;
+  if (typeof r.instance !== 'string' || typeof r.phase !== 'string' || !DRAIN_PHASES.has(r.phase) || !Array.isArray(r.sessions)) return null;
+  const sessions: BrokerStateSession[] = [];
+  for (const s of r.sessions) {
+    if (!s || typeof s !== 'object') return null;
+    const x = s as Record<string, unknown>;
+    if (typeof x.id !== 'string' || typeof x.alive !== 'boolean') return null;
+    sessions.push({ id: x.id, alive: x.alive, ...(x.headless === true ? { headless: true } : {}), ...(typeof x.ended === 'string' ? { ended: x.ended } : {}) });
+  }
+  const out: BrokerState = { instance: r.instance, phase: r.phase as DrainPhase, sessions };
+  for (const k of ['startedAt', 'softAt', 'hardAt'] as const) {
+    const v = r[k];
+    if (typeof v === 'number' && Number.isSafeInteger(v) && v > 0) out[k] = v;
+  }
+  return out;
+}
+
+function parseNotice(raw: string): { channel: number; code: string } | null {
+  try {
+    const o = JSON.parse(raw) as Record<string, unknown> | null;
+    if (o && Number.isSafeInteger(o.channel) && typeof o.code === 'string') return { channel: o.channel as number, code: o.code };
+  } catch {
+    // fall through
+  }
+  return null;
 }
 
 /** One listening container port; pid/cmdline are absent when the broker
@@ -176,6 +228,8 @@ export interface BrokerPortInfo {
  *   'output'  (channel, bytes)   — live PTY output (FrameOutput)
  *   'history' (channel, bytes)   — ring-buffer dump on attach (FrameHistory)
  *   'ended'   (channel, reason)  — session ended (FrameEnded)
+ *   'state'   (BrokerState)      — unsolicited STATE (after watch())
+ *   'notice'  (channel, code)    — INPUT dropped (code "draining")
  *   'error'   (Error)            — socket-level error
  *   'close'   ()                 — socket closed
  */
@@ -283,6 +337,22 @@ export class BrokerClient extends EventEmitter {
         this.emit('ended', obj.channel, obj.reason);
         return;
       }
+      case FrameType.NOTICE: {
+        const n = parseNotice(payload.toString('utf8'));
+        if (n) this.emit('notice', n.channel, n.code);
+        return;
+      }
+      case FrameType.STATE: {
+        const waiter = this.waiters[FrameType.STATE];
+        if (waiter) {
+          this.waiters[FrameType.STATE] = undefined;
+          waiter.resolve(payload);
+          return;
+        }
+        const st = parseBrokerState(payload.toString('utf8'));
+        if (st) this.emit('state', st);
+        return;
+      }
       default: {
         // Response frames satisfy their waiter, if any.
         const waiter = this.waiters[type];
@@ -354,9 +424,16 @@ export class BrokerClient extends EventEmitter {
     id: string,
     cols: number,
     rows: number,
-    args?: string[]
+    args?: string[],
+    opts: { headless?: boolean } = {}
   ): Promise<CreateResponse> {
-    const body = args && args.length > 0 ? { id, cols, rows, args } : { id, cols, rows };
+    const body = {
+      id,
+      cols,
+      rows,
+      ...(args && args.length > 0 ? { args } : {}),
+      ...(opts.headless ? { headless: true } : {})
+    };
     const payload = await this.rpc(
       { type: FrameType.CREATE, payload: Buffer.from(JSON.stringify(body), 'utf8') },
       FrameType.CREATED
@@ -393,6 +470,16 @@ export class BrokerClient extends EventEmitter {
     );
     const obj = JSON.parse(payload.toString('utf8')) as { sessions: SessionInfo[] };
     return obj.sessions;
+  }
+
+  async status(): Promise<BrokerState | null> {
+    const payload = await this.rpc({ type: FrameType.STATUS, payload: Buffer.from('{}') }, FrameType.STATE);
+    return parseBrokerState(payload.toString('utf8'));
+  }
+
+  /** STATE now and on every change, as 'state' events, until the connection closes. */
+  watch(): void {
+    if (!this.socket.destroyed) this.socket.write(encodeFrame(FrameType.WATCH, Buffer.from('{}')));
   }
 
   /**
