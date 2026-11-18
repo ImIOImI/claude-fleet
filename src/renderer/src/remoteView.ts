@@ -1,5 +1,5 @@
 // Pure copy and tier rules for remote workspaces. Display only: the host enforces every tier.
-import type { RemoteLiveSession, RemoteProbe, RemoteProbeErr, RemoteProbeOk, RemoteTier } from '../../preload/remoteTypes';
+import type { RemoteDrain, RemoteLiveSession, RemoteProbe, RemoteProbeErr, RemoteProbeOk, RemoteTier } from '../../preload/remoteTypes';
 
 export type MaybeTier = RemoteTier | null | undefined;
 
@@ -92,14 +92,20 @@ export function raceTimeout<T>(p: Promise<T>, ms: number): Promise<T | null> {
 export const CHECKING_STATUS = 'checking host';
 
 export interface RemoteChip {
-  phase: 'live' | 'checking' | 'unreachable';
+  phase: 'live' | 'checking' | 'unreachable' | 'restarting';
   /** Replaces the chip's sub-line, or null to keep the normal activity text. */
   sub: string | null;
 }
 
-export function remoteChip(w: { kind: string; state: string; status?: string }): RemoteChip | null {
+const restarting = (d: RemoteDrain | null | undefined): boolean => d?.phase === 'draining' || d?.phase === 'unknown';
+
+export function remoteChip(w: { kind: string; state: string; status?: string }, drain?: RemoteDrain | null): RemoteChip | null {
   if (w.kind !== 'remote') return null;
-  if (w.state !== 'unreachable') return { phase: 'live', sub: null };
+  if (w.state !== 'unreachable') {
+    if (drain?.phase === 'draining') return { phase: 'restarting', sub: 'restarting · input paused' };
+    if (drain?.phase === 'unknown') return { phase: 'restarting', sub: 'waiting for the workspace pod' };
+    return { phase: 'live', sub: null };
+  }
   if (w.status === CHECKING_STATUS) return { phase: 'checking', sub: 'checking host…' };
   return { phase: 'unreachable', sub: 'host unreachable' };
 }
@@ -111,13 +117,39 @@ export interface PaneRules {
   canNew: boolean;
   /** An empty inventory (or closing the last tab) gets a fresh tab; creating one would fail below `session`. */
   defaultTab: boolean;
+  /** The workspace pod is restarting (D152). */
+  restarting: boolean;
 }
 
 /** `undefined` means a local or container workspace. */
-export function paneRules(t: RemoteTier | null | undefined): PaneRules {
-  if (t === undefined) return { remote: false, readOnly: false, canNew: true, defaultTab: true };
+export function paneRules(t: RemoteTier | null | undefined, drain?: RemoteDrain | null): PaneRules {
+  if (t === undefined) return { remote: false, readOnly: false, canNew: true, defaultTab: true, restarting: false };
   const canNew = canStartSessions(t);
-  return { remote: true, readOnly: !canType(t), canNew, defaultTab: canNew };
+  const r = restarting(drain);
+  return { remote: true, readOnly: !canType(t) || r, canNew: canNew && !r, defaultTab: canNew, restarting: r };
+}
+
+export function drainBanner(d: RemoteDrain | null | undefined, now: number, fmt: (ms: number) => string): string | null {
+  if (!d || d.phase === 'serving') return null;
+  if (d.phase === 'unknown') return 'Waiting for the workspace pod…';
+  if (d.softAt !== null && now >= d.softAt) return 'The host is restarting. Stopping turns that are still running.';
+  const until = d.softAt !== null ? ` (until ${fmt(d.softAt)})` : '';
+  return `The host is restarting. Running turns finish first${until}; idle sessions close now. Typing is paused. Tabs resume on their own when the host is back.`;
+}
+
+/** How a tab's session end reads: during a restart it waits for the host instead of offering a fresh claude. */
+export function sessionEndKind(restarting: boolean): 'restarting' | 'natural' {
+  return restarting ? 'restarting' : 'natural';
+}
+
+/** Only an open tab whose session ended during the restart re-attaches when it is over (D151). */
+export function resumesAfterDrain(resumeToken: number | null | undefined, endedInDrain: boolean): boolean {
+  return resumeToken != null && endedInDrain;
+}
+
+/** The restart is over: re-attach the tabs that ended during it. */
+export function drainEnded(prev: RemoteDrain | null | undefined, next: RemoteDrain | null | undefined): boolean {
+  return restarting(prev) && next?.phase === 'serving';
 }
 
 export function joinableSessions(live: RemoteLiveSession[], tabIds: string[]): RemoteLiveSession[] {

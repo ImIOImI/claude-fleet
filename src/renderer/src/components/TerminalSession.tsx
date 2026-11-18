@@ -24,6 +24,7 @@ import { EchoRttTracker } from '../echoRtt';
 import { initPerfState, perfRecording } from '../perfState';
 import { buildTerminalOptions } from './terminalOptions';
 import { createResizePusher, type ResizePusher } from './resizePusher';
+import { resumesAfterDrain, sessionEndKind } from '../remoteView';
 
 const URL_REGEX = /https?:\/\/[^\s'"`<>()\[\]{}]+/g;
 const TRAILING_PUNCTUATION = /[.,;:!?]+$/;
@@ -145,6 +146,10 @@ interface Props {
    * conversation (#195) — and the parent surfaces the skip to the user.
    */
   onRefreshUnresolved?: (sessionId: string) => void;
+  /** The workspace pod is restarting: a session that ends now shows the restarting card (D152). */
+  restarting?: boolean;
+  /** Bumped when the restart is over; a tab that ended during it re-attaches. */
+  resumeToken?: number | null;
 }
 
 export function TerminalSession({
@@ -161,6 +166,8 @@ export function TerminalSession({
   onActivityChange,
   reloadToken,
   onRefreshUnresolved,
+  restarting = false,
+  resumeToken,
 }: Props) {
   const hostRef = useRef<HTMLDivElement | null>(null);
   // The live xterm, so effects outside the attach effect can force a repaint
@@ -170,6 +177,9 @@ export function TerminalSession({
   readOnlyRef.current = readOnly;
   const remoteRef = useRef(remote);
   remoteRef.current = remote;
+  const restartingRef = useRef(restarting);
+  restartingRef.current = restarting;
+  const endedInDrainRef = useRef(false);
   const visibleRef = useRef(visible);
   visibleRef.current = visible;
   // Bumped when the user clicks "Start new session" / "Retry" after a
@@ -185,7 +195,7 @@ export function TerminalSession({
   // surfaces the error text for the latter so users can act on it
   // instead of staring at a generic "session ended" card.
   const [endedReason, setEndedReason] = useState<
-    { kind: 'natural' } | { kind: 'attach-error'; message: string } | null
+    { kind: 'natural' } | { kind: 'restarting' } | { kind: 'attach-error'; message: string } | null
   >(null);
 
   // The live pty handle id for the current attach, mirrored out of the effect
@@ -637,7 +647,9 @@ export function TerminalSession({
           if (!disposed) {
             // A dead session isn't busy.
             setBusy(false);
-            setEndedReason({ kind: 'natural' });
+            const kind = sessionEndKind(restartingRef.current);
+            endedInDrainRef.current = kind === 'restarting';
+            setEndedReason({ kind });
             onLifecycleChange?.(sessionId, 'ended');
             // Diagnostic: distinguish "claude /exit" from "broker
             // disconnected mid-session" cases. Both currently fire the
@@ -832,6 +844,13 @@ export function TerminalSession({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [reloadToken, sessionId, workspaceId, onRefreshUnresolved]);
 
+  useEffect(() => {
+    if (!resumesAfterDrain(resumeToken, endedInDrainRef.current)) return;
+    endedInDrainRef.current = false;
+    // Attach finds no session; main resumes it from the host's drained list (D151).
+    setSessionEpoch((e) => e + 1);
+  }, [resumeToken]);
+
   // When this session becomes visible again, force a fit. xterm's
   // ResizeObserver can fire while the host is `visibility: hidden`
   // (dimensions are preserved) but window resizes during that hidden
@@ -900,6 +919,14 @@ export function TerminalSession({
                   Retry
                 </button>
               </div>
+            </div>
+          </div>
+        )}
+        {endedReason?.kind === 'restarting' && (
+          <div className="session-ended-overlay" role="status" aria-label="Waiting for the host">
+            <div className="session-ended-card restarting">
+              <div className="session-ended-title">waiting for the host to restart</div>
+              <div className="session-ended-help">This tab resumes by itself when the host is back.</div>
             </div>
           </div>
         )}
