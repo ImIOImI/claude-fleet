@@ -20,20 +20,27 @@ const HOST_STARTING = 'The host is starting; reopen this tab in a moment.';
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const MAX_DRAINED = 200;
 
-/** The host's drained sessions (D151); an older host without the channel has none. */
-export async function fetchDrained(client: Pick<RemoteClient, 'rpc'>): Promise<Array<{ brokerSessionId: string; sessionId: string }>> {
+export type DrainedRow = { brokerSessionId: string; sessionId: string | null };
+
+/**
+ * The host's drained sessions (D151); an older host without the channel has none.
+ * A row whose claude id is malformed keeps `sessionId: null` so its tab fails closed.
+ */
+export async function fetchDrained(client: Pick<RemoteClient, 'rpc'>): Promise<DrainedRow[]> {
+  let r: { rows?: unknown } | null;
   try {
-    const r = await client.rpc<{ rows?: unknown }>('sessions:drained', []);
-    const rows = Array.isArray(r?.rows) ? r.rows.slice(0, MAX_DRAINED) : [];
-    return rows.flatMap((x) => {
-      const o = x as { brokerSessionId?: unknown; sessionId?: unknown } | null;
-      return o && typeof o.brokerSessionId === 'string' && typeof o.sessionId === 'string' && UUID_RE.test(o.sessionId)
-        ? [{ brokerSessionId: o.brokerSessionId, sessionId: o.sessionId }] : [];
-    });
+    r = await client.rpc<{ rows?: unknown }>('sessions:drained', []);
   } catch (err) {
     if (err instanceof RemoteError && err.status === 404) return [];
     throw err;
   }
+  if (!Array.isArray(r?.rows)) throw new RemoteError('protocol', 'bad sessions:drained reply');
+  return r.rows.slice(0, MAX_DRAINED).flatMap((x) => {
+    const o = x as { brokerSessionId?: unknown; sessionId?: unknown } | null;
+    if (!o || typeof o.brokerSessionId !== 'string') return [];
+    const ok = typeof o.sessionId === 'string' && UUID_RE.test(o.sessionId);
+    return [{ brokerSessionId: o.brokerSessionId, sessionId: ok ? (o.sessionId as string) : null }];
+  });
 }
 
 /** Fixed text per host close code; the host's reason string is untrusted. */
@@ -57,7 +64,7 @@ export interface RemoteAttachOptions {
   canCreate: boolean;
   closeWaitMs?: number;
   /** Drained-session lookup for a missing session (D151); absent: none. */
-  drained?: () => Promise<Array<{ brokerSessionId: string; sessionId: string }>>;
+  drained?: () => Promise<DrainedRow[]>;
 }
 
 export async function attachRemotePty(o: RemoteAttachOptions): Promise<PtyHandle> {
@@ -106,8 +113,9 @@ export async function attachRemotePty(o: RemoteAttachOptions): Promise<PtyHandle
     if (!resumeOf && o.drained) {
       // A failed lookup must not start a fresh claude in place of the drained one.
       const rows = await o.drained().catch(() => null);
-      if (rows === null) return fail(HOST_STARTING);
-      resumeOf = rows.find((x) => x.brokerSessionId === o.sessionId)?.sessionId;
+      const row = rows?.find((x) => x.brokerSessionId === o.sessionId);
+      if (rows === null || row?.sessionId === null) return fail(HOST_STARTING);
+      resumeOf = row?.sessionId;
     }
     const created = await step(broker.createSession(o.sessionId, o.cols, o.rows, claudeCreateArgs(resumeOf, resumeOf ? undefined : randomUUID())));
     // Another viewer resumed it first: attach to theirs.

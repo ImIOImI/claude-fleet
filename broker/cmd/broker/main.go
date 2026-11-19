@@ -108,7 +108,7 @@ func main() {
 
 	sigCh := make(chan os.Signal, 2)
 	signal.Notify(sigCh, syscall.SIGTERM, syscall.SIGINT)
-	go handleSignals(sigCh, drainOn, d, func() { cancel(); _ = ln.Close() })
+	go handleSignals(sigCh, drainOn, d, watchFlush, func() { cancel(); _ = ln.Close() })
 
 	log.Printf("listening on %s (ring=%d, claude=%q, drain=%v, instance=%s)", listenAddr, ringBytes, claudeExec, drainOn, instance)
 	if err := srv.Serve(ctx, ln); err != nil && !errors.Is(err, net.ErrClosed) && !errors.Is(err, context.Canceled) {
@@ -127,8 +127,11 @@ type drainer interface {
 	Done() <-chan struct{}
 }
 
-// handleSignals calls stop once: SIGTERM with the drain on waits for it (D143); anything else stops at once.
-func handleSignals(sigCh <-chan os.Signal, drainOn bool, d drainer, stop func()) {
+// Lets WATCH streams write the final STATE (drain end reasons) before the listener closes.
+const watchFlush = time.Second
+
+// handleSignals calls stop once: SIGTERM with the drain on waits for it (D143) plus flush; anything else stops at once.
+func handleSignals(sigCh <-chan os.Signal, drainOn bool, d drainer, flush time.Duration, stop func()) {
 	var once sync.Once
 	stopOnce := func() { once.Do(stop) }
 	waiting := false
@@ -141,7 +144,7 @@ func handleSignals(sigCh <-chan os.Signal, drainOn bool, d drainer, stop func())
 			}
 			if !waiting {
 				waiting = true
-				go func() { <-d.Done(); stopOnce() }()
+				go func() { <-d.Done(); time.Sleep(flush); stopOnce() }()
 			}
 			continue
 		}

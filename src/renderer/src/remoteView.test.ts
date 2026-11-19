@@ -278,7 +278,9 @@ describe('drain view', () => {
   });
 
   it('pane rules: read-only and no new tabs while restarting', () => {
-    expect(paneRules('session', draining)).toEqual({ remote: true, readOnly: true, canNew: false, defaultTab: true, restarting: true });
+    // Closing the last tab mid-restart must not auto-create one whose CREATE the host refuses.
+    expect(paneRules('session', draining)).toEqual({ remote: true, readOnly: true, canNew: false, defaultTab: false, restarting: true });
+    expect(paneRules('session', unknown).defaultTab).toBe(false);
     expect(paneRules('steer', unknown)).toEqual({ remote: true, readOnly: true, canNew: false, defaultTab: false, restarting: true });
     expect(paneRules('session', serving)).toEqual({ remote: true, readOnly: false, canNew: true, defaultTab: true, restarting: false });
     expect(paneRules(undefined, draining)).toEqual({ remote: false, readOnly: false, canNew: true, defaultTab: true, restarting: false });

@@ -213,6 +213,25 @@ describe('drained sessions (D151)', () => {
     expect(broker.created).toEqual([]);
   });
 
+  it('a matching row with an invalid claude id never starts a fresh claude', async () => {
+    const { broker, client } = await rig([]);
+    await expect(attachRemotePty({ client: client(OWNER), sessionId: 'tab1', cols: 80, rows: 24, canCreate: true, drained: async () => [{ brokerSessionId: 'tab1', sessionId: null }] }))
+      .rejects.toThrow('The host is starting; reopen this tab in a moment.');
+    expect(broker.created).toEqual([]);
+  });
+
+  it('a malformed drained reply never starts a fresh claude', async () => {
+    const { broker, client } = await rig([]);
+    const c = client(OWNER);
+    const bad = { ...c, rpc: (async () => ({ rows: 'nope' })) as never };
+    await expect(attachRemotePty({ client: c, sessionId: 'tab1', cols: 80, rows: 24, canCreate: true, drained: () => fetchDrained(bad) }))
+      .rejects.toThrow('The host is starting; reopen this tab in a moment.');
+    const badUuid = { ...c, rpc: (async () => ({ rows: [{ brokerSessionId: 'tab1', sessionId: 'not-a-uuid' }] })) as never };
+    await expect(attachRemotePty({ client: c, sessionId: 'tab1', cols: 80, rows: 24, canCreate: true, drained: () => fetchDrained(badUuid) }))
+      .rejects.toThrow('The host is starting; reopen this tab in a moment.');
+    expect(broker.created).toEqual([]);
+  });
+
   it('an explicit resumeOf wins and skips the lookup', async () => {
     const { broker, client } = await rig([]);
     let asked = 0;
@@ -248,16 +267,23 @@ describe('fetchDrained', () => {
   const ok = '0b6f8f0e-4b1c-4c2a-9a0e-1f2e3d4c5b6a';
   const client = (rpc: () => Promise<unknown>) => ({ rpc: rpc as never });
 
-  it('keeps well-formed rows, at most 200, and drops the rest', async () => {
+  it('keeps well-formed rows, at most 200; a bad claude id stays as null, other bad rows drop', async () => {
     const rows = [
       { brokerSessionId: 'a', sessionId: ok }, { brokerSessionId: 'b', sessionId: 'not-a-uuid' }, { brokerSessionId: 7, sessionId: ok },
       null, 'x', { brokerSessionId: 'c', sessionId: ok.toUpperCase() }, { brokerSessionId: 'd', sessionId: `${ok}\n` }
     ];
-    expect(await fetchDrained(client(async () => ({ rows })))).toEqual([{ brokerSessionId: 'a', sessionId: ok }]);
-    expect(await fetchDrained(client(async () => ({ rows: 'nope' })))).toEqual([]);
-    expect(await fetchDrained(client(async () => null))).toEqual([]);
+    expect(await fetchDrained(client(async () => ({ rows })))).toEqual([
+      { brokerSessionId: 'a', sessionId: ok }, { brokerSessionId: 'b', sessionId: null },
+      { brokerSessionId: 'c', sessionId: null }, { brokerSessionId: 'd', sessionId: null }
+    ]);
     const many = Array.from({ length: 250 }, (_, i) => ({ brokerSessionId: `s${i}`, sessionId: ok }));
     expect(await fetchDrained(client(async () => ({ rows: many })))).toHaveLength(200);
+  });
+
+  it('a 200 reply without a rows array is a protocol error', async () => {
+    await expect(fetchDrained(client(async () => ({ rows: 'nope' })))).rejects.toMatchObject({ kind: 'protocol', message: 'bad sessions:drained reply' });
+    await expect(fetchDrained(client(async () => null))).rejects.toMatchObject({ kind: 'protocol', message: 'bad sessions:drained reply' });
+    await expect(fetchDrained(client(async () => ({})))).rejects.toMatchObject({ kind: 'protocol' });
   });
 
   it('an older host without the channel (404) has none; other errors propagate', async () => {

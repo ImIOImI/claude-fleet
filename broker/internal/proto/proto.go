@@ -204,7 +204,7 @@ type ChannelResponse struct {
 
 type EndedNotice struct {
 	Channel uint32 `json:"channel"`
-	Reason  string `json:"reason"` // "exit" | "error" | "signal"
+	Reason  string `json:"reason"` // as SESSIONS[].ended: exit or drain-*
 }
 
 type SessionInfo struct {

@@ -9,7 +9,6 @@ import (
 	"time"
 
 	"github.com/ImIOImI/claude-fleet/broker/internal/activity"
-	"github.com/ImIOImI/claude-fleet/broker/internal/notify"
 	"github.com/ImIOImI/claude-fleet/broker/internal/session"
 )
 
@@ -47,13 +46,15 @@ type State struct {
 	Sessions  []session.Snap
 }
 
+type Notifier interface{ Notify() }
+
 type Drainer struct {
 	cfg      Config
 	target   Target
 	activity func(pid int) activity.Kind
 	now      func() time.Time
 	instance string
-	bus      *notify.Bus
+	bus      Notifier
 
 	mu          sync.Mutex
 	phase       string
@@ -64,7 +65,7 @@ type Drainer struct {
 	done        chan struct{}
 }
 
-func New(cfg Config, t Target, act func(int) activity.Kind, now func() time.Time, instance string, bus *notify.Bus) *Drainer {
+func New(cfg Config, t Target, act func(int) activity.Kind, now func() time.Time, instance string, bus Notifier) *Drainer {
 	return &Drainer{
 		cfg: cfg, target: t, activity: act, now: now, instance: instance, bus: bus,
 		phase: PhaseServing, lastEsc: map[string]time.Time{}, interrupted: map[string]bool{},
@@ -174,9 +175,10 @@ func (d *Drainer) finish() {
 		return
 	}
 	d.phase = PhaseDone
-	close(d.done)
 	d.mu.Unlock()
+	// Wake WATCH before Done releases the shutdown, so the final STATE gets written.
 	d.bus.Notify()
+	close(d.done)
 }
 
 // Run waits for Start, then passes every Poll until done or ctx ends.

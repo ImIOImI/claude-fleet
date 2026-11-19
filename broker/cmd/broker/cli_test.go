@@ -205,10 +205,14 @@ func (f *fakeDrain) Phase() string         { return drain.PhaseDraining }
 func (f *fakeDrain) Done() <-chan struct{} { return f.done }
 
 func signalRig(drainOn bool) (chan os.Signal, *fakeDrain, chan struct{}) {
+	return signalRigFlush(drainOn, 0)
+}
+
+func signalRigFlush(drainOn bool, flush time.Duration) (chan os.Signal, *fakeDrain, chan struct{}) {
 	sig := make(chan os.Signal, 4)
 	f := &fakeDrain{done: make(chan struct{})}
 	stopped := make(chan struct{})
-	go handleSignals(sig, drainOn, f, func() { close(stopped) })
+	go handleSignals(sig, drainOn, f, flush, func() { close(stopped) })
 	return sig, f, stopped
 }
 
@@ -236,6 +240,28 @@ func TestSigtermDrainsWhenEnabled(t *testing.T) {
 	time.Sleep(50 * time.Millisecond)
 	if n := f.started.Load(); n != 2 {
 		t.Fatalf("Start called %d times", n)
+	}
+}
+
+func TestDoneWaitsForWatchFlushThenStops(t *testing.T) {
+	sig, f, stopped := signalRigFlush(true, 300*time.Millisecond)
+	sig <- syscall.SIGTERM
+	close(f.done)
+	if stoppedWithin(stopped, 150*time.Millisecond) {
+		t.Fatal("stopped before the WATCH flush window")
+	}
+	if !stoppedWithin(stopped, time.Second) {
+		t.Fatal("not stopped after the flush window")
+	}
+}
+
+func TestSigintDuringFlushStopsAtOnce(t *testing.T) {
+	sig, f, stopped := signalRigFlush(true, time.Minute)
+	sig <- syscall.SIGTERM
+	close(f.done)
+	sig <- syscall.SIGINT
+	if !stoppedWithin(stopped, time.Second) {
+		t.Fatal("SIGINT did not cut the flush short")
 	}
 }
 

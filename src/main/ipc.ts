@@ -437,6 +437,7 @@ const summaryRelay = createSummaryRelay({
     if (channel === 'notices:changed') remoteNoticeSink?.hint(origin);
   },
   onDrain: (origin, payload) => drainRelay.update(origin, payload),
+  onDropped: (origin) => drainRelay.forget(origin),
   onConnected: (origin) => {
     remoteChanges.connected(origin);
     remoteNoticeSink?.hint(origin);

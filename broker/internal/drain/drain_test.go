@@ -304,6 +304,31 @@ func TestPhaseChangesNotifyTheBus(t *testing.T) {
 	}
 }
 
+type orderBus struct {
+	d          *Drainer
+	doneAtLast bool
+}
+
+func (o *orderBus) Notify() {
+	select {
+	case <-o.d.Done():
+		o.doneAtLast = true
+	default:
+		o.doneAtLast = false
+	}
+}
+
+// A WATCH woken by Done must already have its wake-up, or the final STATE can be lost.
+func TestDoneNotifiesBeforeClosing(t *testing.T) {
+	ob := &orderBus{}
+	ob.d = New(cfg, newTarget(), acts{}.of, time.Now, "i", ob)
+	ob.d.Start()
+	ob.d.Step()
+	if ob.d.Phase() != PhaseDone || ob.doneAtLast {
+		t.Fatalf("phase %s; Done closed before the final notify: %v", ob.d.Phase(), ob.doneAtLast)
+	}
+}
+
 // Real sessions: a headless run that exits 0 on SIGINT is still interrupted (owner decision 1A),
 // and an interactive one without a status file is busy until the hard kill.
 func TestRealManagerEndReasons(t *testing.T) {

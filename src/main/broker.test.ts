@@ -215,9 +215,12 @@ describe('drain frames', () => {
     // A phase this client doesn't know is not serving (fail safe).
     expect(parseBrokerState('{"instance":"i","phase":"weird","sessions":[]}')).toEqual({ instance: 'i', phase: 'draining', sessions: [] });
     expect(parseBrokerState('{"instance":"i","phase":7,"sessions":[]}')).toBeNull();
-    expect(parseBrokerState('{"instance":"i","phase":"serving","sessions":[{"id":1}]}')).toBeNull();
-    expect(parseBrokerState('{"instance":"i","phase":"serving","sessions":[{"id":1,"alive":true}]}')).toBeNull();
-    expect(parseBrokerState('{"instance":"i","phase":"serving","sessions":[{"id":"a","alive":"yes"}]}')).toBeNull();
+    // A malformed session entry is skipped; the frame (and its phase) survives.
+    const bad = (x: string) => `{"instance":"i","phase":"draining","sessions":[${x},{"id":"ok","alive":true}]}`;
+    for (const x of ['{"id":1}', '{"id":1,"alive":true}', '{"id":"a","alive":"yes"}', 'null', '"s"']) {
+      expect(parseBrokerState(bad(x))).toEqual({ instance: 'i', phase: 'draining', sessions: [{ id: 'ok', alive: true }] });
+    }
+    expect(parseBrokerState('{"instance":"i","phase":"serving","sessions":{}}')).toBeNull();
     expect(parseBrokerState('{"instance":7,"phase":"serving","sessions":[]}')).toBeNull();
     expect(parseBrokerState('not json')).toBeNull();
     expect([...DRAIN_CUT_REASONS].sort()).toEqual(['drain-interrupted', 'drain-killed']);
@@ -251,7 +254,7 @@ describe('drain frames', () => {
     client.on('close', () => { closed = true; });
     toClient.write(encodeFrame(FrameType.NOTICE, Buffer.from('not json')));
     toClient.write(encodeFrame(FrameType.NOTICE, Buffer.from('{"channel":"3","code":"draining"}')));
-    toClient.write(encodeFrame(FrameType.STATE, Buffer.from('{"instance":"i","phase":"done","sessions":[{"id":"a"}]}')));
+    toClient.write(encodeFrame(FrameType.STATE, Buffer.from('{"instance":"i","phase":"done","sessions":"a"}')));
     toClient.write(encodeFrame(FrameType.NOTICE, Buffer.from('{"channel":4,"code":"draining"}')));
     await new Promise((r) => setTimeout(r, 10));
     expect(states).toEqual([]);

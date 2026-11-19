@@ -115,7 +115,7 @@ export interface PaneRules {
   /** Keystrokes are dropped; the host drops them too. */
   readOnly: boolean;
   canNew: boolean;
-  /** An empty inventory (or closing the last tab) gets a fresh tab; creating one would fail below `session`. */
+  /** An empty inventory (or closing the last tab) gets a fresh tab; creating one would fail below `session` or while restarting. */
   defaultTab: boolean;
   /** The workspace pod is restarting (D152). */
   restarting: boolean;
@@ -126,7 +126,7 @@ export function paneRules(t: RemoteTier | null | undefined, drain?: RemoteDrain 
   if (t === undefined) return { remote: false, readOnly: false, canNew: true, defaultTab: true, restarting: false };
   const canNew = canStartSessions(t);
   const r = restarting(drain);
-  return { remote: true, readOnly: !canType(t) || r, canNew: canNew && !r, defaultTab: canNew, restarting: r };
+  return { remote: true, readOnly: !canType(t) || r, canNew: canNew && !r, defaultTab: canNew && !r, restarting: r };
 }
 
 export function drainBanner(d: RemoteDrain | null | undefined, now: number, fmt: (ms: number) => string): string | null {

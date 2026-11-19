@@ -160,6 +160,30 @@ describe('host drain hooks', () => {
     await h.stop();
   });
 
+  it('a lookup error on one claimed row settles it skipped and still dispatches the rest', async () => {
+    const r = await hostAutomationsRig();
+    const a = await r.createFreshAutomation('review');
+    const bad = await r.runtime.store.startRun(a.raw, { kind: 'manual' }, {}, 'interrupted', 1);
+    const good = await r.runtime.store.startRun(a.raw, { kind: 'manual' }, {}, 'interrupted', 2);
+    const drains = memoryDrainStore();
+    await drains.markRetry(bad.id, a.id, 3);
+    await drains.markRetry(good.id, a.id, 3);
+    const settled: Array<[string, unknown]> = [];
+    const settle = drains.settle.bind(drains);
+    drains.settle = async (id, o, n) => { settled.push([id, o]); return settle(id, o, n); };
+    const getRun = r.runtime.store.getRun.bind(r.runtime.store);
+    r.runtime.store.getRun = async (id) => { if (id === bad.id) throw new Error('db hiccup'); return getRun(id); };
+    const gate = fakeGate('draining');
+    const h = startHostDrain({ gate, drains, automations: r.runtime, owners: owners({}), log: quiet, now: () => 4 });
+    gate.push('serving', { instance: 'i2', phase: 'serving', sessions: [] });
+    await h.idle();
+    expect(settled).toContainEqual([bad.id, { skipped: 'db hiccup' }]);
+    const retries = (await r.runtime.store.runs(a.id, 10)).filter((x) => x.trigger.retryOf === good.id);
+    expect(retries).toHaveLength(1);
+    await r.untilCreated(`auto-${retries[0].id}-review`);
+    await h.stop();
+  });
+
   it('records drained interactive sessions (not auto-, mapped through owners) while draining', async () => {
     const r = await hostAutomationsRig();
     const drains = memoryDrainStore();

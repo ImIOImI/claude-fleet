@@ -170,7 +170,7 @@ export const DRAIN_CUT_REASONS: ReadonlySet<string> = new Set(['drain-interrupte
 
 const DRAIN_PHASES = new Set<string>(['serving', 'draining', 'done']);
 
-/** Broker replies are untrusted (SPEC §9): anything off-shape is null. */
+/** Broker replies are untrusted (SPEC §9): an off-shape frame is null; an off-shape session entry is skipped. */
 export function parseBrokerState(raw: string): BrokerState | null {
   let o: unknown;
   try {
@@ -183,9 +183,9 @@ export function parseBrokerState(raw: string): BrokerState | null {
   if (typeof r.instance !== 'string' || typeof r.phase !== 'string' || !Array.isArray(r.sessions)) return null;
   const sessions: BrokerStateSession[] = [];
   for (const s of r.sessions) {
-    if (!s || typeof s !== 'object') return null;
+    if (!s || typeof s !== 'object') continue;
     const x = s as Record<string, unknown>;
-    if (typeof x.id !== 'string' || typeof x.alive !== 'boolean') return null;
+    if (typeof x.id !== 'string' || typeof x.alive !== 'boolean') continue;
     sessions.push({ id: x.id, alive: x.alive, ...(x.headless === true ? { headless: true } : {}), ...(typeof x.ended === 'string' ? { ended: x.ended } : {}) });
   }
   // A phase from a newer broker is not serving: fail safe. Dropping the STATE would read as legacy (serving) after 5 s.

@@ -63,7 +63,7 @@ func (s *Server) phase() string {
 	return s.Drain.Phase()
 }
 
-// stateNotice snapshots afresh: once the phase is done, every session's end reason is recorded.
+// stateNotice snapshots afresh: after done, end reasons are recorded unless KillAll's 2 s wait ran out.
 func (s *Server) stateNotice() proto.StateNotice {
 	var st drain.State
 	if s.Drain != nil {

@@ -21,6 +21,8 @@ export interface SummaryRelayDeps {
   onDrain?(origin: string, payload: unknown): void;
   /** The /events socket for that host (re)connected. */
   onConnected?(origin: string): void;
+  /** That host's subscription ended (bookmark gone, URL moved, or retries given up). */
+  onDropped?(origin: string): void;
 }
 
 export function createSummaryRelay(d: SummaryRelayDeps): { sync(): void; stop(): void } {
@@ -28,9 +30,11 @@ export function createSummaryRelay(d: SummaryRelayDeps): { sync(): void; stop():
   const subs = new Map<string, { url: string; stop: () => void; cancel: (() => void) | null }>();
   const drop = (id: string): void => {
     const s = subs.get(id);
-    s?.stop();
-    s?.cancel?.();
+    if (!s) return;
+    s.stop();
+    s.cancel?.();
     subs.delete(id);
+    d.onDropped?.(id);
   };
   const hint = (id: string): void => {
     const s = subs.get(id);
