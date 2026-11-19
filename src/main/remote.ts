@@ -4,7 +4,7 @@
 // only: attach decides from a fresh /whoami, and the host enforces regardless.
 import type { Backend } from './backend.js';
 import type { Workspace, WorkspaceSpec } from './workspaces.js';
-import { attachRemotePty } from './remoteAttach.js';
+import { attachRemotePty, fetchDrained } from './remoteAttach.js';
 import { RemoteClient, RemoteError, type WhoAmI } from './remoteClient.js';
 
 export const MANAGED_MSG = 'This remote workspace is managed by its deployment';
@@ -222,7 +222,8 @@ export function createRemoteBackend(deps: RemoteBackendDeps): RemoteBackend {
     async attachPty(containerId, sessionId, cols, rows, resumeOf) {
       const spec = await bookmark(containerId);
       const who = await refreshTier(spec);
-      return attachRemotePty({ client: clientFor(spec.remote.url), sessionId, cols, rows, resumeOf, canCreate: who.tier === 'session' });
+      const client = clientFor(spec.remote.url);
+      return attachRemotePty({ client, sessionId, cols, rows, resumeOf, canCreate: who.tier === 'session', drained: () => fetchDrained(client) });
     },
     getBrokerLogs: async () => '',
     committeePost: unsupported('Committee post'),

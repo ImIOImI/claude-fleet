@@ -7,9 +7,12 @@ import { createServer as createNetServer, type AddressInfo } from 'node:net';
 import { chmodSync, existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { FrameType } from '../main/broker.js';
+import { BrokerClient, FrameType } from '../main/broker.js';
 import { AttachHub } from './attachHub.js';
 import { brokerOps } from './brokerOps.js';
+import { startDrainGate } from './drainGate.js';
+import { EventHub } from './events.js';
+import { createLogger } from './log.js';
 import { inputFrame, jsonFrame, person, sinkRecorder } from './testFakes.js';
 
 const BIN = process.env.FLEET_BROKER_BIN;
@@ -55,6 +58,39 @@ describe.runIf(BIN)('fleet-host against the real broker', () => {
     expect(a.frames.at(-1)?.json).toMatchObject({ ok: true });
     await watcher.dispose();
   });
+
+  it('STATUS answers STATE; a headless CREATE shows as headless; WATCH streams changes', async () => {
+    const c = new BrokerClient(socket);
+    await c.ready();
+    const states: unknown[] = [];
+    c.on('state', (st) => states.push(st));
+    c.watch();
+    expect(await c.createSession('hl1', 80, 24, undefined, { headless: true })).toMatchObject({ ok: true });
+    await expect.poll(() => states.some((st) => (st as { sessions: { id: string; headless?: boolean }[] }).sessions.some((x) => x.id === 'hl1' && x.headless))).toBe(true);
+    const st = await c.status();
+    expect(st?.phase).toBe('serving');
+    expect(st?.instance).toMatch(/^[0-9a-f]{16}$/);
+    expect(st?.sessions.find((x) => x.id === 'hl1')).toMatchObject({ alive: true, headless: true });
+    c.close();
+  });
+
+  it('the DrainGate over brokerOps.watch reads serving and sees sessions end', async () => {
+    const ops = brokerOps(socket);
+    const gate = startDrainGate({ ops, log: createLogger(() => undefined), events: new EventHub(), legacyMs: 60_000 });
+    try {
+      await expect.poll(() => gate.phase(), { timeout: 5000 }).toBe('serving');
+      expect(await ops.create('gw1', 80, 24, [], { headless: true })).toMatchObject({ ok: true });
+      await expect.poll(() => gate.last()?.sessions.some((x) => x.id === 'gw1' && x.headless), { timeout: 5000 }).toBe(true);
+      const c = new BrokerClient(socket);
+      await c.ready();
+      await c.attachSession('gw1', 3);
+      c.sendInput(3, Buffer.from('\x04'));
+      await expect.poll(() => gate.ended('gw1'), { timeout: 5000 }).toBe('exit');
+      c.close();
+    } finally {
+      gate.stop();
+    }
+  }, 20_000);
 });
 
 async function freePort(): Promise<number> {

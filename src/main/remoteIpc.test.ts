@@ -58,6 +58,15 @@ describe('remote:* IPC', () => {
     expect([...harness(async () => WHO).handlers.keys()].sort()).toEqual([...REMOTE_CHANNELS].sort());
   });
 
+  it('remote:drainStates returns the relay snapshot, or {} without one', async () => {
+    const h = harness(async () => WHO);
+    expect(await h.call('remote:drainStates')).toEqual({});
+    const snap = { W1: { phase: 'draining' as const, softAt: 1, hardAt: 2, instance: 'i' } };
+    const handlers = new Map<string, (...a: unknown[]) => unknown>();
+    registerRemoteIpc({ handle: (ch, fn) => void handlers.set(ch, fn as (...a: unknown[]) => unknown) }, { ...h.deps, drainStates: () => snap });
+    expect(await handlers.get('remote:drainStates')!({})).toEqual(snap);
+  });
+
   it('probe normalizes the URL, reports tier and the plain-http warning, and returns only the probe fields', async () => {
     const h = harness(async () => ({ ...WHO, user: { ...WHO.user, token: TOKEN } as never, extra: TOKEN }) as WhoAmI);
     const r = await h.call('remote:probe', ' http://fleet-agent-svc:8080/ ');

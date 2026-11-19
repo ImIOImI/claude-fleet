@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import type { RemoteProbeErr, RemoteProbeOk } from '../../preload/remoteTypes';
 import { readFileSync } from 'node:fs';
-import { applyProbe, canEndSession, ipcFailure, raceTimeout, canStartSessions, defaultTabOnTierChange, forgetText, mineIds, CHECKING_STATUS, joinableSessions, paneRules, remoteChip, remotePane, unreachableRemoteNames, canType, ipcErrorText, probeErrorText, remoteFormView, tierTitle, unreachableBanner, type RemoteFormState } from './remoteView';
+import { applyProbe, canEndSession, drainBanner, drainEnded, resumesAfterDrain, sessionEndKind, ipcFailure, raceTimeout, canStartSessions, defaultTabOnTierChange, forgetText, mineIds, CHECKING_STATUS, joinableSessions, paneRules, remoteChip, remotePane, unreachableRemoteNames, canType, ipcErrorText, probeErrorText, remoteFormView, tierTitle, unreachableBanner, type RemoteFormState } from './remoteView';
 
 const OK: RemoteProbeOk = {
   ok: true,
@@ -133,19 +133,19 @@ describe('remoteChip', () => {
 
 describe('paneRules', () => {
   it('local and container panes are unrestricted', () => {
-    expect(paneRules(undefined)).toEqual({ remote: false, readOnly: false, canNew: true, defaultTab: true });
+    expect(paneRules(undefined)).toEqual({ remote: false, readOnly: false, canNew: true, defaultTab: true, restarting: false });
   });
 
   it('read watches only and opens no default tab', () => {
-    expect(paneRules('read')).toEqual({ remote: true, readOnly: true, canNew: false, defaultTab: false });
+    expect(paneRules('read')).toEqual({ remote: true, readOnly: true, canNew: false, defaultTab: false, restarting: false });
   });
 
   it('steer types but cannot start sessions', () => {
-    expect(paneRules('steer')).toEqual({ remote: true, readOnly: false, canNew: false, defaultTab: false });
+    expect(paneRules('steer')).toEqual({ remote: true, readOnly: false, canNew: false, defaultTab: false, restarting: false });
   });
 
   it('session is unrestricted', () => {
-    expect(paneRules('session')).toEqual({ remote: true, readOnly: false, canNew: true, defaultTab: true });
+    expect(paneRules('session')).toEqual({ remote: true, readOnly: false, canNew: true, defaultTab: true, restarting: false });
   });
 
   it('an unknown tier is treated as read until the host answers', () => {
@@ -259,5 +259,64 @@ describe('raceTimeout', () => {
     expect(await raceTimeout(new Promise(() => undefined), 30)).toBeNull();
     expect(Date.now() - started).toBeLessThan(500);
     expect(await raceTimeout(Promise.reject(new Error('x')), 30)).toBeNull();
+  });
+});
+
+const draining = { phase: 'draining' as const, softAt: 1_000, hardAt: 2_000, instance: 'i' };
+const serving = { phase: 'serving' as const, softAt: null, hardAt: null, instance: 'j' };
+const unknown = { phase: 'unknown' as const, softAt: null, hardAt: null, instance: null };
+
+describe('drain view', () => {
+  it('chip', () => {
+    const w = { kind: 'remote', state: 'running' };
+    expect(remoteChip(w, draining)).toEqual({ phase: 'restarting', sub: 'restarting · input paused' });
+    expect(remoteChip(w, unknown)).toEqual({ phase: 'restarting', sub: 'waiting for the workspace pod' });
+    expect(remoteChip(w, serving)).toEqual({ phase: 'live', sub: null });
+    expect(remoteChip(w, null)).toEqual({ phase: 'live', sub: null });
+    expect(remoteChip({ kind: 'remote', state: 'unreachable' }, draining)).toEqual({ phase: 'unreachable', sub: 'host unreachable' });
+    expect(remoteChip({ kind: 'container', state: 'running' }, draining)).toBeNull();
+  });
+
+  it('pane rules: read-only and no new tabs while restarting', () => {
+    // Closing the last tab mid-restart must not auto-create one whose CREATE the host refuses.
+    expect(paneRules('session', draining)).toEqual({ remote: true, readOnly: true, canNew: false, defaultTab: false, restarting: true });
+    expect(paneRules('session', unknown).defaultTab).toBe(false);
+    expect(paneRules('steer', unknown)).toEqual({ remote: true, readOnly: true, canNew: false, defaultTab: false, restarting: true });
+    expect(paneRules('session', serving)).toEqual({ remote: true, readOnly: false, canNew: true, defaultTab: true, restarting: false });
+    expect(paneRules(undefined, draining)).toEqual({ remote: false, readOnly: false, canNew: true, defaultTab: true, restarting: false });
+  });
+
+  it('banner text by phase and deadline', () => {
+    const fmt = (ms: number) => `T${ms}`;
+    expect(drainBanner(serving, 0, fmt)).toBeNull();
+    expect(drainBanner(null, 0, fmt)).toBeNull();
+    expect(drainBanner(unknown, 0, fmt)).toBe('Waiting for the workspace pod…');
+    expect(drainBanner(draining, 500, fmt)).toBe('The host is restarting. Running turns finish first (until T1000); idle sessions close now. Typing is paused. Tabs resume on their own when the host is back.');
+    expect(drainBanner({ ...draining, softAt: null }, 500, fmt)).toBe('The host is restarting. Running turns finish first; idle sessions close now. Typing is paused. Tabs resume on their own when the host is back.');
+    expect(drainBanner(draining, 1_000, fmt)).toBe('The host is restarting. Stopping turns that are still running.');
+  });
+
+  it('a drain ends when a restarting host serves again', () => {
+    expect(drainEnded(draining, serving)).toBe(true);
+    expect(drainEnded(unknown, serving)).toBe(true);
+    expect(drainEnded(serving, serving)).toBe(false);
+    expect(drainEnded(null, serving)).toBe(false);
+    expect(drainEnded(draining, unknown)).toBe(false);
+    expect(drainEnded(draining, null)).toBe(false);
+  });
+});
+
+describe('tab resume after a drain', () => {
+  it('a session that ends while restarting waits; otherwise it ended', () => {
+    expect(sessionEndKind(true)).toBe('restarting');
+    expect(sessionEndKind(false)).toBe('natural');
+  });
+
+  it('re-attaches only a tab that ended during the restart, once the token is set', () => {
+    expect(resumesAfterDrain(1, true)).toBe(true);
+    expect(resumesAfterDrain(0, true)).toBe(true);
+    expect(resumesAfterDrain(1, false)).toBe(false);
+    expect(resumesAfterDrain(null, true)).toBe(false);
+    expect(resumesAfterDrain(undefined, true)).toBe(false);
   });
 });

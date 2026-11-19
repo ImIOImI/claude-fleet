@@ -43,6 +43,13 @@
 //	  KILLPORT   C→S  {"port":P}                               TERM (then KILL) the process listening on P
 //	  KILLED     S→C  {"ok":true,"error":"..."}                kill outcome
 //
+//	Drain (JSON):
+//	  STATUS     C→S  {}                                       one STATE reply
+//	  STATE      S→C  {"instance":"…","phase":"serving|draining|done","startedAt"?,"softAt"?,"hardAt"?,"sessions":[{id,alive,headless?,ended?}]}
+//	  WATCH      C→S  {}                                       STATE now and on every change, on this connection
+//	  DRAIN      C→S  {}                                       control socket only: start the drain, stream STATE until done
+//	  NOTICE     S→C  {"channel":N,"code":"draining"}          INPUT on N was dropped
+//
 // Why split INPUT/OUTPUT instead of one DATA: makes direction explicit in
 // logs and lets either side reject mis-directed frames as a bug rather
 // than silently consume them.
@@ -81,6 +88,11 @@ const (
 	FramePorts     FrameType = 0x17
 	FrameKillPort  FrameType = 0x18
 	FrameKilled    FrameType = 0x19
+	FrameStatus    FrameType = 0x1a
+	FrameState     FrameType = 0x1b
+	FrameWatch     FrameType = 0x1c
+	FrameDrain     FrameType = 0x1d
+	FrameNotice    FrameType = 0x1e
 )
 
 // MaxFramePayload caps individual frame payloads so a malformed length
@@ -135,6 +147,16 @@ func (t FrameType) String() string {
 		return "KILLPORT"
 	case FrameKilled:
 		return "KILLED"
+	case FrameStatus:
+		return "STATUS"
+	case FrameState:
+		return "STATE"
+	case FrameWatch:
+		return "WATCH"
+	case FrameDrain:
+		return "DRAIN"
+	case FrameNotice:
+		return "NOTICE"
 	}
 	return fmt.Sprintf("UNKNOWN(0x%02x)", uint8(t))
 }
@@ -149,6 +171,8 @@ type CreateRequest struct {
 	// session — the host uses this to spawn `claude --resume <uuid>`
 	// instead of a fresh session. Empty for ordinary new sessions.
 	Args []string `json:"args,omitempty"`
+	// Headless marks an unattended `claude -p` session: a drain treats it as busy until it exits.
+	Headless bool `json:"headless,omitempty"`
 }
 
 type CreateResponse struct {
@@ -180,12 +204,13 @@ type ChannelResponse struct {
 
 type EndedNotice struct {
 	Channel uint32 `json:"channel"`
-	Reason  string `json:"reason"` // "exit" | "error" | "signal"
+	Reason  string `json:"reason"` // as SESSIONS[].ended: exit or drain-*
 }
 
 type SessionInfo struct {
 	ID    string `json:"id"`
 	Alive bool   `json:"alive"`
+	Ended string `json:"ended,omitempty"`
 }
 
 type SessionsResponse struct {
@@ -234,6 +259,32 @@ type KillPortRequest struct {
 type KilledResponse struct {
 	OK    bool   `json:"ok"`
 	Error string `json:"error,omitempty"`
+}
+
+// ── Drain shapes ─────────────────────────────────────────────────────────
+
+const NoticeDraining = "draining"
+
+type StateSession struct {
+	ID       string `json:"id"`
+	Alive    bool   `json:"alive"`
+	Headless bool   `json:"headless,omitempty"`
+	Ended    string `json:"ended,omitempty"`
+}
+
+// StateNotice times are epoch milliseconds, present once a drain has started.
+type StateNotice struct {
+	Instance  string         `json:"instance"`
+	Phase     string         `json:"phase"`
+	StartedAt int64          `json:"startedAt,omitempty"`
+	SoftAt    int64          `json:"softAt,omitempty"`
+	HardAt    int64          `json:"hardAt,omitempty"`
+	Sessions  []StateSession `json:"sessions"`
+}
+
+type Notice struct {
+	Channel uint32 `json:"channel"`
+	Code    string `json:"code"`
 }
 
 // ── Codec ────────────────────────────────────────────────────────────────

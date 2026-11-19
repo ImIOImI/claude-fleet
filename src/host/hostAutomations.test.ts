@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { AutomationStore } from '../main/automations/automationStore.js';
 import { definitionToYaml } from '../main/automations/definition.js';
-import { INBOX_TOOLS } from '../main/automations/runner.js';
+import { HOST_RESTART_ERROR, INBOX_TOOLS } from '../main/automations/runner.js';
 import { InboxStore } from '../main/inbox/inboxDb.js';
 import { NotifyStore } from '../main/inbox/notifyStore.js';
 import { NOTICE_RETENTION_MS } from './hostNotices.js';
@@ -12,7 +12,9 @@ import { createLogger } from './log.js';
 import { fakeBroker } from './testFakes.js';
 import { hostMcpArgs } from './hostMcp.js';
 import { LeaseLostError } from './pgLease.js';
-import { HOST_CONFIG_ORIGIN, startHostAutomations, type HostAutomations } from './hostAutomations.js';
+import { HOST_CONFIG_ORIGIN, RESTARTING, startHostAutomations, type HostAutomations } from './hostAutomations.js';
+import { closeHostAutomationsRigs, hostAutomationsRig } from './testHostAutomations.js';
+import { memoryDrainStore } from './drainStore.js';
 import { automationOwner, type OwnerClaim } from './sessionOwners.js';
 import { automationRpcChannels, runtimeOf } from './automationRpc.js';
 import { dispatchRpc } from './rpc.js';
@@ -426,5 +428,89 @@ describe.skipIf(!isPg)('startHostAutomations on a fenced store', () => {
     expect((await act('inbox:create', { input: { title: 'x' } }, 1)).body).toEqual({ ok: true, result: { replayed: true, result: null, error: null } });
     expect(await inbox.list({ status: 'all' })).toEqual([]);
     await inbox.close();
+  });
+});
+
+describe('while the workspace drains', () => {
+  afterEach(closeHostAutomationsRigs);
+
+  it('no ticks or manual starts; a fresh step waits for serving and is created headless', async () => {
+    const r = await hostAutomationsRig({ phase: 'draining' });
+    const a = await r.createFreshAutomation('review');
+    await expect(r.runtime.automations.run(a.id, { kind: 'manual', by: USER, args: {} }))
+      .rejects.toThrow(`can't start now: ${RESTARTING}`);
+    expect(RESTARTING).toBe("the workspace is restarting; try again when it's back");
+    expect(await r.runtime.automations.tick()).toEqual([]);
+    r.gate.setPhase('serving');
+    const run = await r.runtime.automations.run(a.id, { kind: 'manual', by: USER, args: {} });
+    await r.untilCreated(`auto-${run.id}-review`);
+    expect(r.broker.created.at(-1)).toMatchObject({ headless: true });
+  });
+
+  it('a fresh step waits for serving, then starts; past the bound it fails without starting', async () => {
+    const r = await hostAutomationsRig({ phase: 'draining' });
+    const p = r.deps.spawnFresh('ws', 'auto-W-s', ['-p', 'x']);
+    await new Promise((res) => setTimeout(res, 20));
+    expect(r.broker.created).toEqual([]);
+    r.gate.setPhase('serving');
+    await p;
+    expect(r.broker.created.map((c) => c.id)).toEqual(['auto-W-s']);
+    const gate = { phase: () => 'draining' as const, last: () => null, ended: () => undefined, waitServing: async () => false };
+    const late = await hostAutomationsRig();
+    const deps: { spawnFresh?: (ws: string, id: string, args: string[]) => Promise<void> } = {};
+    h = await startHostAutomations({
+      inbox: late.inbox, workspace: () => WS, ops: late.broker.ops, mcpArgs: MCP_ARGS, events: { publish: () => undefined },
+      log: createLogger(() => undefined), tickMs: 60_000, settleMs: 50, gate, onDeps: (d) => { deps.spawnFresh = d.spawnFresh; }
+    });
+    await expect(deps.spawnFresh!('ws', 'auto-X-s', [])).rejects.toThrow('the workspace is still restarting');
+    expect(late.broker.created).toEqual([]);
+  });
+
+  it('freshState: drain-cut → interrupted; exit → ended; vanished with an old instance → interrupted', async () => {
+    const r = await hostAutomationsRig();
+    const fs = r.deps.freshState;
+    r.gate.cut('auto-A-s', 'drain-killed');
+    expect(await fs('ws', 'auto-A-s')).toBe('interrupted');
+    r.gate.cut('auto-A2-s', 'drain-interrupted');
+    expect(await fs('ws', 'auto-A2-s')).toBe('interrupted');
+    r.gate.cut('auto-B-s', 'exit');
+    expect(await fs('ws', 'auto-B-s')).toBe('ended');
+    r.spawnedOn('auto-C-s', 'i1');
+    r.gate.setLast({ instance: 'i2', phase: 'serving', sessions: [] });
+    expect(await fs('ws', 'auto-C-s')).toBe('interrupted');
+    r.gate.setLast({ instance: 'i2', phase: 'serving', sessions: [{ id: 'auto-E-s', alive: true, headless: true }] });
+    expect(await fs('ws', 'auto-E-s')).toBe('alive');
+    r.gate.setPhase('unknown');
+    expect(await fs('ws', 'auto-D-s')).toBe('alive');
+    r.gate.setPhase('legacy');
+    expect(await fs('ws', 'auto-D-s')).toBe('missing');
+  });
+
+  it('a CREATE refused as draining after waitServing interrupts the run and queues one re-run', async () => {
+    const drains = memoryDrainStore();
+    const r = await hostAutomationsRig({ drains });
+    const a = await r.createFreshAutomation('review');
+    r.broker.ops.create = async () => ({ ok: false, error: 'draining: the workspace is restarting' });
+    const run = await r.runtime.automations.run(a.id, { kind: 'manual', by: USER, args: {} });
+    await r.runtime.automations.settle();
+    expect(await r.runtime.store.getRun(run.id)).toMatchObject({ status: 'interrupted', error: `review: ${HOST_RESTART_ERROR}` });
+    expect(await drains.claimPending(Date.now())).toMatchObject([{ runId: run.id, automationId: a.id }]);
+    const retry = await r.runtime.automations.run(a.id, { kind: 'manual', by: USER, args: {}, retryOf: run.id });
+    await r.runtime.automations.settle();
+    expect(await r.runtime.store.getRun(retry.id)).toMatchObject({ status: 'interrupted' });
+    expect(await drains.claimPending(Date.now())).toEqual([]);
+    r.broker.ops.create = async () => ({ ok: false, error: 'session: boom' });
+    const other = await r.runtime.automations.run(a.id, { kind: 'manual', by: USER, args: {} });
+    await r.runtime.automations.settle();
+    expect(await r.runtime.store.getRun(other.id)).toMatchObject({ status: 'failed' });
+    expect(await drains.claimPending(Date.now())).toEqual([]);
+  });
+
+  it('freshState on a legacy gate falls back to LIST and reads its end reason', async () => {
+    const r = await hostAutomationsRig({ phase: 'legacy' });
+    r.broker.ops.list = async () => [{ id: 'auto-F-s', alive: false, ended: 'drain-killed' }, { id: 'auto-G-s', alive: false, ended: 'exit' }, { id: 'auto-H-s', alive: false }];
+    expect(await r.deps.freshState('ws', 'auto-F-s')).toBe('interrupted');
+    expect(await r.deps.freshState('ws', 'auto-G-s')).toBe('ended');
+    expect(await r.deps.freshState('ws', 'auto-H-s')).toBe('ended');
   });
 });

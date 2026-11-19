@@ -75,9 +75,9 @@ COPY --from=broker-build /out/broker /usr/local/bin/broker
 RUN chmod 0755 /usr/local/bin/broker
 
 # Pre-create /run/broker so the broker doesn't need to mkdir it at
-# startup as a non-root user. World-rwx so any host UID can own files
-# (the broker socket) inside it.
-RUN mkdir -p /run/broker && chmod 0777 /run/broker
+# startup as a non-root user. World-writable so any host UID can own files
+# (the broker socket) inside it; sticky so no other UID can unlink them.
+RUN mkdir -p /run/broker && chmod 1777 /run/broker
 
 # claude-fleet hooks: input-wait-report.sh reports AskUserQuestion pose/clear
 # edges; session-report.sh emits session metadata on SessionStart; summarize.sh

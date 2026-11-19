@@ -180,4 +180,50 @@ describe('SummaryRelay', () => {
     expect(changes).toEqual([]);
     relay.stop();
   });
+
+  it('hands broker:drain payloads to onDrain, from the current subscription only', () => {
+    const drains: Array<[string, unknown]> = [];
+    let emit!: (e: { channel: string; payload: unknown }) => void;
+    let sources = [{ id: 'W1', url: 'http://w', name: 'w', hue: null, tier: 'read' as const, state: 'running' as const }];
+    const relay = createSummaryRelay({
+      sources: () => sources,
+      subscribe: (_u, on) => { emit = on; return () => undefined; },
+      fetchSummary: async () => null, broadcast: () => undefined,
+      onDrain: (o, p) => drains.push([o, p])
+    });
+    relay.sync();
+    emit({ channel: 'broker:drain', payload: { phase: 'draining', softAt: 1, hardAt: 2, instance: 'i' } });
+    emit({ channel: 'sessions:changed', payload: {} });
+    expect(drains).toEqual([['W1', { phase: 'draining', softAt: 1, hardAt: 2, instance: 'i' }]]);
+    const stale = emit;
+    sources = [];
+    relay.sync();
+    stale({ channel: 'broker:drain', payload: { phase: 'serving', softAt: null, hardAt: null, instance: 'j' } });
+    expect(drains).toHaveLength(1);
+    relay.stop();
+  });
+
+  it('reports every dropped subscription to onDropped', () => {
+    const dropped: string[] = [];
+    type State = (connected: boolean, why?: { retryInMs: number | null }) => void;
+    let state!: State;
+    let sources = [{ id: 'W1', url: 'http://w', name: 'w', hue: null, tier: 'read' as const, state: 'running' as const }];
+    const relay = createSummaryRelay({
+      sources: () => sources,
+      subscribe: (_u, _on, st) => { state = st; return () => undefined; },
+      fetchSummary: async () => null, broadcast: () => undefined,
+      onDropped: (o) => dropped.push(o)
+    });
+    relay.sync();
+    state(false, { retryInMs: null });
+    expect(dropped).toEqual(['W1']);
+    relay.sync();
+    sources = [];
+    relay.sync();
+    expect(dropped).toEqual(['W1', 'W1']);
+    sources = [{ id: 'W1', url: 'http://w', name: 'w', hue: null, tier: 'read', state: 'running' }];
+    relay.sync();
+    relay.stop();
+    expect(dropped).toEqual(['W1', 'W1', 'W1']);
+  });
 });

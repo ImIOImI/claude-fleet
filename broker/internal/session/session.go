@@ -1,10 +1,13 @@
 package session
 
 import (
+	"errors"
 	"os"
 	"os/exec"
 	"sync"
 	"syscall"
+	"time"
+	"unsafe"
 
 	"github.com/creack/pty"
 )
@@ -27,6 +30,16 @@ import (
 // The mu protects the attach state (writer, channel, dead flag). The
 // ring buffer has its own mu. The PTY file is set-once at construction.
 
+const (
+	ReasonExit        = "exit"
+	ReasonIdle        = "drain-idle"
+	ReasonInterrupted = "drain-interrupted"
+	ReasonKilled      = "drain-killed"
+)
+
+// TerminateGrace is how long a drain-closed session gets between SIGTERM and SIGKILL.
+const TerminateGrace = 5 * time.Second
+
 type Session struct {
 	id   string
 	cmd  *exec.Cmd
@@ -39,6 +52,12 @@ type Session struct {
 	dead     bool
 	exitErr  error
 	done     chan struct{}
+
+	headless    bool
+	mark        string // end reason a drain action chose; applied at exit
+	terminating bool
+	endReason   string
+	onEnd       func()
 }
 
 type attachState struct {
@@ -58,7 +77,7 @@ type ChannelWriter interface {
 	WriteChannelData(channel uint32, body []byte) error
 }
 
-func newSession(id, command string, args []string, cols, rows uint16, ringBytes int) (*Session, error) {
+func newSession(id, command string, args []string, cols, rows uint16, ringBytes int, headless bool) (*Session, error) {
 	cmd := exec.Command(command, args...)
 	// TERM for the TUI; CLAUDE_FLEET_BROKER_SESSION_ID so in-container hooks
 	// can pair their claude session with the tab that owns this PTY (#207).
@@ -76,11 +95,12 @@ func newSession(id, command string, args []string, cols, rows uint16, ringBytes 
 	}
 
 	s := &Session{
-		id:   id,
-		cmd:  cmd,
-		ptmx: f,
-		ring: newRingBuffer(ringBytes),
-		done: make(chan struct{}),
+		id:       id,
+		cmd:      cmd,
+		ptmx:     f,
+		ring:     newRingBuffer(ringBytes),
+		done:     make(chan struct{}),
+		headless: headless,
 	}
 	go s.pump()
 	return s, nil
@@ -120,8 +140,22 @@ func (s *Session) wait() {
 	s.mu.Lock()
 	s.dead = true
 	s.exitErr = err
+	s.endReason = endReason(s.mark)
 	close(s.done)
+	onEnd := s.onEnd
 	s.mu.Unlock()
+	if onEnd != nil {
+		onEnd()
+	}
+}
+
+// Once the drain signalled a session, its exit code doesn't matter: claude -p
+// exits 0 on SIGINT without a result (owner decision 1A).
+func endReason(mark string) string {
+	if mark == "" {
+		return ReasonExit
+	}
+	return mark
 }
 
 // Done returns a channel closed when the session has ended.
@@ -206,4 +240,96 @@ func (s *Session) Pid() int {
 		return s.cmd.Process.Pid
 	}
 	return 0
+}
+
+func (s *Session) Headless() bool { return s.headless }
+
+// EndReason is "" while the session is alive.
+func (s *Session) EndReason() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.endReason
+}
+
+// Terminate sends SIGTERM to the process group and SIGKILL after grace. Only the first call acts.
+// An interrupted or killed session keeps that reason.
+func (s *Session) Terminate(reason string, grace time.Duration) {
+	s.mu.Lock()
+	if s.dead || s.terminating || s.exited() {
+		s.mu.Unlock()
+		return
+	}
+	s.terminating = true
+	if s.mark == "" {
+		s.mark = reason
+	}
+	s.mu.Unlock()
+	s.signalGroup(syscall.SIGTERM)
+	go func() {
+		select {
+		case <-s.done:
+		case <-time.After(grace):
+			s.killGroup()
+		}
+	}()
+}
+
+// Interrupt stops a busy turn: Esc to an interactive claude, SIGINT to a headless one's group.
+// Either way the session is recorded as interrupted.
+func (s *Session) Interrupt() {
+	s.mu.Lock()
+	if s.dead || s.exited() {
+		s.mu.Unlock()
+		return
+	}
+	if s.mark == "" {
+		s.mark = ReasonInterrupted
+	}
+	s.mu.Unlock()
+	if !s.headless {
+		_, _ = s.ptmx.Write([]byte{0x1b})
+		return
+	}
+	s.signalGroup(syscall.SIGINT)
+}
+
+func (s *Session) KillWith(reason string) {
+	s.mu.Lock()
+	if s.dead || s.exited() {
+		s.mu.Unlock()
+		return
+	}
+	s.mark = reason
+	s.mu.Unlock()
+	s.killGroup()
+}
+
+// killGroup also reaps claude's tool subprocesses, which kill alone would orphan.
+func (s *Session) killGroup() {
+	s.signalGroup(syscall.SIGKILL)
+	s.kill()
+}
+
+// Setsid made the root pid the group leader; its pgid can only be reused after pid wraparound.
+func (s *Session) signalGroup(sig syscall.Signal) {
+	if pid := s.Pid(); pid > 0 {
+		_ = syscall.Kill(-pid, sig)
+	}
+}
+
+const pPID = 1
+
+// exited reports whether claude has exited, reaped or not, without reaping it, so a
+// run that just finished isn't marked as cut short (and re-run).
+func (s *Session) exited() bool {
+	pid := s.Pid()
+	if pid <= 0 {
+		return true
+	}
+	var info [128]byte // siginfo_t; si_signo (offset 0) stays 0 while the child runs
+	_, _, e := syscall.Syscall6(syscall.SYS_WAITID, pPID, uintptr(pid), uintptr(unsafe.Pointer(&info[0])), syscall.WEXITED|syscall.WNOHANG|syscall.WNOWAIT, 0, 0)
+	if e != 0 {
+		return errors.Is(e, syscall.ECHILD)
+	}
+	return *(*int32)(unsafe.Pointer(&info[0])) != 0
 }

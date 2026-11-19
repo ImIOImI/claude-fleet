@@ -28,6 +28,9 @@ export const MAX_PENDING_BYTES = 8 << 20;
 /** Per-viewer token bucket for every frame but INPUT and RESIZE (each may open a broker connection). */
 export const CONTROL_BURST = 20;
 export const CONTROL_PER_SEC = 10;
+/** One drain NOTICE per viewer channel per interval (D147). */
+export const HUB_NOTICE_MS = 5_000;
+export const DRAINING_CREATE_ERROR = 'draining: the workspace is restarting';
 
 export interface AttachHubOptions {
   /** fleet-host's own port, which KILLPORT must never reach. */
@@ -44,6 +47,8 @@ export interface AttachHubOptions {
   releaseOwner?: (c: OwnerClaim) => Promise<void>;
   /** Whether a viewer-named claude id already has an owner row or a sessions row on this host, or is a published session. */
   pinState?: (sessionId: string) => Promise<PinState>;
+  /** The workspace pod is draining (DrainGate): INPUT and CREATE are refused here. */
+  draining?: () => boolean;
 }
 
 export interface PinState {
@@ -144,7 +149,10 @@ class SessionTap {
       onHistory: (b) => this.fanOut(FrameType.HISTORY, b),
       onOutput: (b) => this.fanOut(FrameType.OUTPUT, b),
       onEnded: () => this.end('exit'),
-      onGone: () => this.end('broker-gone')
+      onGone: () => this.end('broker-gone'),
+      onNotice: (code) => {
+        for (const [v, ch] of this.viewers) v.deliverNotice(ch, code);
+      }
     });
     if (!r.ok) return r;
     this.upstream = r.upstream;
@@ -215,6 +223,7 @@ export class AttachHub {
   readonly recordOwner: ((c: OwnerClaim) => Promise<boolean>) | undefined;
   readonly releaseOwner: ((c: OwnerClaim) => Promise<void>) | undefined;
   readonly pinState: ((sessionId: string) => Promise<PinState>) | undefined;
+  readonly draining: () => boolean;
 
   constructor(
     readonly ops: BrokerOps,
@@ -229,6 +238,7 @@ export class AttachHub {
     this.recordOwner = opts.recordOwner;
     this.releaseOwner = opts.releaseOwner;
     this.pinState = opts.pinState;
+    this.draining = opts.draining ?? (() => false);
   }
 
   setOwner(id: string, key: string): void {
@@ -318,6 +328,7 @@ export class Viewer {
   private pendingBytes = 0;
   private tokens: number;
   private refilledAt: number;
+  private readonly noticedAt = new Map<number, number>();
   /** Frames refused for insufficient tier. */
   denied = 0;
 
@@ -375,6 +386,20 @@ export class Viewer {
     if (!this.closed) this.sink.send(encodeJSONFrame(FrameType.ENDED, { channel, reason }));
   }
 
+  deliverNotice(channel: number, code: string): void {
+    if (!this.closed) this.sink.send(encodeJSONFrame(FrameType.NOTICE, { channel, code }));
+  }
+
+  private refuseInput(channel: number): void {
+    // Attached channels only: INPUT is unmetered, so arbitrary channel numbers must not grow the map.
+    if (!this.channels.has(channel)) return;
+    const t = this.hub.now();
+    const last = this.noticedAt.get(channel);
+    if (last !== undefined && t - last < HUB_NOTICE_MS) return;
+    this.noticedAt.set(channel, t);
+    this.deliverNotice(channel, 'draining');
+  }
+
   private reply(type: FrameType, body: unknown): void {
     if (!this.closed) this.sink.send(encodeJSONFrame(type, body));
   }
@@ -423,6 +448,7 @@ export class Viewer {
     switch (type) {
       case FrameType.INPUT: {
         const { channel, body } = decodeChannelData(payload);
+        if (this.hub.draining()) return this.refuseInput(channel);
         this.channels.get(channel)?.input(body);
         return;
       }
@@ -523,6 +549,7 @@ export class Viewer {
   private async create(req: Json): Promise<void> {
     const { id } = req;
     if (!validSessionId(id)) return this.reply(FrameType.CREATED, { id, ok: false, error: 'bad session id' });
+    if (this.hub.draining()) return this.reply(FrameType.CREATED, { id, ok: false, error: DRAINING_CREATE_ERROR });
     const gated = hostCreateArgs(req.args);
     if (!gated) return this.reply(FrameType.CREATED, { id, ok: false, error: 'forbidden: unsupported create args' });
     const refused = (): void => this.reply(FrameType.CREATED, { id, ok: false, error: 'could not record the session owner' });
@@ -548,7 +575,10 @@ export class Viewer {
       return refused();
     }
     const args = this.hub.createArgs(withAttribution(gated.args, claim.owner));
-    const r = await this.hub.ops.create(id, dim(req.cols, 80), dim(req.rows, 24), args);
+    // The owner lookups await: a drain may have started since the first check.
+    const r = this.hub.draining()
+      ? { ok: false, error: DRAINING_CREATE_ERROR }
+      : await this.hub.ops.create(id, dim(req.cols, 80), dim(req.rows, 24), args);
     if (r.ok) this.hub.setOwner(id, ownerKey(this.principal.identity));
     else if (recorded) {
       await this.hub.releaseOwner?.(claim).catch((err: Error) => this.hub.log?.log('warn', 'session owner release failed', { id, error: err.message }));

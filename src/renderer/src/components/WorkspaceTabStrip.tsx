@@ -1,6 +1,6 @@
 import { useState, type ReactNode } from 'react';
 import { createPortal } from 'react-dom';
-import type { WorkspaceObservabilitySummary } from '../../../preload';
+import type { RemoteDrain, WorkspaceObservabilitySummary } from '../../../preload';
 import { colorFor, type WorkspaceState, type WorkspaceSummary } from '../App';
 import { isManager, isReachable, ManagerGlyph, WifiGlyph } from './committee';
 import { useBlinkSync } from '../blinkSync';
@@ -37,6 +37,8 @@ function reachableTitle(w: WorkspaceSummary): string {
 
 interface Props {
   workspaces: WorkspaceSummary[];
+  /** Last broker:drain per remote workspace (D152). */
+  drains: Record<string, RemoteDrain>;
   /**
    * Per-workspace observability summary, keyed by workspace id (ULID).
    * Values are `null` while the IPC poll hasn't returned yet or the
@@ -114,6 +116,7 @@ function IconGear(): JSX.Element {
 }
 export function WorkspaceTabStrip({
   workspaces,
+  drains,
   summaries,
   busyByWorkspace,
   waitingByWorkspace = {},
@@ -176,7 +179,7 @@ export function WorkspaceTabStrip({
         // "Busy" = claude actively working in a running workspace (PTY title
         // glyph is a spinner). Drives a pulsing dot + "working…" sub-line.
         const unreachable = w.state === 'unreachable';
-        const rc = remoteChip(w);
+        const rc = remoteChip(w, drains[w.id]);
         const busy = w.state === 'running' && busyByWorkspace[w.id] === true;
         const waiting = w.state === 'running' && waitingByWorkspace[w.id] === true;
         return (
@@ -184,7 +187,7 @@ export function WorkspaceTabStrip({
           key={w.id}
           className={`ws-chip-group ${w.id === selectedId ? 'active' : ''} ${
             dragId === w.id ? 'dragging' : ''
-          } ${unreachable ? (rc?.phase === 'checking' ? 'checking' : 'unreachable') : ''}`}
+          } ${unreachable ? (rc?.phase === 'checking' ? 'checking' : 'unreachable') : ''} ${rc?.phase === 'restarting' ? 'restarting' : ''}`}
           style={{ ['--hue' as never]: colorFor(w) }}
           draggable
           {...reorderDragHandlers({

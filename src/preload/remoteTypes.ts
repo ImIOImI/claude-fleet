@@ -56,3 +56,11 @@ export interface RemoteLiveSession {
   /** The viewer created it (host-reported; the host still decides CLOSE). */
   mine: boolean;
 }
+
+/** A remote host's view of its workspace pod (`broker:drain`, D152). Times are epoch ms. */
+export interface RemoteDrain {
+  phase: 'serving' | 'draining' | 'unknown';
+  softAt: number | null;
+  hardAt: number | null;
+  instance: string | null;
+}

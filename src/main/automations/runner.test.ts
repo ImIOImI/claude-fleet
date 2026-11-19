@@ -1,7 +1,7 @@
 import { describe, it, expect, afterEach } from 'vitest';
 import { InboxStore } from '../inbox/inboxDb.js';
 import { AutomationStore } from './automationStore.js';
-import { executeRun, type RunnerDeps, type WorkspaceState } from './runner.js';
+import { executeRun, HOST_RESTART_ERROR, type RunnerDeps, type WorkspaceState } from './runner.js';
 import { dueSchedule, nextFireAt } from './scheduler.js';
 import type { AutomationDef } from '../../preload/inboxTypes.js';
 import { openTestInbox } from '../store/testStore.js';
@@ -126,6 +126,17 @@ describe('fresh steps (Phase 4)', () => {
     const r = await executeRun(s.deps, a, run, { callerSupplied: false });
     expect(r).toEqual({ status: 'timed-out', error: 'check: the fresh session in ops-oncall was still running after 1m' });
     expect(s.closed).toHaveLength(1);
+  });
+  it('a fresh step whose session the drain cut off is interrupted by host restart, not succeeded; later steps never run', async () => {
+    const s = await setup('running', [], 6000);
+    s.deps.freshState = async () => 'interrupted';
+    const a = await s.store.create(def({ steps: [step({ mode: 'fresh' }), { ...step({ mode: 'fresh' }), id: 'post' }] }), USER);
+    const run = await s.store.startRun(a, { kind: 'manual' }, {}, 'running');
+    expect(await executeRun(s.deps, a, run, { callerSupplied: false })).toEqual({ status: 'interrupted', error: `check: ${HOST_RESTART_ERROR}` });
+    expect(HOST_RESTART_ERROR).toBe('interrupted by host restart');
+    expect(s.closed).toEqual([`auto-${run.id}-check`]);
+    expect(s.fresh).toHaveLength(1);
+    expect((await s.store.getRun(run.id))!.steps).toEqual([expect.objectContaining({ stepId: 'check', status: 'interrupted', error: HOST_RESTART_ERROR })]);
   });
   it('fills {{trigger.workspace}} and {{trigger.todo}} for event runs', async () => {
     const s = await setup();

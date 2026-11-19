@@ -1,6 +1,6 @@
 import { useEffect, useState, useCallback, useRef, useReducer, useMemo } from 'react';
 import { withRemoteCounts } from './inboxView';
-import type { RemoteTier } from '../../preload/remoteTypes';
+import type { RemoteDrain, RemoteTier } from '../../preload/remoteTypes';
 import { RenameRemoteModal } from './components/RenameRemoteModal';
 import { remotePane, unreachableBanner, unreachableRemoteNames } from './remoteView';
 import { usePorts } from './usePorts';
@@ -266,6 +266,12 @@ export function App() {
     return () => { clearInterval(t); off(); };
   }, []);
   const inboxCounts = useMemo(() => withRemoteCounts(localCounts, remoteCounts), [localCounts, remoteCounts]);
+  const [drains, setDrains] = useState<Record<string, RemoteDrain>>({});
+  useEffect(() => {
+    // A push that lands before the snapshot is newer than it.
+    void window.api.remote.drainStates().then((s) => setDrains((p) => ({ ...s, ...p }))).catch(() => undefined);
+    return window.api.remote.onDrain((u) => setDrains((p) => ({ ...p, [u.workspaceId]: u.drain })));
+  }, []);
   // A pushed status is newer than the fetched one. main broadcasts
   // inbox:changed when the Postgres store becomes ready.
   const [storeStatus, setStoreStatus] = useState<StoreStatus | null>(null);
@@ -1493,6 +1499,7 @@ export function App() {
       }${remoteBanner ? ' remote-down' : ''}${hasBanners ? ' has-banners' : ''}`}
     >
       <WorkspaceTabStrip
+        drains={drains}
         workspaces={roleWsId ? workspaces.filter((w) => w.id !== roleWsId) : workspaces}
         summaries={summaries}
         busyByWorkspace={effectiveBusyByWorkspace}
@@ -1631,6 +1638,7 @@ export function App() {
                 <TerminalPane
                   key={w.id}
                   remoteTier={w.kind === 'remote' ? w.remote?.tier ?? null : undefined}
+                  drain={w.kind === 'remote' ? drains[w.id] ?? null : null}
                   visible={(!inboxOpen && selectedId === w.id) || (inboxOpen && inboxSection === 'sessions' && w.id === roleWsId)}
                   workspaceId={w.id}
                   mirrorDefault={w.mirror.default}

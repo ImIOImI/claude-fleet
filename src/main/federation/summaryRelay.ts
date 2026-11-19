@@ -17,8 +17,12 @@ export interface SummaryRelayDeps {
   schedule?: (fn: () => void, ms: number) => () => void;
   /** An automations/proposals/inbox/notices hint from that host; carries no data. */
   onHostChange?(origin: string, channel: RemoteChangeChannel): void;
+  /** A host's broker:drain payload (unvalidated). */
+  onDrain?(origin: string, payload: unknown): void;
   /** The /events socket for that host (re)connected. */
   onConnected?(origin: string): void;
+  /** That host's subscription ended (bookmark gone, URL moved, or retries given up). */
+  onDropped?(origin: string): void;
 }
 
 export function createSummaryRelay(d: SummaryRelayDeps): { sync(): void; stop(): void } {
@@ -26,9 +30,11 @@ export function createSummaryRelay(d: SummaryRelayDeps): { sync(): void; stop():
   const subs = new Map<string, { url: string; stop: () => void; cancel: (() => void) | null }>();
   const drop = (id: string): void => {
     const s = subs.get(id);
-    s?.stop();
-    s?.cancel?.();
+    if (!s) return;
+    s.stop();
+    s.cancel?.();
     subs.delete(id);
+    d.onDropped?.(id);
   };
   const hint = (id: string): void => {
     const s = subs.get(id);
@@ -53,6 +59,7 @@ export function createSummaryRelay(d: SummaryRelayDeps): { sync(): void; stop():
           (e) => {
             if (subs.get(id) !== entry) return;
             if ((REMOTE_CHANGE_CHANNELS as readonly string[]).includes(e.channel)) d.onHostChange?.(id, e.channel as RemoteChangeChannel);
+            if (e.channel === 'broker:drain') d.onDrain?.(id, e.payload);
             if (e.channel === 'observability:summary' && (e.payload as { workspaceId?: unknown } | null)?.workspaceId === id) hint(id);
           },
           (connected, why) => {

@@ -293,7 +293,11 @@ export interface RunRow {
   id: string;
   automationId: string;
   version: number;
-  trigger: { kind: RunTriggerKind; by?: TodoSource; cron?: string; event?: { on: EventName; workspaceId?: string; todoId?: string; todoTitle?: string; count: number } };
+  trigger: {
+    kind: RunTriggerKind; by?: TodoSource; cron?: string; event?: { on: EventName; workspaceId?: string; todoId?: string; todoTitle?: string; count: number };
+    /** The run this one re-runs after a host restart (D150). */
+    retryOf?: string;
+  };
   args: Record<string, ParamValue>;
   status: RunStatus;
   startedAt: number;

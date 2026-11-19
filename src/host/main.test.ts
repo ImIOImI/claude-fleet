@@ -6,9 +6,10 @@ import { createServer, type AddressInfo } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import WebSocket from 'ws';
+import { FrameType, encodeFrame } from '../main/broker.js';
 import { IdentityError, type IdentityProvider } from '../main/identity/types.js';
 import { memoryLeaseStore, type LeaseStore } from './lease.js';
-import { isDbUnavailable, runHost, type RunHostOptions } from './main.js';
+import { isDbUnavailable, runHost, SHUTDOWN_DEADLINE_MS, type RunHostOptions } from './main.js';
 import { fakeBroker, person, TOKEN } from './testFakes.js';
 
 const ID_A = '01JC0000000000000000000000';
@@ -573,4 +574,74 @@ describe('runHost behind the mesh check', () => {
       }));
     });
   }
+});
+
+describe('host pod shutdown (D154)', () => {
+  it('SIGTERM marks /healthz draining at once', async () => {
+    let release!: () => void;
+    const stuck = new Promise<void>((r) => (release = r));
+    const r = await start(CONFIG, { leaseStore: { ...memoryLeaseStore(), release: () => stuck } });
+    r.proc.emit('SIGTERM');
+    const h = await fetch(`${r.url}/healthz`);
+    expect(h.status).toBe(503);
+    expect(await h.json()).toMatchObject({ status: 'draining' });
+    release();
+  });
+
+  it('the shutdown deadline exits once even if a step hangs', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    try {
+      const hang = new Promise<void>(() => undefined);
+      // Shorter than the lease's own stop bound, so the deadline is what ends the hang.
+      const r = await start(CONFIG, { leaseStore: { ...memoryLeaseStore(), release: () => hang }, shutdownDeadlineMs: 1_000 });
+      r.proc.emit('SIGTERM');
+      await vi.advanceTimersByTimeAsync(999);
+      expect(r.exit).not.toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(1);
+      expect(r.exit).toHaveBeenCalledTimes(1);
+      expect(r.exit).toHaveBeenCalledWith(0);
+      expect(r.logs.some((l) => l.includes('shutdown deadline passed; exiting'))).toBe(true);
+      await vi.advanceTimersByTimeAsync(30_000);
+      expect(r.exit).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('SHUTDOWN_DEADLINE_MS is 20 s', () => {
+    expect(SHUTDOWN_DEADLINE_MS).toBe(20_000);
+  });
+
+  it('broker:drain reaches a new /events subscriber first', async () => {
+    const r = await start();
+    r.broker.pushState({ instance: 'i1', phase: 'draining', softAt: 10, hardAt: 20, sessions: [] });
+    const ws = new WebSocket(`${r.url.replace('http', 'ws')}/events`, { headers: { Authorization: `Bearer ${TOKEN}` } });
+    const first = await new Promise<string>((res) => ws.once('message', (d) => res(String(d))));
+    expect(JSON.parse(first)).toEqual({ channel: 'broker:drain', payload: { phase: 'draining', softAt: 10, hardAt: 20, instance: 'i1' } });
+    ws.close();
+  });
+
+  it('registers sessions:drained (no db: empty) and refuses CREATE at the hub while the gate drains', async () => {
+    const r = await start();
+    const res = await fetch(`${r.url}/rpc/sessions:drained`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${TOKEN}` }, body: JSON.stringify({ args: [] })
+    });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toMatchObject({ result: { rows: [] } });
+    const ws = new WebSocket(`${r.url.replace('http', 'ws')}/attach`, { headers: { Authorization: `Bearer ${TOKEN}` } });
+    await new Promise((res2) => ws.once('open', res2));
+    const create = async (id: string) => {
+      const reply = new Promise<Buffer>((res2) => ws.once('message', (d) => res2(d as Buffer)));
+      ws.send(encodeFrame(FrameType.CREATE, Buffer.from(JSON.stringify({ id, cols: 80, rows: 24 }))));
+      const f = await reply;
+      expect(f[4]).toBe(FrameType.CREATED);
+      return JSON.parse(f.subarray(5).toString()) as { ok: boolean; error?: string };
+    };
+    // No STATE yet (unknown): the hub defers to the broker.
+    expect(await create('u1')).toMatchObject({ ok: true });
+    r.broker.pushState({ instance: 'i1', phase: 'draining', softAt: 10, hardAt: 20, sessions: [] });
+    expect(await create('n1')).toMatchObject({ ok: false, error: 'draining: the workspace is restarting' });
+    expect(r.broker.created.map((c) => c.id)).toEqual(['u1']);
+    ws.close();
+  });
 });

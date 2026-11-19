@@ -181,3 +181,33 @@ func TestDialRequest_RoundTrip(t *testing.T) {
 		t.Fatalf("got %+v", req)
 	}
 }
+
+func TestDrainFrameTypesAndShapes(t *testing.T) {
+	for ft, name := range map[FrameType]string{
+		FrameStatus: "STATUS", FrameState: "STATE", FrameWatch: "WATCH", FrameDrain: "DRAIN", FrameNotice: "NOTICE",
+	} {
+		if ft.String() != name {
+			t.Errorf("%#x: got %q, want %q", uint8(ft), ft.String(), name)
+		}
+	}
+	b, _ := json.Marshal(CreateRequest{ID: "a", Cols: 1, Rows: 1})
+	if strings.Contains(string(b), "headless") {
+		t.Errorf("headless must be omitted when false: %s", b)
+	}
+	b, _ = json.Marshal(CreateRequest{ID: "a", Cols: 1, Rows: 1, Headless: true})
+	if !strings.Contains(string(b), `"headless":true`) {
+		t.Errorf("headless missing: %s", b)
+	}
+	b, _ = json.Marshal(SessionInfo{ID: "s", Alive: true})
+	if string(b) != `{"id":"s","alive":true}` {
+		t.Errorf("SessionInfo wire shape changed: %s", b)
+	}
+	b, _ = json.Marshal(StateNotice{Instance: "i", Phase: "serving", Sessions: []StateSession{{ID: "s", Alive: false, Ended: "drain-idle"}}})
+	if string(b) != `{"instance":"i","phase":"serving","sessions":[{"id":"s","alive":false,"ended":"drain-idle"}]}` {
+		t.Errorf("StateNotice: %s", b)
+	}
+	b, _ = json.Marshal(Notice{Channel: 3, Code: NoticeDraining})
+	if string(b) != `{"channel":3,"code":"draining"}` {
+		t.Errorf("Notice: %s", b)
+	}
+}

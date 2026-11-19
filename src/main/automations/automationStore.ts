@@ -12,6 +12,8 @@ import type { AutomationRow, InboxDb, RunRowSql, StepRunRowSql } from '../store/
 
 type Q = Kysely<InboxDb> | Transaction<InboxDb>;
 
+export const APP_QUIT_MID_RUN = 'the app quit mid-run';
+
 export interface AutomationRecord {
   id: string;
   name: string;
@@ -305,11 +307,17 @@ export class AutomationStore {
   markInterrupted(now = Date.now()): Promise<RunRow[]> {
     return this.db.transaction().execute(async (trx) => {
       const cut = await this.runsWith(trx, 'running');
-      await trx.updateTable('runs').set({ status: 'interrupted', ended_at: now, error: 'the app quit mid-run' }).where('status', '=', 'running').execute();
+      await trx.updateTable('runs').set({ status: 'interrupted', ended_at: now, error: APP_QUIT_MID_RUN }).where('status', '=', 'running').execute();
       await trx.updateTable('step_runs').set({ status: 'interrupted', ended_at: now }).where('status', '=', 'running').execute();
       await trx.updateTable('runs').set({ status: 'cancelled', ended_at: now, error: 'the app quit before it started' }).where('status', '=', 'queued').execute();
       return cut;
     });
+  }
+
+  /** Rewrites the reason of a run already recorded `interrupted`; false otherwise. */
+  async noteInterrupted(id: string, error: string): Promise<boolean> {
+    const r = await this.db.updateTable('runs').set({ error }).where('id', '=', id).where('status', '=', 'interrupted').executeTakeFirst();
+    return Number(r.numUpdatedRows) > 0;
   }
 
   pruneRuns(olderThan: number): Promise<number> {

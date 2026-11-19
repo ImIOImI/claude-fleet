@@ -3,7 +3,8 @@ import net from 'node:net';
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { BrokerClient, FrameType } from './broker.js';
+import { PassThrough, Duplex } from 'node:stream';
+import { BrokerClient, encodeFrame, FrameType, parseBrokerState, DRAIN_CUT_REASONS } from './broker.js';
 
 // A minimal in-process broker stub: it reads frames and replies to DIAL with
 // DIALED{ok:true} and to LISTPORTS with PORTS{ports:[3000,8080]}. Frame codec
@@ -192,5 +193,91 @@ describe('BrokerClient over a unix socket (container path)', () => {
     expect(socket.listenerCount('end')).toBe(baseline.listenerCount('end'));
     baseline.destroy();
     client.close();
+  });
+});
+
+
+function pair(): { client: BrokerClient; toClient: PassThrough; fromClient: Buffer[] } {
+  const toClient = new PassThrough();
+  const fromClient: Buffer[] = [];
+  const d = new Duplex({
+    read() {},
+    write(chunk, _enc, cb) { fromClient.push(Buffer.from(chunk)); cb(); }
+  });
+  toClient.on('data', (b) => d.push(b));
+  return { client: new BrokerClient(d), toClient, fromClient };
+}
+
+describe('drain frames', () => {
+  it('parses STATE strictly', () => {
+    expect(parseBrokerState('{"instance":"i","phase":"draining","softAt":5,"hardAt":9,"sessions":[{"id":"a","alive":false,"ended":"drain-idle"},{"id":"h","alive":true,"headless":true}]}'))
+      .toEqual({ instance: 'i', phase: 'draining', softAt: 5, hardAt: 9, sessions: [{ id: 'a', alive: false, ended: 'drain-idle' }, { id: 'h', alive: true, headless: true }] });
+    // A phase this client doesn't know is not serving (fail safe).
+    expect(parseBrokerState('{"instance":"i","phase":"weird","sessions":[]}')).toEqual({ instance: 'i', phase: 'draining', sessions: [] });
+    expect(parseBrokerState('{"instance":"i","phase":7,"sessions":[]}')).toBeNull();
+    // A malformed session entry is skipped; the frame (and its phase) survives.
+    const bad = (x: string) => `{"instance":"i","phase":"draining","sessions":[${x},{"id":"ok","alive":true}]}`;
+    for (const x of ['{"id":1}', '{"id":1,"alive":true}', '{"id":"a","alive":"yes"}', 'null', '"s"']) {
+      expect(parseBrokerState(bad(x))).toEqual({ instance: 'i', phase: 'draining', sessions: [{ id: 'ok', alive: true }] });
+    }
+    expect(parseBrokerState('{"instance":"i","phase":"serving","sessions":{}}')).toBeNull();
+    expect(parseBrokerState('{"instance":7,"phase":"serving","sessions":[]}')).toBeNull();
+    expect(parseBrokerState('not json')).toBeNull();
+    expect([...DRAIN_CUT_REASONS].sort()).toEqual(['drain-interrupted', 'drain-killed']);
+  });
+
+  it('status() resolves on STATE; unsolicited STATE and NOTICE become events; watch() sends WATCH', async () => {
+    const { client, toClient, fromClient } = pair();
+    const states: unknown[] = [];
+    const notices: unknown[] = [];
+    client.on('state', (s) => states.push(s));
+    client.on('notice', (ch, code) => notices.push([ch, code]));
+    const p = client.status();
+    toClient.write(encodeFrame(FrameType.STATE, Buffer.from('{"instance":"i","phase":"serving","sessions":[]}')));
+    expect(await p).toEqual({ instance: 'i', phase: 'serving', sessions: [] });
+    client.watch();
+    expect(fromClient.at(-1)![4]).toBe(FrameType.WATCH);
+    toClient.write(encodeFrame(FrameType.STATE, Buffer.from('{"instance":"i","phase":"draining","sessions":[]}')));
+    toClient.write(encodeFrame(FrameType.NOTICE, Buffer.from('{"channel":3,"code":"draining"}')));
+    await new Promise((r) => setTimeout(r, 10));
+    expect(states).toEqual([{ instance: 'i', phase: 'draining', sessions: [] }]);
+    expect(notices).toEqual([[3, 'draining']]);
+  });
+
+  it('drops off-shape NOTICE and STATE without killing the connection', async () => {
+    const { client, toClient } = pair();
+    const states: unknown[] = [];
+    const notices: unknown[] = [];
+    let closed = false;
+    client.on('state', (s) => states.push(s));
+    client.on('notice', (ch, code) => notices.push([ch, code]));
+    client.on('close', () => { closed = true; });
+    toClient.write(encodeFrame(FrameType.NOTICE, Buffer.from('not json')));
+    toClient.write(encodeFrame(FrameType.NOTICE, Buffer.from('{"channel":"3","code":"draining"}')));
+    toClient.write(encodeFrame(FrameType.STATE, Buffer.from('{"instance":"i","phase":"done","sessions":"a"}')));
+    toClient.write(encodeFrame(FrameType.NOTICE, Buffer.from('{"channel":4,"code":"draining"}')));
+    await new Promise((r) => setTimeout(r, 10));
+    expect(states).toEqual([]);
+    expect(notices).toEqual([[4, 'draining']]);
+    expect(closed).toBe(false);
+  });
+
+  it('parses LIST ended', async () => {
+    const { client, toClient } = pair();
+    const p = client.listSessions();
+    toClient.write(encodeFrame(FrameType.SESSIONS, Buffer.from('{"sessions":[{"id":"a","alive":false,"ended":"drain-killed"}]}')));
+    expect(await p).toEqual([{ id: 'a', alive: false, ended: 'drain-killed' }]);
+  });
+
+  it('createSession sends headless only when asked', async () => {
+    const { client, toClient, fromClient } = pair();
+    const p = client.createSession('a', 80, 24, ['-p', 'x'], { headless: true });
+    toClient.write(encodeFrame(FrameType.CREATED, Buffer.from('{"id":"a","ok":true}')));
+    await p;
+    expect(JSON.parse(fromClient.at(-1)!.subarray(5).toString())).toEqual({ id: 'a', cols: 80, rows: 24, args: ['-p', 'x'], headless: true });
+    const q = client.createSession('b', 80, 24);
+    toClient.write(encodeFrame(FrameType.CREATED, Buffer.from('{"id":"b","ok":true}')));
+    await q;
+    expect(JSON.parse(fromClient.at(-1)!.subarray(5).toString())).toEqual({ id: 'b', cols: 80, rows: 24 });
   });
 });

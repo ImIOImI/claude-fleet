@@ -45,9 +45,11 @@ func sessionFor(pid int, roots map[int]string, ppid func(int) (int, bool)) strin
 	return ""
 }
 
-// procPpid reads a process's parent pid from /proc/<pid>/stat.
-func procPpid(pid int) (int, bool) {
-	b, err := os.ReadFile("/proc/" + strconv.Itoa(pid) + "/stat")
+func procPpid(pid int) (int, bool) { return ProcPpid("/proc", pid) }
+
+// ProcPpid reads a process's parent pid from <procRoot>/<pid>/stat.
+func ProcPpid(procRoot string, pid int) (int, bool) {
+	b, err := os.ReadFile(procRoot + "/" + strconv.Itoa(pid) + "/stat")
 	if err != nil {
 		return 0, false
 	}

@@ -6,6 +6,7 @@ export default defineConfig({
   test: {
     include: [
       'src/host/bootstrap.pg.test.ts',
+      'src/host/drainStore.pg.test.ts',
       'src/host/historyRead.pg.test.ts',
       'src/host/hostActions.pg.test.ts',
       'src/host/hostAutomations.pg.test.ts',

@@ -15,6 +15,33 @@ const CHANNEL = 1;
 const CLOSE_GRACE_MS = 1_000;
 /** How long End session waits for CLOSED before dropping the socket. */
 const CLOSE_WAIT_MS = 3_000;
+export const DRAIN_NOTICE_TEXT = "[host is restarting; your input wasn't sent]";
+const HOST_STARTING = 'The host is starting; reopen this tab in a moment.';
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+const MAX_DRAINED = 200;
+
+export type DrainedRow = { brokerSessionId: string; sessionId: string | null };
+
+/**
+ * The host's drained sessions (D151); an older host without the channel has none.
+ * A row whose claude id is malformed keeps `sessionId: null` so its tab fails closed.
+ */
+export async function fetchDrained(client: Pick<RemoteClient, 'rpc'>): Promise<DrainedRow[]> {
+  let r: { rows?: unknown } | null;
+  try {
+    r = await client.rpc<{ rows?: unknown }>('sessions:drained', []);
+  } catch (err) {
+    if (err instanceof RemoteError && err.status === 404) return [];
+    throw err;
+  }
+  if (!Array.isArray(r?.rows)) throw new RemoteError('protocol', 'bad sessions:drained reply');
+  return r.rows.slice(0, MAX_DRAINED).flatMap((x) => {
+    const o = x as { brokerSessionId?: unknown; sessionId?: unknown } | null;
+    if (!o || typeof o.brokerSessionId !== 'string') return [];
+    const ok = typeof o.sessionId === 'string' && UUID_RE.test(o.sessionId);
+    return [{ brokerSessionId: o.brokerSessionId, sessionId: ok ? (o.sessionId as string) : null }];
+  });
+}
 
 /** Fixed text per host close code; the host's reason string is untrusted. */
 function closeNotice(code: number): string | null {
@@ -36,12 +63,17 @@ export interface RemoteAttachOptions {
   /** The viewer's tier allows CREATE (`session`). */
   canCreate: boolean;
   closeWaitMs?: number;
+  /** Drained-session lookup for a missing session (D151); absent: none. */
+  drained?: () => Promise<DrainedRow[]>;
 }
 
 export async function attachRemotePty(o: RemoteAttachOptions): Promise<PtyHandle> {
   const ws = await o.client.openSocket('/attach');
   const broker = new BrokerClient(createWebSocketStream(ws));
   const stream = brokerPtyStream(broker, CHANNEL);
+  broker.on('notice', (ch: number) => {
+    if (ch === CHANNEL && !stream.destroyed && !stream.readableEnded) stream.push(Buffer.from(`\r\n\x1b[33m${DRAIN_NOTICE_TEXT}\x1b[0m\r\n`));
+  });
   let closing = false;
   let closedWith: number | null = null;
   // Runs before the ws stream ends, so the notice lands ahead of the stream's end.
@@ -77,8 +109,17 @@ export async function attachRemotePty(o: RemoteAttachOptions): Promise<PtyHandle
   const hostSays = (e: string | undefined): Promise<string> => o.client.redact(e ?? 'unknown error');
   if (!r.ok && /no such session/i.test(r.error ?? '')) {
     if (!o.canCreate) fail('This session is not running on the host, and your tier cannot start one');
-    const created = await step(broker.createSession(o.sessionId, o.cols, o.rows, claudeCreateArgs(o.resumeOf, o.resumeOf ? undefined : randomUUID())));
-    if (!created.ok) fail(`host refused to start the session: ${await hostSays(created.error)}`);
+    let resumeOf = o.resumeOf;
+    if (!resumeOf && o.drained) {
+      // A failed lookup must not start a fresh claude in place of the drained one.
+      const rows = await o.drained().catch(() => null);
+      const row = rows?.find((x) => x.brokerSessionId === o.sessionId);
+      if (rows === null || row?.sessionId === null) return fail(HOST_STARTING);
+      resumeOf = row?.sessionId;
+    }
+    const created = await step(broker.createSession(o.sessionId, o.cols, o.rows, claudeCreateArgs(resumeOf, resumeOf ? undefined : randomUUID())));
+    // Another viewer resumed it first: attach to theirs.
+    if (!created.ok && !/id already in use/i.test(created.error ?? '')) fail(`host refused to start the session: ${await hostSays(created.error)}`);
     r = await step(broker.attachSession(o.sessionId, CHANNEL));
   }
   if (!r.ok) fail(`host refused to attach: ${await hostSays(r.error)}`);

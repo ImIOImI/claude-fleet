@@ -15,6 +15,11 @@ export interface HostDb {
     actor: string; request_id: string; channel: string; created_at: number;
     settled_at: number | null; result: string | null; error: string | null;
   };
+  host_run_retries: {
+    run_id: string; automation_id: string; state: 'pending' | 'started' | 'skipped'; retry_run_id: string | null;
+    created_at: number; settled_at: number | null; note: string | null;
+  };
+  host_drained_sessions: { instance: string; broker_session_id: string; session_id: string; reason: string | null; drained_at: number };
 }
 
 export const HOST_PG_BASELINE_VERSION = 1;
@@ -94,7 +99,32 @@ CREATE TABLE host_action_requests (
 CREATE INDEX idx_host_action_requests_created ON host_action_requests (created_at);
 `;
 
+// Graceful drain (D150, D151): one re-run per cut-off automation run; interactive sessions to resume.
+const HOST_DRAIN_V5 = `
+CREATE TABLE host_run_retries (
+  run_id TEXT COLLATE "C" PRIMARY KEY,
+  automation_id TEXT COLLATE "C" NOT NULL,
+  state TEXT COLLATE "C" NOT NULL CHECK (state IN ('pending', 'started', 'skipped')),
+  retry_run_id TEXT COLLATE "C" UNIQUE,
+  created_at BIGINT NOT NULL,
+  settled_at BIGINT,
+  note TEXT
+);
+CREATE TABLE host_drained_sessions (
+  instance TEXT COLLATE "C" NOT NULL,
+  broker_session_id TEXT COLLATE "C" NOT NULL,
+  session_id TEXT COLLATE "C" NOT NULL,
+  reason TEXT COLLATE "C",
+  drained_at BIGINT NOT NULL,
+  PRIMARY KEY (instance, broker_session_id)
+);
+CREATE INDEX idx_host_drained_sessions_at ON host_drained_sessions (drained_at);
+`;
+
 export const HOST_TRACK: PgTrack = {
   track: 'host', baselineVersion: HOST_PG_BASELINE_VERSION, baseline: HOST_PG_BASELINE,
-  steps: [{ version: 2, postgres: HOST_PUBLISH_V2 }, { version: 3, postgres: HOST_SESSION_OWNERS_V3 }, { version: 4, postgres: HOST_ACTION_REQUESTS_V4 }]
+  steps: [
+    { version: 2, postgres: HOST_PUBLISH_V2 }, { version: 3, postgres: HOST_SESSION_OWNERS_V3 }, { version: 4, postgres: HOST_ACTION_REQUESTS_V4 },
+    { version: 5, postgres: HOST_DRAIN_V5 }
+  ]
 };

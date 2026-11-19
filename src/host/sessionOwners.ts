@@ -40,6 +40,8 @@ export interface SessionOwnerStore {
   ownersOf(sessionIds: readonly string[], workspaceIds: readonly string[]): Promise<Map<string, SessionOwner>>;
   /** Most expensive first, at most MAX_OWNER_COST_ROWS; `since` filters on last_active_at. */
   ownerCosts(workspaceIds: readonly string[], o?: { since?: number }): Promise<OwnerCostRow[]>;
+  /** broker session id → the claude session of its newest owner row in this workspace. */
+  latestSessionOf(brokerSessionIds: readonly string[]): Promise<Map<string, string>>;
 }
 
 interface OwnerRow {
@@ -107,6 +109,17 @@ export function sessionOwnerStore(k: () => Kysely<StateDb>, workspaceId: string)
       return { owned: row?.owned === true, published: row?.published === true, known: row?.known === true };
     },
     ownersOf,
+    async latestSessionOf(ids) {
+      const out = new Map<string, string>();
+      for (let i = 0; i < ids.length; i += OWNER_LOOKUP_CHUNK) {
+        const r = await sql<{ broker_session_id: string; session_id: string }>`
+          SELECT DISTINCT ON (broker_session_id) broker_session_id, session_id FROM session_owners
+          WHERE workspace_id = ${workspaceId} AND broker_session_id IN (${sql.join(ids.slice(i, i + OWNER_LOOKUP_CHUNK))})
+          ORDER BY broker_session_id, started_at DESC, session_id`.execute(k());
+        for (const row of r.rows) out.set(row.broker_session_id, row.session_id);
+      }
+      return out;
+    },
     async ownerCosts(workspaceIds, o = {}) {
       if (workspaceIds.length === 0) return [];
       const since = o.since === undefined ? sql`` : sql`AND COALESCE(s.last_active_at, 0) >= ${o.since}`;

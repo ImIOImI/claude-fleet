@@ -6,7 +6,10 @@ import { migratePostgres } from '../main/store/pgMigrate.js';
 import { postgresKysely } from '../main/store/postgres.js';
 import { INBOX_PG_TRACK } from '../main/store/migrations/inboxPg.js';
 import { isPg, testPgSchema, type TestPg } from '../main/store/testStore.js';
-import { HOST_TRACK } from './hostSchema.js';
+import { HOST_TRACK, type HostDb } from './hostSchema.js';
+import { pgDrainStore } from './drainStore.js';
+import { startHostDrain } from './hostDrain.js';
+import type { GatePhase } from './drainGate.js';
 import { createLogger } from './log.js';
 import { leaseFence, postgresLeaseStore } from './pgLease.js';
 import { fakeBroker } from './testFakes.js';
@@ -123,5 +126,40 @@ describe.skipIf(!isPg)('host automations under the lease', () => {
     await a.h.notices.request({ kind: 'post', title: 'y', priority: 'normal', source: { kind: 'workspace', id: WS.id } });
     const rows = await t!.pool.query(`SELECT title, delivered, held_reason FROM ${t!.schema}.notifications`);
     expect(rows.rows).toEqual([{ title: 'y', delivered: 0, held_reason: 'remote' }]);
+  });
+
+  it('two holders on one store re-run a drain-cut run exactly once; the superseded one writes nothing', async () => {
+    const lease = await setup();
+    const clock = { now: Date.parse('2026-11-06T02:00:00Z') };
+    const eb = (await lease.tryAcquire('b', 0, 60_000))!;
+    const b = await host('b', () => eb, clock);
+    await t!.pool.query(`UPDATE ${t!.schema}.host_lease SET expires_at = clock_timestamp() - interval '1 second'`);
+    const ea = (await lease.tryAcquire('a', 0, 60_000))!;
+    const a = await host('a', () => ea, clock);
+    await a.h.reconcile([{ ...daily, definition: { ...daily.definition, triggers: [{ manual: {} }] } }]);
+    const [auto] = await a.h.store.list();
+    const run = await a.h.store.startRun(auto, { kind: 'manual' }, {}, 'interrupted', clock.now, 'go: interrupted by host restart');
+    const fenced = (holder: string, epoch: () => number | null) =>
+      pgDrainStore(postgresKysely<HostDb>(t!.pool, { afterBeginWrite: leaseFence({ workspaceId: WS.id, holder, epoch, onLost: () => undefined }) }));
+    const da = fenced('a', () => ea);
+    const db = fenced('b', () => eb);
+    await expect(db.markRetry(run.id, auto.id, clock.now)).rejects.toThrow(/lease|holder|epoch/i);
+    expect(await da.markRetry(run.id, auto.id, clock.now)).toBe(true);
+    expect(await da.markRetry(run.id, auto.id, clock.now)).toBe(false);
+    const gate = (p: GatePhase) => ({ phase: () => p, subscribe: () => () => undefined });
+    const logs: string[] = [];
+    const [ha, hb] = [
+      startHostDrain({ gate: gate('serving'), drains: da, automations: a.h, owners: { latestSessionOf: async () => new Map() }, log: createLogger(() => undefined), now: () => clock.now }),
+      startHostDrain({ gate: gate('serving'), drains: db, automations: b.h, owners: { latestSessionOf: async () => new Map() }, log: createLogger((l) => logs.push(l)), now: () => clock.now })
+    ];
+    await Promise.all([ha.idle(), hb.idle()]);
+    await expect.poll(() => a.broker.created.length + b.broker.created.length).toBe(1);
+    expect(b.broker.created).toEqual([]);
+    expect(logs.some((l) => l.includes('drain bookkeeping failed'))).toBe(true);
+    const runs = await t!.pool.query(`SELECT trigger FROM ${t!.schema}.runs WHERE id <> $1`, [run.id]);
+    expect(runs.rows.map((r: { trigger: string }) => JSON.parse(r.trigger).retryOf)).toEqual([run.id]);
+    const ledger = await t!.pool.query(`SELECT state, retry_run_id IS NOT NULL AS started FROM ${t!.schema}.host_run_retries`);
+    expect(ledger.rows).toEqual([{ state: 'started', started: true }]);
+    await Promise.all([ha.stop(), hb.stop()]);
   });
 });

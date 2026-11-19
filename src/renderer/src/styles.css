@@ -3932,3 +3932,8 @@ button.switch { padding: 0; cursor: pointer; }
 .remote-managed { font-size: 12px; opacity: 0.8; }
 .remote-msg { font-size: 12px; color: var(--warn); }
 .remote-unavailable { font-size: 12px; opacity: 0.75; padding: 4px 8px; }
+
+/* Remote workspace pod restarting (D152). */
+.drain-banner { padding: 6px 12px; background: color-mix(in oklab, var(--warn) 18%, transparent); color: var(--warn); font-size: 12px; }
+.ws-chip-group.restarting .ws-chip-sub { color: var(--warn); }
+.session-ended-card.restarting .session-ended-title { color: var(--warn); }

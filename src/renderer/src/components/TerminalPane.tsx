@@ -15,8 +15,8 @@
 
 import { useEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
-import type { RemoteLiveSession, RemoteTier } from '../../../preload';
-import { canEndSession, defaultTabOnTierChange, ipcErrorText, joinableSessions, mineIds, paneRules, raceTimeout, tierTitle } from '../remoteView';
+import type { RemoteDrain, RemoteLiveSession, RemoteTier } from '../../../preload';
+import { canEndSession, defaultTabOnTierChange, drainBanner, drainEnded, ipcErrorText, joinableSessions, mineIds, paneRules, raceTimeout, tierTitle } from '../remoteView';
 import type { WorkspaceObservabilitySummary } from '../../../preload';
 import type { MirrorSetting, CleanupSetting } from '../App';
 import { TerminalSession } from './TerminalSession';
@@ -58,6 +58,8 @@ interface Props {
   containerId: string;
   /** Remote workspaces only: the viewer's tier (null until the host answers); undefined for local/container. */
   remoteTier?: RemoteTier | null;
+  /** Remote workspaces only: the host's last broker:drain (D152). */
+  drain?: RemoteDrain | null;
   /** ULID — used for sessions.json path and observability lookups. */
   workspaceId: string;
   /** The workspace's durable-mirror defaults (manifest). New tabs inherit
@@ -212,6 +214,7 @@ function uid(): string {
 export function TerminalPane({
   containerId,
   remoteTier,
+  drain,
   workspaceId,
   mirrorDefault,
   cleanupDefault,
@@ -385,7 +388,21 @@ export function TerminalPane({
     onActiveTabChange?.(workspaceId, activeId, freshIdsRef.current.has(activeId));
   }, [activeId, workspaceId, onActiveTabChange]);
 
-  const rules = paneRules(remoteTier);
+  const rules = paneRules(remoteTier, drain);
+  const [resumeToken, setResumeToken] = useState<number | null>(null);
+  const prevDrainRef = useRef(drain);
+  useEffect(() => {
+    if (drainEnded(prevDrainRef.current, drain)) setResumeToken((t) => (t ?? 0) + 1);
+    prevDrainRef.current = drain;
+  }, [drain]);
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    if (!rules.restarting) return;
+    setNow(Date.now());
+    const t = setInterval(() => setNow(Date.now()), 30_000);
+    return () => clearInterval(t);
+  }, [rules.restarting]);
+  const banner = drainBanner(drain, now, (ms) => new Date(ms).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }));
   const { menu: joinMenu, toggle: toggleJoinMenu, close: closeJoinMenu } = usePortalMenu();
   const [joinable, setJoinable] = useState<RemoteLiveSession[] | { error: string } | null>(null);
   const [mine, setMine] = useState<ReadonlySet<string>>(() => new Set());
@@ -783,6 +800,9 @@ export function TerminalPane({
           onDismiss={() => setCommitteeToast(null)}
         />
       )}
+      {banner && (
+        <div className="drain-banner" role="status" aria-live="polite">{banner}</div>
+      )}
       {restartBanner && (
         <div className="restart-banner" role="status" aria-live="polite">
           <span className="restart-banner-text">
@@ -856,8 +876,8 @@ export function TerminalPane({
                   {s.autoName && <span className="session-tab-auto" title="Auto-named from Claude's summary" aria-hidden="true">✦</span>}
                   {s.name}
                   {rules.readOnly && (
-                    <span className="session-tab-watching" title={tierTitle(remoteTier)}>
-                      watching
+                    <span className="session-tab-watching" title={rules.restarting ? 'The host is restarting; typing is paused' : tierTitle(remoteTier)}>
+                      {rules.restarting ? 'paused' : 'watching'}
                     </span>
                   )}
                 </span>
@@ -1078,6 +1098,8 @@ export function TerminalPane({
             onActivityChange={handleActivity}
             reloadToken={reloadTargets[s.id] ?? null}
             onRefreshUnresolved={handleRefreshUnresolved}
+            restarting={rules.restarting}
+            resumeToken={resumeToken}
           />
         ))}
         {loaded && sessions.length === 0 && rules.remote && (

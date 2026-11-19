@@ -24,6 +24,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/ImIOImI/claude-fleet/broker/internal/drain"
+	"github.com/ImIOImI/claude-fleet/broker/internal/notify"
 	"github.com/ImIOImI/claude-fleet/broker/internal/portscan"
 	"github.com/ImIOImI/claude-fleet/broker/internal/proto"
 	"github.com/ImIOImI/claude-fleet/broker/internal/session"
@@ -41,6 +43,73 @@ type Server struct {
 	// subtree, so a supervisor like nodemon/`next dev` can't respawn the
 	// listener and reopen the port) with a 2s grace.
 	KillPort func(port uint16) error
+	// Drain is nil when the broker has no drainer (tests); it then always serves.
+	Drain    *drain.Drainer
+	Bus      *notify.Bus
+	Instance string
+	// ProcRoot is where a DRAIN caller's ancestry is read; "" is /proc.
+	ProcRoot string
+}
+
+const ErrDraining = "draining: the workspace is restarting"
+
+// One NOTICE per channel per interval; a held key would otherwise flood the viewer.
+const noticeEvery = 5 * time.Second
+
+func (s *Server) phase() string {
+	if s.Drain == nil {
+		return drain.PhaseServing
+	}
+	return s.Drain.Phase()
+}
+
+// stateNotice snapshots afresh: after done, end reasons are recorded unless KillAll's 2 s wait ran out.
+func (s *Server) stateNotice() proto.StateNotice {
+	var st drain.State
+	if s.Drain != nil {
+		st = s.Drain.State()
+	} else {
+		st = drain.State{Instance: s.Instance, Phase: drain.PhaseServing, Sessions: s.mgr.Snapshot()}
+	}
+	out := proto.StateNotice{Instance: st.Instance, Phase: st.Phase, Sessions: make([]proto.StateSession, len(st.Sessions))}
+	if !st.StartedAt.IsZero() {
+		out.StartedAt, out.SoftAt, out.HardAt = st.StartedAt.UnixMilli(), st.SoftAt.UnixMilli(), st.HardAt.UnixMilli()
+	}
+	for i, x := range st.Sessions {
+		out.Sessions[i] = proto.StateSession{ID: x.ID, Alive: x.Alive, Headless: x.Headless, Ended: x.Ended}
+	}
+	return out
+}
+
+// streamState sends STATE now and on every change until stop closes, the write fails, or (untilDone) the drain is done.
+func (s *Server) streamState(cw *connWriter, stop <-chan struct{}, untilDone bool) {
+	var wake <-chan struct{}
+	if s.Bus != nil {
+		ch, cancel := s.Bus.Subscribe()
+		defer cancel()
+		wake = ch
+	}
+	for {
+		st := s.stateNotice()
+		if cw.writeJSON(proto.FrameState, st) != nil || (untilDone && st.Phase == drain.PhaseDone) {
+			return
+		}
+		select {
+		case <-stop:
+			return
+		case <-wake:
+		case <-time.After(5 * time.Second):
+		}
+	}
+}
+
+type connState struct {
+	cw       *connWriter
+	attached map[uint32]string
+	dialed   map[uint32]net.Conn
+	notices  map[uint32]time.Time
+	done     chan struct{}
+	watching bool
 }
 
 func New(mgr *session.Manager) *Server {
@@ -107,9 +176,11 @@ func (cw *connWriter) WriteChannelData(channel uint32, body []byte) error {
 func (s *Server) handleConn(ctx context.Context, c net.Conn) {
 	defer c.Close()
 	cw := &connWriter{w: c}
+	cs := &connState{cw: cw, attached: map[uint32]string{}, dialed: map[uint32]net.Conn{}, notices: map[uint32]time.Time{}, done: make(chan struct{})}
+	defer close(cs.done)
 
 	// Channel id → session id, scoped to this connection only.
-	attached := map[uint32]string{}
+	attached := cs.attached
 	defer func() {
 		// On disconnect, detach every channel we owned. Sessions stay
 		// alive in the manager; the next attach catches up via ring.
@@ -122,7 +193,7 @@ func (s *Server) handleConn(ctx context.Context, c net.Conn) {
 
 	// Channel id → dialed TCP conn (port-forward relay), scoped to this
 	// connection. Disjoint from `attached` (PTY channels).
-	dialed := map[uint32]net.Conn{}
+	dialed := cs.dialed
 	defer func() {
 		for _, conn := range dialed {
 			_ = conn.Close()
@@ -140,7 +211,7 @@ func (s *Server) handleConn(ctx context.Context, c net.Conn) {
 			}
 			return
 		}
-		if err := s.dispatch(ft, payload, cw, attached, dialed); err != nil {
+		if err := s.dispatch(ft, payload, cs); err != nil {
 			log.Printf("dispatch %v: %v", ft, err)
 			// Protocol-level errors are non-fatal — keep the conn
 			// open so the host can recover. Truly fatal errors would
@@ -149,13 +220,8 @@ func (s *Server) handleConn(ctx context.Context, c net.Conn) {
 	}
 }
 
-func (s *Server) dispatch(
-	ft proto.FrameType,
-	payload []byte,
-	cw *connWriter,
-	attached map[uint32]string,
-	dialed map[uint32]net.Conn,
-) error {
+func (s *Server) dispatch(ft proto.FrameType, payload []byte, c *connState) error {
+	cw, attached, dialed := c.cw, c.attached, c.dialed
 	switch ft {
 	case proto.FrameCreate:
 		var req proto.CreateRequest
@@ -168,7 +234,10 @@ func (s *Server) dispatch(
 		if req.Cols == 0 || req.Rows == 0 {
 			req.Cols, req.Rows = 80, 24
 		}
-		if _, err := s.mgr.Create(req.ID, req.Cols, req.Rows, req.Args); err != nil {
+		if s.phase() != drain.PhaseServing {
+			return cw.writeJSON(proto.FrameCreated, proto.CreateResponse{ID: req.ID, OK: false, Error: ErrDraining})
+		}
+		if _, err := s.mgr.CreateWith(req.ID, req.Cols, req.Rows, req.Args, req.Headless); err != nil {
 			return cw.writeJSON(proto.FrameCreated, proto.CreateResponse{ID: req.ID, OK: false, Error: err.Error()})
 		}
 		return cw.writeJSON(proto.FrameCreated, proto.CreateResponse{ID: req.ID, OK: true})
@@ -206,7 +275,7 @@ func (s *Server) dispatch(
 		if errors.Is(err, session.ErrEnded) {
 			// Session already gone — send ENDED right after history so
 			// the host knows not to expect live output.
-			return cw.writeJSON(proto.FrameEnded, proto.EndedNotice{Channel: req.Channel, Reason: "exit"})
+			return cw.writeJSON(proto.FrameEnded, proto.EndedNotice{Channel: req.Channel, Reason: sess.EndReason()})
 		}
 		// Wire up an ENDED notice if/when the session finishes while
 		// this connection is still attached on this channel.
@@ -214,7 +283,7 @@ func (s *Server) dispatch(
 			<-sess.Done()
 			// Check that this channel is still ours.
 			if _, ok := attached[ch]; ok && attached[ch] == id {
-				_ = cw.writeJSON(proto.FrameEnded, proto.EndedNotice{Channel: ch, Reason: "exit"})
+				_ = cw.writeJSON(proto.FrameEnded, proto.EndedNotice{Channel: ch, Reason: sess.EndReason()})
 			}
 		}(req.Channel, req.ID)
 		return nil
@@ -265,6 +334,13 @@ func (s *Server) dispatch(
 		if !ok {
 			return nil // silently drop input for unknown channels
 		}
+		if s.phase() != drain.PhaseServing {
+			if last, seen := c.notices[channel]; !seen || time.Since(last) >= noticeEvery {
+				c.notices[channel] = time.Now()
+				return cw.writeJSON(proto.FrameNotice, proto.Notice{Channel: channel, Code: proto.NoticeDraining})
+			}
+			return nil
+		}
 		sess := s.mgr.Get(id)
 		if sess == nil {
 			return nil
@@ -290,7 +366,7 @@ func (s *Server) dispatch(
 		infos := s.mgr.List()
 		resp := proto.SessionsResponse{Sessions: make([]proto.SessionInfo, len(infos))}
 		for i, info := range infos {
-			resp.Sessions[i] = proto.SessionInfo{ID: info.ID, Alive: info.Alive}
+			resp.Sessions[i] = proto.SessionInfo{ID: info.ID, Alive: info.Alive, Ended: info.Ended}
 		}
 		return cw.writeJSON(proto.FrameSessions, resp)
 
@@ -355,6 +431,17 @@ func (s *Server) dispatch(
 		}
 		return cw.writeJSON(proto.FrameKilled, proto.KilledResponse{OK: true})
 
+	case proto.FrameStatus:
+		return cw.writeJSON(proto.FrameState, s.stateNotice())
+
+	case proto.FrameWatch:
+		if !c.watching {
+			c.watching = true
+			go s.streamState(cw, c.done, false)
+		}
+		return nil
+
+	// DRAIN falls through to default: only the control socket serves it (D142).
 	default:
 		// Unknown frame types: log and drop. The host can roll forward.
 		log.Printf("unknown frame type 0x%02x", uint8(ft))

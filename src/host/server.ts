@@ -62,6 +62,8 @@ export interface HostServerDeps {
   db?(): 'ok' | 'down' | 'connecting' | 'none';
   /** True until the host store is open and the lease resolved: unready, and authenticated routes answer 503. */
   starting?(): boolean;
+  /** SIGTERM received: /healthz answers 503 draining (D154). */
+  draining?(): boolean;
   /** null or absent: the host doesn't require the mesh, and /healthz omits it. */
   mesh?(): MeshState | null;
   hub: AttachHub;
@@ -297,7 +299,7 @@ export function createHostServer(deps: HostServerDeps): HostServer {
     if (path === '/healthz' || path === '/leader') {
       if (req.method !== 'GET') sendJson(res, 405, { error: 'method not allowed' });
       else if (path === '/healthz') {
-        const status = deps.starting?.() ? 'starting' : deps.healthy() ? 'ok' : 'unhealthy';
+        const status = deps.draining?.() ? 'draining' : deps.starting?.() ? 'starting' : deps.healthy() ? 'ok' : 'unhealthy';
         const mesh = deps.mesh?.() ?? null;
         sendJson(res, status === 'ok' ? 200 : 503, { status, lease: deps.lease(), db: deps.db?.() ?? 'none', ...(mesh ? { mesh } : {}) });
       }

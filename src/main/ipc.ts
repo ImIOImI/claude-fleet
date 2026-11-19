@@ -98,6 +98,7 @@ import { registerIdentityIpc } from './identityIpc.js';
 import { createRemoteBackend } from './remote.js';
 import { createFederatedReader, type FederatedReader } from './federation/federatedReader.js';
 import { createSummaryRelay } from './federation/summaryRelay.js';
+import { createDrainRelay } from './remoteDrain.js';
 import { registerFederationIpc, type LocalSearch } from './federation/federationIpc.js';
 import { registerRemoteAutomationsIpc } from './federation/remoteAutomationsIpc.js';
 import { createRemoteChangeForwarder } from './federation/remoteChanges.js';
@@ -420,6 +421,12 @@ const remoteChanges = createRemoteChangeForwarder({
     }
   }
 });
+const drainRelay = createDrainRelay((u) => {
+  for (const w of BrowserWindow.getAllWindows()) {
+    if (w.isDestroyed() || w.webContents.isDestroyed()) continue;
+    try { w.webContents.send('remote:drain', u); } catch { /* mid-teardown */ }
+  }
+});
 const summaryRelay = createSummaryRelay({
   sources: () => (MOCK_MODE ? [] : remoteBackend.sources()),
   subscribe: (url, on, state) => remoteBackend.clientFor(url).subscribe(on, state),
@@ -429,6 +436,8 @@ const summaryRelay = createSummaryRelay({
     remoteChanges.hint(origin, channel);
     if (channel === 'notices:changed') remoteNoticeSink?.hint(origin);
   },
+  onDrain: (origin, payload) => drainRelay.update(origin, payload),
+  onDropped: (origin) => drainRelay.forget(origin),
   onConnected: (origin) => {
     remoteChanges.connected(origin);
     remoteNoticeSink?.hint(origin);
@@ -2236,7 +2245,8 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
     confirm: confirmRemote,
     writeManifest: writeWorkspaceManifest,
     findByName: findWorkspaceByName,
-    invalidate: invalidateWorkspaceList
+    invalidate: invalidateWorkspaceList,
+    drainStates: () => drainRelay.snapshot()
   });
   registerFederationIpc(ipcMain, federated, localSearch);
   registerRemoteAutomationsIpc(ipcMain, federated);
