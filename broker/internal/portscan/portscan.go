@@ -8,6 +8,7 @@ package portscan
 
 import (
 	"bufio"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -203,6 +204,9 @@ func KillTree(port uint16, roots map[int]string, grace time.Duration) error {
 	if owner == 0 {
 		return fmt.Errorf("no resolvable owner for port %d", port)
 	}
+	if isSelfOrAncestor(owner, os.Getpid(), procPpid) {
+		return ErrBrokerPort
+	}
 	root := subtreeRoot(owner, roots, procPpid)
 
 	// Snapshot the subtree once, then track liveness per pid — never by
@@ -226,6 +230,39 @@ func KillTree(port uint16, roots map[int]string, grace time.Duration) error {
 	// Escalate to survivors, folding in any late forks still linked to root.
 	signalPids(mergePids(targets, descendants(root)), syscall.SIGKILL)
 	return nil
+}
+
+// ErrBrokerPort refuses a kill whose target would include this process.
+var ErrBrokerPort = errors.New("port belongs to the broker")
+
+// isSelfOrAncestor reports whether pid is self or one of self's ancestors.
+func isSelfOrAncestor(pid, self int, ppid func(int) (int, bool)) bool {
+	cur := self
+	for hops := 0; hops <= maxAncestryHops; hops++ {
+		if cur == pid {
+			return true
+		}
+		parent, ok := ppid(cur)
+		if !ok || parent <= 0 || parent == cur {
+			return false
+		}
+		cur = parent
+	}
+	return false
+}
+
+// WithoutSelf drops ports owned by this process or its ancestors.
+func WithoutSelf(details []Detail) []Detail { return withoutSelf(details, os.Getpid(), procPpid) }
+
+func withoutSelf(details []Detail, self int, ppid func(int) (int, bool)) []Detail {
+	out := details[:0]
+	for _, d := range details {
+		if d.Pid != 0 && isSelfOrAncestor(d.Pid, self, ppid) {
+			continue
+		}
+		out = append(out, d)
+	}
+	return out
 }
 
 // subtreeRoot walks up from the port owner and returns the pid of the
@@ -353,6 +390,9 @@ func KillOwner(port uint16, grace time.Duration) error {
 	}
 	if pid == 0 {
 		return fmt.Errorf("no resolvable owner for port %d", port)
+	}
+	if isSelfOrAncestor(pid, os.Getpid(), procPpid) {
+		return ErrBrokerPort
 	}
 	proc, err := os.FindProcess(pid) // never fails on unix
 	if err != nil {

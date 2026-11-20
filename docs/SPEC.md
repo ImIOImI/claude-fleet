@@ -188,8 +188,8 @@ The **broker** is a small Go daemon (//broker) shipped inside the runner image. 
 | `DIAL` | 0x14 | host→broker | JSON `{channel, port}` | dial `127.0.0.1:<port>` inside the container; bind to `channel` |
 | `DIALED` | 0x15 | broker→host | JSON `{channel, ok, error?}` | dial result |
 | `LISTPORTS` | 0x16 | host→broker | empty | request current LISTEN ports |
-| `PORTS` | 0x17 | broker→host | JSON `{ports:[{port,pid?,cmdline?,session?},...]}` | listening-port snapshot with best-effort owner + session attribution |
-| `KILLPORT` | 0x18 | host→broker | JSON `{port}` | terminate the command subtree serving `port` — the owner's session-attributed ancestor + all its descendants (SIGTERM, 2s grace, SIGKILL) |
+| `PORTS` | 0x17 | broker→host | JSON `{ports:[{port,pid?,cmdline?,session?},...]}` | listening-port snapshot with best-effort owner + session attribution; ports owned by the broker or its ancestors (:7070, :7071) are left out |
+| `KILLPORT` | 0x18 | host→broker | JSON `{port}` | terminate the command subtree serving `port` — the owner's session-attributed ancestor + all its descendants (SIGTERM, 2s grace, SIGKILL); refused with `port belongs to the broker` when the owner is the broker or one of its ancestors |
 | `KILLED` | 0x19 | broker→host | JSON `{ok, error?}` | kill outcome |
 | `STATUS` | 0x1a | host→broker | empty | one `STATE` |
 | `STATE` | 0x1b | broker→host | JSON `{instance, phase, startedAt?, softAt?, hardAt?, sessions:[{id, alive, headless?, ended?}]}` | drain state; `instance` is 16 random hex chars minted at broker start; times are epoch ms once a drain started |
