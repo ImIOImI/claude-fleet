@@ -35,6 +35,8 @@ grep -q '"lease":"holder"' <<<"$(curl -fsS "http://127.0.0.1:$port/healthz" || t
 test "$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:$port/whoami")" = 401 || fail "/whoami without auth is not 401"
 test "$(docker exec "$cid" id -u)" = 1000 || fail "single runs as uid 1000"
 docker exec "$cid" sh -c 'test -s /etc/ssl/certs/rds-global-bundle.pem && grep -q "BEGIN CERTIFICATE" /etc/ssl/certs/rds-global-bundle.pem' || fail "RDS CA bundle"
+# Vite's empty optional-peer stub makes ws call an undefined unmask on any client frame >= 32 bytes.
+docker exec "$cid" sh -c '! grep -rlq viteOptionalPeerDep_bufferutil /usr/local/lib/fleet-host' || fail "bundled ws still loads the bufferutil stub"
 docker exec "$cid" sh -c 'test -s /usr/local/lib/fleet-host/mcp-bridge.cjs && grep -q CLAUDE_FLEET_MCP_UNIX /usr/local/lib/fleet-host/mcp-bridge.cjs' || fail "MCP bridge file"
 test "$(docker exec "$cid" stat -c '%a %U' /run/fleet)" = '700 fleet' || fail "/run/fleet mode/owner"
 # fleet-host's fresh-step argv shape parses on the image's pinned claude: `--mcp-config=` takes one value and
