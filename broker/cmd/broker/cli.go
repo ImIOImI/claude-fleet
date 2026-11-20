@@ -12,7 +12,8 @@ import (
 	"github.com/ImIOImI/claude-fleet/broker/internal/server"
 )
 
-// runCLI serves the preStop hook (drain) and the readiness probe (ready).
+// runCLI serves the preStop hook (drain) and an operator check (ready: exit 0 while serving).
+// The readiness probe is GET /ready, not this.
 func runCLI(args []string, getenv func(string) string, stdout, stderr io.Writer) int {
 	path := ctlPath(getenv)
 	switch args[0] {

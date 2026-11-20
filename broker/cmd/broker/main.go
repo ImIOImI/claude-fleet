@@ -32,8 +32,9 @@
 //	                              (default: 65536 = 64 KiB)
 //	CLAUDE_FLEET_BROKER_CLAUDE    command run for each session
 //	                              (default: claude)
-//	CLAUDE_FLEET_BROKER_DRAIN     "1": open the control socket (broker drain / broker ready)
-//	                              and drain on SIGTERM (SPEC §7 *Workspace pod drain*)
+//	CLAUDE_FLEET_BROKER_DRAIN     "1": open the control socket (broker drain / broker ready),
+//	                              serve GET /ready, and drain on SIGTERM (SPEC §7 *Workspace pod drain*)
+//	CLAUDE_FLEET_BROKER_READY_PORT  readiness probe port, 0.0.0.0 (default 7071; drain only)
 //	CLAUDE_FLEET_BROKER_DRAIN_SOFT / _HARD  Go durations (default 30m / 35m)
 //	CLAUDE_FLEET_BROKER_CTL_SOCKET  control socket path (default /run/broker/ctl.sock)
 //	CLAUDE_FLEET_BROKER_STATUS_DIR  claude status files (default $HOME/.claude/sessions)
@@ -45,6 +46,7 @@ import (
 	"errors"
 	"log"
 	"net"
+	"net/http"
 	"os"
 	"os/signal"
 	"strconv"
@@ -80,6 +82,11 @@ func main() {
 	if err != nil {
 		log.Fatalf("%v", err)
 	}
+	if drainOn {
+		if _, err := readyPort(os.Getenv); err != nil {
+			log.Fatalf("%v", err)
+		}
+	}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -104,6 +111,18 @@ func main() {
 	}
 	if ctlLn != nil {
 		go func() { _ = srv.ServeControl(ctx, ctlLn) }()
+	}
+	readyLn, readyAddr, err := openReady(ctx, drainOn, os.Getenv)
+	if err != nil {
+		log.Fatalf("readiness listener: %v", err)
+	}
+	if readyLn != nil {
+		log.Printf("readiness on http://%s/ready", readyAddr)
+		go func() {
+			if err := serveReady(ctx, readyLn, srv.ReadyHandler()); err != nil && !errors.Is(err, http.ErrServerClosed) && !errors.Is(err, net.ErrClosed) {
+				log.Printf("readiness serve: %v", err)
+			}
+		}()
 	}
 
 	sigCh := make(chan os.Signal, 2)

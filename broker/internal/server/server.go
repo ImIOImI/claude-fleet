@@ -118,6 +118,7 @@ func New(mgr *session.Manager) *Server {
 		ListPorts: func() ([]portscan.Detail, error) {
 			details, err := portscan.Listening()
 			if err == nil {
+				details = portscan.WithoutSelf(details)
 				portscan.AttributeSessions(details, mgr.RootPids())
 			}
 			return details, err

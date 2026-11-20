@@ -41,7 +41,7 @@ Every task's requirements include this section.
 
 **Security**
 - **Drain is never reachable on :7070 (D142).** `DRAIN` exists only on the control socket (`/run/broker/ctl.sock`, 0600), which is opened only when `CLAUDE_FLEET_BROKER_DRAIN=1`. The main listener drops the frame as unknown.
-- **TCP stays mesh-only (D96).** No new TCP listener or port is added. `STATUS`/`WATCH` ride :7070 under the existing AuthorizationPolicy.
+- **TCP stays mesh-only (D96).** No new TCP listener or port is added. `STATUS`/`WATCH` ride :7070 under the existing AuthorizationPolicy. D158 later adds the read-only readiness port :7071, outside the mesh policy's allow list.
 - **Host replies are untrusted on the desktop (§9).** `broker:drain` and `sessions:drained` payloads are validated field by field, and a bad payload is dropped.
 - **No CREATEROLE (D71).** Host track v5 only creates tables and an index (expand-only, compatible with the previous release).
 
@@ -76,7 +76,7 @@ Every task's requirements include this section.
   - A loopback HTTP port would be a new listener whose reachability depends on the sidecar's inbound forwarding.
   - A preStop hook has no mesh identity for :7070.
 - Sessions (uid 1000) can open the socket. That is no more than their existing ability to `kill` the broker (§9).
-- Readiness is `exec: ["/usr/local/bin/broker", "ready"]`: exit 0 only while `serving`.
+- Readiness is `exec: ["/usr/local/bin/broker", "ready"]`: exit 0 only while `serving`. Superseded by D158.
 
 **D143. SIGTERM also drains when `CLAUDE_FLEET_BROKER_DRAIN=1`.**
 - A failed preStop doesn't lose the turns. A SIGTERM during a drain is logged and waits for `done`, and the deadlines don't move.
@@ -185,6 +185,16 @@ Every task's requirements include this section.
 - Their broker has no control socket, and SIGTERM behaves as today.
 - `STATUS` and `WATCH` answer there too (`phase: serving`); the desktop doesn't use them.
 - Without `db:` the host keeps the drain stores in memory.
+
+**D158. Readiness is an `httpGet` served by the broker, not an exec'd probe.**
+- `readinessProbe: {httpGet: {path: /ready, port: 7071}, periodSeconds: 5, failureThreshold: 1}`. With `CLAUDE_FLEET_BROKER_DRAIN=1` the broker serves plain HTTP on `0.0.0.0:<CLAUDE_FLEET_BROKER_READY_PORT>` (default 7071, 1–65535, else exit 1): `GET /ready` is 200 `serving` or 503 with the phase, the same test as `broker ready`; other paths 404, other methods 405; no body read, no keep-alive, 2 s timeouts; no state change. It is bound after the mesh wait and closed with the broker.
+- `broker ready` stays as an operator check.
+- Why:
+  - The exec'd probe ran as uid 1000 every 5 s. On infra-use1-green `kernel.yama.ptrace_scope` is 0 and RuntimeDefault seccomp allows `ptrace`, and a workspace process was shown to `PTRACE_ATTACH` a same-uid non-descendant. A session could attach to the probe and have it send `DRAIN` (its chain reaches ppid 0): the pod drains, goes not-ready and stays closed with no liveness probe to restart it.
+  - With no runtime-exec'd process while the pod serves, nothing is left to hijack, on any cluster, whatever the node sysctls.
+- Bound to `0.0.0.0`: Istio rewrites the probe to pilot-agent (:15020), which dials the pod IP; that traffic doesn't pass the sidecar's inbound capture. Mesh traffic to :7071 is denied by the workspace AuthorizationPolicy (:7070 only) and the Service doesn't list it. This is the one TCP listener the drain adds; it is read-only (amends D96's "no new listener" for this case).
+- Residual: the preStop `broker drain` (exec'd only once the pod is terminating, so hijacking it only causes the drain under way) and an operator's `kubectl exec` (out of scope).
+- `kernel.yama.ptrace_scope ≥ 1` or a seccomp profile denying `ptrace` is defence in depth only.
 
 ---
 

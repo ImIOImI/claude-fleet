@@ -1,6 +1,6 @@
 # Graceful drain of remote fleet-host pods — design
 
-Status: approved by the owner (Troy) 2026-11-17. Decisions D142–D157 are recorded in the plan (`docs/superpowers/plans/2026-11-17-graceful-drain.md`) and summarised here.
+Status: approved by the owner (Troy) 2026-11-17. Decisions D142–D158 are recorded in the plan (`docs/superpowers/plans/2026-11-17-graceful-drain.md`) and summarised here.
 
 ## Goal
 
@@ -33,7 +33,8 @@ When Kubernetes replaces the workspace pod (an image rollout, a node drain, an e
   - Sessions run as the broker's uid (1000) and can open the socket, so `DRAIN` checks the caller's ancestry (§9 below): a drain never ends on its own, so a session draining its pod would leave it unusable until the pod is deleted.
 - **SIGTERM also drains** when `CLAUDE_FLEET_BROKER_DRAIN=1`. If the hook fails (a bad image, the binary missing), kubelet sends SIGTERM early and the drain still runs, with its deadlines counted from then. While draining, a further SIGTERM is logged and ignored. SIGINT still closes everything at once, as an escape hatch for operators.
 - After `done` the broker waits for SIGTERM, then exits 0. When SIGTERM started the drain, the broker exits as soon as the drain is `done`.
-- **Readiness:** `readinessProbe.exec.command: ["/usr/local/bin/broker", "ready"]` exits 0 only while the broker is `serving`. It fails before the broker listens (the mesh wait) and from the first moment of a drain.
+- **Readiness (D158):** `readinessProbe.httpGet: {path: /ready, port: 7071}`. The broker serves `GET /ready` on `0.0.0.0:<CLAUDE_FLEET_BROKER_READY_PORT>` (default 7071) only when `CLAUDE_FLEET_BROKER_DRAIN=1`: 200 `serving`, else 503 with the phase. It fails before the broker listens (the mesh wait) and from the first moment of a drain. No process is exec'd for it, so a session has nothing to ptrace while the pod serves (§9 below). `broker ready` stays as an operator check with the same answer.
+  - The listener is read-only: other paths 404, other methods 405, no body read, no keep-alive, 2 s timeouts. Istio rewrites the probe to pilot-agent (:15020), which dials the pod IP; that traffic doesn't pass the sidecar's inbound capture. Mesh traffic to :7071 is denied by the workspace AuthorizationPolicy (:7070 only), and the Service doesn't list :7071.
 
 ### State machine (D146)
 
@@ -180,6 +181,7 @@ Dispatch is paused unless the gate is `serving` or `legacy`.
 | `CLAUDE_FLEET_BROKER_DRAIN` | unset; `fleet-host-entry workspace` sets `1` | opens the control socket and makes SIGTERM drain |
 | `CLAUDE_FLEET_BROKER_DRAIN_SOFT` | `30m` | Go duration; Esc / SIGINT to sessions still busy |
 | `CLAUDE_FLEET_BROKER_DRAIN_HARD` | `35m` | Go duration; close everything |
+| `CLAUDE_FLEET_BROKER_READY_PORT` | `7071` | readiness listener port (D158); 1–65535 |
 
 - The values must satisfy 1 s ≤ soft < hard ≤ 24 h. Any other value, or a malformed one, makes the broker exit 1 at start, naming the variable.
 - These are **operator settings in the pod spec**. The owner's rule against hand-editing env or JSON applies to user-facing settings, and these are set by the people who run the cluster, next to `terminationGracePeriodSeconds`, which must exceed the hard deadline by at least 60 s.
@@ -223,17 +225,19 @@ Dispatch is paused unless the gate is `serving` or `legacy`.
 - The control socket is a Unix socket, 0600, owned by uid 1000, only in the workspace pod. It isn't reachable from other pods or from the mesh. `/run/broker` is `1777`. `STATUS` is open to any caller.
 - `DRAIN` on the control socket is refused unless the caller's process chain reaches ppid 0 (exec'd by the container runtime); a session can still SIGTERM the broker (same uid), which drains and then restarts the container, so it can't leave the pod stuck.
   - The chain is read from `SO_PEERCRED`, then `/proc/<pid>/stat`, at most 64 hops. Passing a session root, the broker or pid 1 refuses it (`NOTICE drain-refused`), so a session's processes, including orphans reparented to pid 1, can't drain; kubelet's preStop and `kubectl exec` can. An unreadable chain is refused.
-  - **Known residual:** a session runs as the same uid as the exec'd readiness probe (`broker ready`, every 5 s) and can `ptrace` it into sending `DRAIN`. Appendix B recommends `kernel.yama.ptrace_scope ≥ 1` or a seccomp profile that denies `ptrace`.
+  - A session can `ptrace` any same-uid process that isn't its descendant: `kernel.yama.ptrace_scope` is 0 on the workspace nodes (infra-use1-green) and RuntimeDefault seccomp allows `ptrace`. Nothing may rely on either. So no runtime-exec'd process runs while the pod serves: readiness is the broker's read-only `GET /ready` (D158).
+  - **Known residual:** the preStop `broker drain` is exec'd and can be ptraced, but it runs only once the pod is terminating, so hijacking it only causes the drain already under way. An operator's `kubectl exec` can be ptraced while it runs; out of scope.
   - **Known residual:** a session (same uid) can unlink `/run/broker/ctl.sock` and bind its own, spoofing `broker ready` and the preStop. SIGTERM still drains.
 - `STATUS` and `WATCH` are on :7070 under the existing mesh policy (host SA only). They expose session ids and drain timings, which fleet-host already sees through `LIST`.
 - `DRAIN` on :7070 is refused (`unknown frame`, dropped), so only the control socket starts a drain.
+- `GET /ready` on :7071 never changes state and exposes only the phase.
 - `STATE`, `NOTICE` and `broker:drain` carry no session content. Desktops treat `broker:drain` fields as untrusted: the phase must be one of the three, the times must be safe integers, and the strings are one-lined and capped at 32.
 - `sessions:drained` is `read` tier and is limited to the hosted workspace (the SQL names the `host_meta` id), like `history:*`.
 
 ## Testing
 
-- **Go:** the drain state machine with fake sessions, a fake clock and a fake activity reader (idle closed at once; busy waits; Esc at soft and every 60 s; headless SIGINT; exit-0 versus interrupted; hard stop; done; idempotent start); the status-file reader; the session end reasons with `/bin/sh` stand-ins; server gating (INPUT → NOTICE, CREATE refused, WATCH pushes, DRAIN refused on the main listener); the control socket and the CLI (`drain`, `ready`); env parsing.
-- **Entry script:** `fleet-host-entry workspace` exports `CLAUDE_FLEET_BROKER_DRAIN=1`; the fake broker's `drain` subcommand is what the preStop runs (`docker/host/fleet-host-entry.test.sh`). `docker/host/split.test.sh` (CI, Docker) runs a real drain end to end: a busy `sh` session survives, an idle one closes, `broker drain` returns when everything has ended, and `broker ready` flips.
+- **Go:** the drain state machine with fake sessions, a fake clock and a fake activity reader (idle closed at once; busy waits; Esc at soft and every 60 s; headless SIGINT; exit-0 versus interrupted; hard stop; done; idempotent start); the status-file reader; the session end reasons with `/bin/sh` stand-ins; server gating (INPUT → NOTICE, CREATE refused, WATCH pushes, DRAIN refused on the main listener); the control socket and the CLI (`drain`, `ready`); the readiness listener (`GET /ready` 200/503, 404/405, off without the drain, shut down with the broker); env parsing.
+- **Entry script:** `fleet-host-entry workspace` exports `CLAUDE_FLEET_BROKER_DRAIN=1`; the fake broker's `drain` subcommand is what the preStop runs (`docker/host/fleet-host-entry.test.sh`). `docker/host/split.test.sh` (CI, Docker) runs a real drain end to end: a busy `sh` session survives, an idle one closes, `broker drain` returns when everything has ended, and `broker ready` and `GET /ready` flip.
 - **Host:** `DrainGate` transitions and sticky events; hub refusals; dispatch pausing (tick skipped, events re-armed, manual refused, between-step wait); interrupted-run marking and re-run idempotency (pg: one re-run per run across two "holders", none for a retry, skipped when stale); drained-session recording and `sessions:drained`; `/healthz` draining; the 20 s deadline.
 - **Desktop:** the codec (new frames); `attachRemotePty` resume via the drained list and the `id already in use` → ATTACH path; NOTICE text; the renderer helpers (chip, pane rules, banner, resume decision).
 - **Cluster (Work, Appendix B):** native sidecar order, routing to a terminating workspace pod, a real rollout with a busy session, readiness flip.
@@ -295,10 +299,7 @@ spec:
       lifecycle:
         preStop:
           exec: { command: ["/usr/local/bin/broker", "drain"] }   # blocks until drained (<= hard)
-      readinessProbe:
-        exec: { command: ["/usr/local/bin/broker", "ready"] }     # fails while draining
-        periodSeconds: 5
-        failureThreshold: 1
+      readinessProbe: {httpGet: {path: /ready, port: 7071}, periodSeconds: 5, failureThreshold: 1}   # 503 while draining (D158)
 ---
 apiVersion: v1
 kind: Service
@@ -334,7 +335,7 @@ metadata:
 
 **Probe interplay:**
 - Host: readiness `/healthz` goes 503 `draining` at SIGTERM. Liveness stays off (or `tcpSocket :8080`, per the handoff). The 5 s preStop lets the endpoint removal propagate before the app stops.
-- Workspace: readiness `broker ready` fails from the start of a drain. `publishNotReadyAddresses` keeps the pod routable for fleet-host. Keep no liveness probe: a draining broker must not be restarted.
+- Workspace: readiness `GET /ready` (:7071) fails from the start of a drain. It relies on Istio's probe rewrite (the default); don't add :7071 to the Service or the AuthorizationPolicy. `publishNotReadyAddresses` keeps the pod routable for fleet-host. Keep no liveness probe: a draining broker must not be restarted.
 - The workspace Deployment stays `strategy: Recreate`. The new pod is created only after the old one has finished draining (up to 40 min), so a workspace rollout takes that long when sessions are busy, and about a minute when they are idle.
 - An image bump that rolls both pods at once restarts the host in ≤ 25 s, while the workspace drains. The new host must reach the draining pod (Appendix B).
 
@@ -350,8 +351,9 @@ metadata:
 - During that drain, restart the host pod (`kubectl delete pod <host>`). The new host's log shows `broker drain state` with `phase: draining` (it reached the terminating pod), and the desktop's banner comes back. If it shows `unknown` instead, the terminating pod isn't routable: report it, and roll the host pod only after the workspace pod has finished (a sync wave) until it is.
 - An idle-only workspace: `kubectl delete pod` finishes within about 10 s.
 - `kubectl exec <workspace> -- /usr/local/bin/broker ready; echo $?` prints 0 while serving.
-- `kernel.yama.ptrace_scope` on the workspace nodes is `≥ 1` (`cat /proc/sys/kernel/yama/ptrace_scope` in the pod), or the workspace container runs a seccomp profile that denies `ptrace`. Otherwise a session can ptrace the exec'd readiness probe into sending `DRAIN` (§9 residual).
-- Same-uid residual, accepted: a session can unlink `/run/broker/ctl.sock` and bind its own, which spoofs `broker ready` and the preStop; SIGTERM still drains.
+- The workspace readiness probe is `httpGet /ready :7071` (D158) and the pod turns ready; `kubectl get pod <workspace> -o yaml` shows it rewritten to pilot-agent's `/app-health/…`. From a mesh pod under another SA and from an out-of-mesh pod, `<workspace-pod-ip>:7071` refuses.
+- Defence in depth only, not required: `kernel.yama.ptrace_scope ≥ 1` on the workspace nodes or a seccomp profile that denies `ptrace` (green is 0; D158 removes the exec'd probe that made it matter).
+- Same-uid residual, accepted: a session can unlink `/run/broker/ctl.sock` and bind its own, which spoofs `broker ready` and the preStop (not `GET /ready`); SIGTERM still drains.
 - `hostPID` pods: preStop DRAIN is refused (the chain reaches the host's pid 1); SIGTERM still drains (D143).
 - In a workspace pod, an automation fresh step sent SIGINT (`kill -INT -<pgid>`) exits promptly on the pinned claude. Its status doesn't matter (1A: the broker records `drain-interrupted` once it signalled the session); report a claude that keeps running.
 - **Control-socket reach on a scratch pod:** `kubectl exec <workspace> -- /usr/local/bin/broker drain` is accepted (the exec'd process has ppid 0) and starts a drain, so run it only on a scratch workspace pod; the same command typed in a workspace terminal prints `broker drain: refused: …` and exits 1.

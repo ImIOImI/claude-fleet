@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # fleet-host-entry <mode> (SPEC §4 Host images):
 #   host       fleet-host alone (host pod, uid 1001): credentials :8081, MCP :8082
-#   workspace  the broker and its sessions (workspace pod, uid 1000): broker :7070, drain on preStop/SIGTERM
+#   workspace  the broker and its sessions (workspace pod, uid 1000): broker :7070, readiness :7071, drain on preStop/SIGTERM
 #   single     broker and fleet-host in one container under one uid; local and dev only
 set -u
 mode=${1:-}

@@ -108,8 +108,8 @@ bctl() { docker exec -i -e OP="$1" -e ID="${2:-}" "$n-host" node < "$tmp/brokerc
 
 healthy || fail "host never became holder with mesh ready"
 if [ "$(docker inspect -f '{{.State.Running}}' "$n-nomesh")" = true ]; then
-  # 1B9E = 7070; 0A = LISTEN. Go binds 0.0.0.0 dual-stack, so the socket can be in tcp6.
-  docker exec "$n-nomesh" sh -c '! grep -Eqs ":1B9E [0-9A-F]+:0000 0A" /proc/net/tcp /proc/net/tcp6' || fail "broker listened without a sidecar"
+  # 1B9E = 7070, 1B9F = 7071; 0A = LISTEN. Go binds 0.0.0.0 dual-stack, so the socket can be in tcp6.
+  docker exec "$n-nomesh" sh -c '! grep -Eqs ":1B9[EF] [0-9A-F]+:0000 0A" /proc/net/tcp /proc/net/tcp6' || fail "broker listened without a sidecar"
 fi
 
 # fleet-host's side of :7070.
@@ -156,6 +156,10 @@ grep -q '"msg":"shutting down"' <<<"$(docker logs "$n-host" 2>&1)" || fail "host
 bctl create drainidle | grep -q '"ok":true' || fail "CREATE drainidle"
 bctl create drainbusy | grep -q '"ok":true' || fail "CREATE drainbusy"
 docker exec "$n-ws" /usr/local/bin/broker ready || fail "broker not ready before the drain"
+# The readiness probe (D158): GET /ready on :7071, read-only.
+ready_http() { docker exec -e M="${1:-GET}" "$n-ws" node -e "const r=require('http').request({host:'127.0.0.1',port:7071,path:'/ready',method:process.env.M},(s)=>{let b='';s.on('data',(d)=>b+=d);s.on('end',()=>console.log(s.statusCode+' '+b.trim()))});r.on('error',(e)=>console.log(e.code));r.end()"; }
+test "$(ready_http)" = "200 serving" || fail "GET /ready before the drain: $(ready_http)"
+test "$(ready_http POST)" = "405 method not allowed" || fail "POST /ready accepted"
 test "$(docker exec "$n-ws" stat -c '%a %U %F' /run/broker/ctl.sock)" = "600 fleet socket" || fail "control socket is not 0600 fleet"
 # `; true`: the loop's last `[ ] && …` is usually false, which would fail the pipeline under pipefail.
 idle_pid=$(docker exec "$n-ws" sh -c 'for p in /proc/[0-9]*; do [ "$(cat $p/environ 2>/dev/null | tr "\0" "\n" | grep -x CLAUDE_FLEET_BROKER_SESSION_ID=drainidle)" ] && basename $p; done; true' | head -1) || true
@@ -168,6 +172,7 @@ docker exec "$n-ws" /usr/local/bin/broker drain > "$tmp/drain.out" || fail "brok
 grep -q '"phase":"done"' "$tmp/drain.out" || fail "drain never reported done"
 (( SECONDS - start <= 20 )) || fail "drain took longer than the hard deadline allows"
 docker exec "$n-ws" /usr/local/bin/broker ready && fail "broker ready while drained"
+test "$(ready_http)" = "503 done" || fail "GET /ready after the drain: $(ready_http)"
 bctl status | grep -q '"id":"drainidle","alive":false,"ended":"drain-idle"' || fail "idle session not closed as drain-idle"
 bctl status | grep -q '"id":"drainbusy","alive":false,"ended":"drain-killed"' || fail "busy session not killed at the hard deadline"
 bctl create late | grep -q 'draining: the workspace is restarting' || fail "CREATE accepted while drained"
