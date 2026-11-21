@@ -30,6 +30,11 @@ cat > "$tmp/host.mjs" <<'JS'
 import { appendFileSync, readFileSync } from 'node:fs';
 const ev = `${process.env.FAKE_DIR}/events`;
 const note = (s) => appendFileSync(ev, s + '\n');
+if (process.argv[2] === 'loadouts') {
+  note(`sync ${process.argv.slice(3).join(' ')} [${process.env.FLEET_LOADOUTS ?? ''}]`);
+  if (!process.env.FAKE_SYNC_HANG) process.exit(Number(process.env.FAKE_SYNC_EXIT ?? 0));
+  await new Promise(() => setInterval(() => undefined, 1000));
+}
 note('host-start');
 note(`dirs ${process.env.FLEET_HOST_STATE ?? ''} ${process.env.FLEET_HOST_PROJECTS ?? ''} ${process.env.HOME ?? ''}`);
 note(`env ${process.env.FLEET_HOST_CRED_TCP_PORT ?? ''} ${process.env.FLEET_HOST_MCP_TCP_PORT ?? ''} ${process.env.FLEET_HOST_REQUIRE_MESH ?? ''} ${process.env.FLEET_HOST_RESCAN_MS ?? ''}`);
@@ -59,9 +64,9 @@ run() {
   local args=("$mode"); [ "$mode" = none ] && args=()
   env -u CLAUDE_FLEET_BROKER_TCP_PORT -u CLAUDE_FLEET_BROKER_REQUIRE_MESH -u CLAUDE_FLEET_BROKER_DRAIN -u FLEET_HOST_CRED_ADDR -u CLAUDE_FLEET_BROKER_ADDR \
     -u FLEET_HOST_MCP_ADDR -u FLEET_HOST_CRED_TCP_PORT -u FLEET_HOST_MCP_TCP_PORT -u FLEET_HOST_REQUIRE_MESH -u FLEET_HOST_RESCAN_MS \
-    -u FLEET_MESH_READY_URL -u FLEET_HOST_STATE -u FLEET_HOST_PROJECTS \
+    -u FLEET_MESH_READY_URL -u FLEET_HOST_STATE -u FLEET_HOST_PROJECTS -u FLEET_LOADOUTS -u FLEET_LOADOUTS_TIMEOUT_S -u FLEET_LOADOUTS_RECORD \
     PATH="$tmp/bin:$PATH" FAKE_UID=1001 HOME=/home/fleet FAKE_DIR="$dir" FLEET_BROKER_BIN="$tmp/broker" FLEET_HOST_JS="$tmp/host.mjs" FLEET_HOST_PORT="$(free_port)" \
-    FLEET_HOST_BACKOFF_START_MS=20 FLEET_HOST_BACKOFF_MAX_MS=80 FLEET_WORKSPACE_UID=99999 "$@" \
+    FLEET_HOST_BACKOFF_START_MS=20 FLEET_HOST_BACKOFF_MAX_MS=80 FLEET_WORKSPACE_UID=99999 FLEET_LOADOUTS_RECORD="$dir/record.json" "$@" \
     bash "$here/fleet-host-entry" "${args[@]}" 2> "$dir/log" &
   pid=$!
 }
@@ -364,5 +369,38 @@ kill -TERM "$pid"; finish
 : > "$tmp/events"
 FAKE_DIR="$tmp" "$tmp/broker" drain; assert "$?" "0" "preStop command runs"
 grep -qx 'cli drain' "$tmp/events"; assert "$?" "0" "preStop reaches the broker CLI"
+
+# 32. workspace syncs the pinned loadouts before it execs the broker.
+run wsload workspace FAKE_UID=1000 FLEET_HOST_CRED_ADDR=h:1 FLEET_LOADOUTS='demo@1.0.0'
+until_count broker-start 1
+assert "$(head -1 "$dir/events")" "sync sync [demo@1.0.0]" "workspace runs the sync first"
+assert "$(head -1 "$dir/pids")" "$pid" "workspace still execs the broker after the sync"
+kill -TERM "$pid"; finish
+
+# 33. Nothing pinned and nothing recorded: no sync, no node.
+run wsnoload workspace FAKE_UID=1000 FLEET_HOST_CRED_ADDR=h:1
+until_count broker-start 1
+assert "$(grep -c '^sync ' "$dir/events")" "0" "no sync without pins or a record"
+kill -TERM "$pid"; finish
+
+# 34. Nothing pinned but a record exists: the sync runs so it can revert.
+mkdir -p "$tmp/case-wsrevert" && : > "$tmp/case-wsrevert/record.json"
+run wsrevert workspace FAKE_UID=1000 FLEET_HOST_CRED_ADDR=h:1
+until_count broker-start 1
+assert "$(grep -c '^sync sync \[\]$' "$dir/events")" "1" "a record alone runs the sync"
+kill -TERM "$pid"; finish
+
+# 35. A hung sync is cut at FLEET_LOADOUTS_TIMEOUT_S and the broker starts anyway.
+run wshang workspace FAKE_UID=1000 FLEET_HOST_CRED_ADDR=h:1 FLEET_LOADOUTS='demo@1.0.0' FLEET_LOADOUTS_TIMEOUT_S=1 FAKE_SYNC_HANG=1
+until_count broker-start 1
+assert "$(head -1 "$dir/pids")" "$pid" "workspace execs the broker after a hung sync"
+grep -q 'loadout sync timed out; starting the broker' "$dir/log"; assert "$?" "0" "sync timeout logged"
+kill -TERM "$pid"; finish
+
+# 36. A failing sync is logged and the broker starts.
+run wssyncfail workspace FAKE_UID=1000 FLEET_HOST_CRED_ADDR=h:1 FLEET_LOADOUTS='demo@1.0.0' FAKE_SYNC_EXIT=3
+until_count broker-start 1
+grep -q 'loadout sync exited; starting the broker' "$dir/log"; assert "$?" "0" "sync failure logged"
+kill -TERM "$pid"; finish
 
 [ "$fails" -eq 0 ] && echo "ALL PASS" || exit 1
