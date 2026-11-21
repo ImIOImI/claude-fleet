@@ -79,6 +79,17 @@ describe('workspace env via the model', () => {
     expect(await vault.revealValue('A', '01HW2')).toBeNull();
   });
 
+  it('a key named like an Object prototype member reads as absent until actually set, then round-trips', async () => {
+    expect(await vault.getRootValue('constructor')).toBeNull();
+    expect(await vault.revealValue('constructor', null)).toBeNull();
+    expect(await vault.getSecret('01HW1', 'constructor')).toBeNull();
+    await vault.putKey({ key: 'constructor', secret: true, tags: [], rootValue: 'v' });
+    expect(await vault.getRootValue('constructor')).toBe('v');
+    expect(await vault.revealValue('constructor', null)).toBe('v');
+    await vault.setLine('constructor', '01HW1', { mode: 'inherit' });
+    expect(await vault.revealValue('constructor', '01HW1')).toBe('v');
+  });
+
   it('writes throw when encryption is unavailable', async () => {
     encState.available = false;
     vault._resetVaultCacheForTests();

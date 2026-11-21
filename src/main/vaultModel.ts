@@ -56,8 +56,18 @@ function parseMeta(raw: string | undefined): KeyMeta | null {
   }
 }
 
+/** Own-property lookup: a bag's value for `key`, bypassing the Object prototype
+ *  so a key named e.g. `constructor`/`toString` reads as genuinely absent
+ *  rather than resolving to the inherited method. */
+export function hasOwnKey(bag: Record<string, string> | undefined, key: string): boolean {
+  return bag !== undefined && Object.hasOwn(bag, key);
+}
+function ownValue(bag: Record<string, string> | undefined, key: string): string | undefined {
+  return hasOwnKey(bag, key) ? bag![key] : undefined;
+}
+
 export function getMeta(s: Store, key: string): KeyMeta | null {
-  return parseMeta(s[APP_INDEX_SCOPE]?.[key]);
+  return parseMeta(ownValue(s[APP_INDEX_SCOPE], key));
 }
 
 /** Returns a new store with one scope replaced; an empty scope is dropped. */
@@ -99,20 +109,20 @@ function metaOrDefault(s: Store, key: string): KeyMeta {
 
 export function lineMode(s: Store, key: string, ws: string): LineMode | null {
   assertWorkspace(ws);
-  if (s[ws] && key in s[ws]) return 'override';
+  if (hasOwnKey(s[ws], key)) return 'override';
   return getMeta(s, key)?.inherit.includes(ws) ? 'inherit' : null;
 }
 
 export function listEntries(s: Store): ModelEntry[] {
   return allKeys(s).map((key) => {
     const meta = metaOrDefault(s, key);
-    const overrides = workspaceScopes(s).filter((ws) => key in (s[ws] ?? {}));
+    const overrides = workspaceScopes(s).filter((ws) => hasOwnKey(s[ws], key));
     const inherits = meta.inherit.filter((ws) => !overrides.includes(ws));
     const lines: ModelLine[] = [
       ...inherits.map((workspaceId) => ({ workspaceId, mode: 'inherit' as const })),
       ...overrides.map((workspaceId) => ({ workspaceId, mode: 'override' as const }))
     ].sort((a, b) => a.workspaceId.localeCompare(b.workspaceId));
-    return { key, meta, rootSet: key in (s[APP_ENV_SCOPE] ?? {}), lines };
+    return { key, meta, rootSet: hasOwnKey(s[APP_ENV_SCOPE], key), lines };
   });
 }
 
@@ -122,7 +132,7 @@ export function resolveWorkspaceEnv(s: Store, ws: string): Record<string, string
   const root = s[APP_ENV_SCOPE] ?? {};
   for (const key of Object.keys(s[APP_INDEX_SCOPE] ?? {})) {
     if (key === MIGRATED_MARKER) continue;
-    if (getMeta(s, key)?.inherit.includes(ws)) out[key] = root[key] ?? '';
+    if (getMeta(s, key)?.inherit.includes(ws)) out[key] = ownValue(root, key) ?? '';
   }
   return { ...out, ...(s[ws] ?? {}) };
 }
@@ -163,8 +173,8 @@ export function renameKey(s: Store, key: string, nextKey: string): Store {
   let next = s;
   for (const scope of [APP_ENV_SCOPE, APP_INDEX_SCOPE, ...workspaceScopes(s)]) {
     const bag = s[scope];
-    if (!bag || !(key in bag)) continue;
-    const v = bag[key];
+    const v = ownValue(bag, key);
+    if (v === undefined) continue;
     next = setBagValue(setBagValue(next, scope, key, null), scope, nextKey, v);
   }
   return next;
@@ -174,7 +184,7 @@ export function deleteKey(s: Store, key: string): Store {
   assertKey(key);
   let next = s;
   for (const scope of [APP_ENV_SCOPE, APP_INDEX_SCOPE, ...workspaceScopes(s)]) {
-    if (s[scope] && key in s[scope]) next = setBagValue(next, scope, key, null);
+    if (hasOwnKey(s[scope], key)) next = setBagValue(next, scope, key, null);
   }
   return next;
 }
@@ -269,7 +279,7 @@ export function migrateManifestEnv(
     for (const k of Object.keys(existingBag)) if (!relevant.has(k)) next = setBagValue(next, man.id, k, null);
     for (const k of relevant) {
       // a secret always wins over a same-named plain value, even an absent one ('' on no stored value)
-      const value = secretKeySet.has(k) ? existingBag[k] ?? '' : plain[k];
+      const value = secretKeySet.has(k) ? ownValue(existingBag, k) ?? '' : plain[k];
       next = setBagValue(next, man.id, k, value);
       secret.set(k, (secret.get(k) ?? false) || secretKeySet.has(k));
     }

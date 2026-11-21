@@ -748,28 +748,21 @@ const api = {
   vault: {
     /** Probe whether the OS keychain is reachable. Cached after first call. */
     available: (): Promise<boolean> => ipcRenderer.invoke('vault:available'),
-    /** Every vault entry: root value/state, tags, and per-workspace lines. Secret values are never included. */
+    /** Never includes a secret key's value. */
     list: (): Promise<VaultEntry[]> => ipcRenderer.invoke('vault:list'),
-    /** Fetch one value — the root when `workspaceId` is null, else that workspace's resolved value. */
+    /** `workspaceId: null` reveals the root value. */
     reveal: (key: string, workspaceId: string | null): Promise<string | null> =>
       ipcRenderer.invoke('vault:reveal', key, workspaceId),
-    /** Create or update a key's root value/secret flag/tags. */
     putKey: (a: { key: string; secret: boolean; tags: string[]; rootValue?: string | null }): Promise<void> =>
       ipcRenderer.invoke('vault:putKey', a),
     renameKey: (key: string, next: string): Promise<void> => ipcRenderer.invoke('vault:renameKey', key, next),
-    /** Delete a key everywhere: root, every line, and its metadata. */
     deleteKey: (key: string): Promise<void> => ipcRenderer.invoke('vault:deleteKey', key),
-    /** Set one workspace's line for a key to inherit the root or override it. */
     setLine: (key: string, workspaceId: string, line: { mode: 'inherit' } | { mode: 'override'; value: string }): Promise<void> =>
       ipcRenderer.invoke('vault:setLine', key, workspaceId, line),
-    /** Drop one workspace's line for a key (back to unset). */
     removeLine: (key: string, workspaceId: string): Promise<void> => ipcRenderer.invoke('vault:removeLine', key, workspaceId),
-    /** Copy every line from one workspace to another (new-workspace-from-template). */
     copyWorkspace: (from: string, to: string): Promise<void> => ipcRenderer.invoke('vault:copyWorkspace', from, to),
-    /** Apply a batch of line edits (and new-key creation) to one workspace. */
     applyWorkspaceEdits: (workspaceId: string, edits: VaultWorkspaceEdit[]): Promise<void> =>
       ipcRenderer.invoke('vault:applyWorkspaceEdits', workspaceId, edits),
-    /** Purge every line + inherit link for a workspace. Called on workspace delete. */
     deleteAllForWorkspace: (workspaceId: string): Promise<void> =>
       ipcRenderer.invoke('vault:deleteAllForWorkspace', workspaceId)
   },

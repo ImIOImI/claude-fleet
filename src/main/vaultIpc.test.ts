@@ -1,7 +1,5 @@
-// The renderer-facing vault:* IPC surface (#444 security review, app vault
-// task 5): every workspace id is run through `assertRendererWorkspaceId`, a
-// remote/unknown workspace is refused where writing to it wouldn't make
-// sense, and `vault:list` never leaks a secret's value.
+// vault:* IPC surface: renderer workspace ids are guarded, remote/unknown
+// workspaces refused for writes, and vault:list never returns secret values.
 import { describe, expect, it } from 'vitest';
 import { registerVaultIpc, type VaultIpcDeps, type VaultWorkspaceKind } from './vaultIpc.js';
 import * as model from './vaultModel.js';
@@ -11,6 +9,7 @@ import type { VaultEntry } from '../preload/vaultTypes.js';
 function setup() {
   let store: Store = {};
   const pending = new Set<string>();
+  const pendingCalls: string[] = [];
   const kinds: Record<string, VaultWorkspaceKind> = {};
   const handlers = new Map<string, (...args: unknown[]) => unknown>();
   const ipc = { handle: (ch: string, fn: (...args: unknown[]) => unknown) => void handlers.set(ch, fn) };
@@ -47,14 +46,17 @@ function setup() {
     deleteAllForWorkspace: async (ws) => {
       store = model.removeWorkspace(store, ws);
     },
-    pendingFor: async (ws) => pending.has(ws),
+    pendingFor: async (ws) => {
+      pendingCalls.push(ws);
+      return pending.has(ws);
+    },
     // default: an ordinary known workspace; tests pin 'remote' or null (no manifest yet) explicitly.
     workspaceKind: async (ws) => (ws in kinds ? kinds[ws] : 'container')
   };
 
   registerVaultIpc(ipc, deps);
   const call = (ch: string, ...args: unknown[]) => Promise.resolve().then(() => handlers.get(ch)!({}, ...args));
-  return { handlers, call, pending, kinds };
+  return { handlers, call, pending, pendingCalls, kinds };
 }
 
 const CHANNELS = [
@@ -100,6 +102,16 @@ describe('vault:* IPC', () => {
     await expect(call('vault:setLine', 'A', '01HREMOTE', { mode: 'inherit' })).rejects.toThrow(/remote/);
   });
 
+  it('applyWorkspaceEdits and copyWorkspace(to) refuse a remote workspace', async () => {
+    const { call, kinds } = setup();
+    kinds['01HREMOTE'] = 'remote';
+    await call('vault:putKey', { key: 'A', secret: false, tags: [], rootValue: 'v' });
+    await expect(
+      call('vault:applyWorkspaceEdits', '01HREMOTE', [{ key: 'A', op: 'inherit' }])
+    ).rejects.toThrow(/remote/);
+    await expect(call('vault:copyWorkspace', '01HW1', '01HREMOTE')).rejects.toThrow(/remote/);
+  });
+
   it('refuses setLine on a workspace with no manifest yet', async () => {
     const { call, kinds } = setup();
     kinds['01HUNKNOWN'] = null;
@@ -123,6 +135,31 @@ describe('vault:* IPC', () => {
     pending.add('01HW1');
     const list = (await call('vault:list')) as VaultEntry[];
     expect(list.find((e) => e.key === 'A')?.lines[0]).toMatchObject({ workspaceId: '01HW1', mode: 'inherit', pending: true });
+  });
+
+  it('caches pendingFor per workspace within one vault:list call', async () => {
+    const { call, pendingCalls } = setup();
+    await call('vault:putKey', { key: 'A', secret: false, tags: [], rootValue: 'a' });
+    await call('vault:putKey', { key: 'B', secret: false, tags: [], rootValue: 'b' });
+    await call('vault:setLine', 'A', '01HW1', { mode: 'inherit' });
+    await call('vault:setLine', 'B', '01HW1', { mode: 'inherit' });
+    pendingCalls.length = 0;
+    await call('vault:list');
+    expect(pendingCalls.filter((ws) => ws === '01HW1')).toHaveLength(1);
+  });
+
+  it('applyWorkspaceEdits validates each edit', async () => {
+    const { call } = setup();
+    await expect(call('vault:applyWorkspaceEdits', '01HW1', 'not-an-array')).rejects.toThrow(/array/);
+    await expect(
+      call('vault:applyWorkspaceEdits', '01HW1', [{ key: 'A', op: 'create', secret: 'no', asRoot: true, value: 'v', tags: [] }])
+    ).rejects.toThrow();
+    await expect(
+      call('vault:applyWorkspaceEdits', '01HW1', [{ key: 'A', op: 'create', secret: true, asRoot: 'false', value: 'v', tags: [] }])
+    ).rejects.toThrow();
+    await expect(
+      call('vault:applyWorkspaceEdits', '01HW1', [{ key: 'A', op: 'create', secret: true, asRoot: true, value: ['x'], tags: [] }])
+    ).rejects.toThrow();
   });
 
   it('putKey refuses a non-boolean secret flag and a non-string root value', async () => {

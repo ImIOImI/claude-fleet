@@ -120,7 +120,8 @@ export async function listKeys(workspaceId: string): Promise<string[]> {
 /** Fetch a secret value. Returns null if missing. */
 export async function getSecret(workspaceId: string, key: string): Promise<string | null> {
   const store = await load();
-  return store[workspaceId]?.[key] ?? null;
+  const bag = store[workspaceId];
+  return bag !== undefined && Object.hasOwn(bag, key) ? bag[key] : null;
 }
 
 /**
@@ -143,7 +144,7 @@ export async function deleteSecret(workspaceId: string, key: string): Promise<vo
   await withLock(async () => {
     const store = await load();
     const bag = store[workspaceId];
-    if (!bag || !(key in bag)) return;
+    if (bag === undefined || !Object.hasOwn(bag, key)) return;
     const next: Record<string, string> = { ...bag };
     delete next[key];
     const nextStore = { ...store };
@@ -166,7 +167,7 @@ export async function deleteAllForWorkspace(workspaceId: string): Promise<void> 
   }
   await withLock(async () => {
     const store = await load();
-    if (!(workspaceId in store)) return;
+    if (!Object.hasOwn(store, workspaceId)) return;
     const nextStore = { ...store };
     delete nextStore[workspaceId];
     await persist(nextStore);
@@ -195,13 +196,19 @@ export async function listModelEntries(): Promise<ModelEntry[]> {
 
 export async function getRootValue(key: string): Promise<string | null> {
   const s = await load();
-  return s[APP_ENV_SCOPE]?.[key] ?? null;
+  const root = s[APP_ENV_SCOPE];
+  return root !== undefined && Object.hasOwn(root, key) ? root[key] : null;
 }
 
 export async function revealValue(key: string, ws: string | null): Promise<string | null> {
   const s = await load();
-  if (ws === null) return s[APP_ENV_SCOPE]?.[key] ?? null;
-  return model.lineMode(s, key, ws) ? (model.resolveWorkspaceEnv(s, ws)[key] ?? null) : null;
+  if (ws === null) {
+    const root = s[APP_ENV_SCOPE];
+    return root !== undefined && Object.hasOwn(root, key) ? root[key] : null;
+  }
+  if (!model.lineMode(s, key, ws)) return null;
+  const resolved = model.resolveWorkspaceEnv(s, ws);
+  return Object.hasOwn(resolved, key) ? resolved[key] : null;
 }
 
 export function putKey(a: { key: string; secret: boolean; tags: string[]; rootValue?: string | null }): Promise<void> {

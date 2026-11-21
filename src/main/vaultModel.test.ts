@@ -276,3 +276,29 @@ describe('envHash', () => {
     expect(m.envHash({ A: '1' })).not.toBe(m.envHash({ A: '2' }));
   });
 });
+
+describe('prototype-member key names (constructor/__proto__/toString)', () => {
+  it('are valid keys', () => {
+    for (const k of ['constructor', '__proto__', 'toString']) expect(m.isValidKey(k)).toBe(true);
+  });
+
+  it('read as absent on an empty store, not as the inherited prototype member', () => {
+    const s = base();
+    expect(m.getMeta(s, 'constructor')).toBeNull();
+    expect(m.lineMode(s, 'constructor', W1)).toBeNull();
+    expect(Object.hasOwn(m.resolveWorkspaceEnv(s, W1), 'constructor')).toBe(false);
+    expect(m.listEntries(s)).toEqual([]);
+  });
+
+  it('a real constructor key round-trips through root, override, and rename', () => {
+    let s = m.putKey(base(), { key: 'constructor', secret: false, tags: [], rootValue: 'v' });
+    expect(s[APP_ENV_SCOPE]).toEqual({ constructor: 'v' });
+    expect(m.getMeta(s, 'constructor')).toEqual({ secret: false, inherit: [], tags: [] });
+    s = m.setLine(s, 'constructor', W1, { mode: 'override', value: 'o' });
+    expect(m.lineMode(s, 'constructor', W1)).toBe('override');
+    expect(m.resolveWorkspaceEnv(s, W1)).toEqual({ constructor: 'o' });
+    s = m.renameKey(s, 'constructor', 'RENAMED');
+    expect(m.getMeta(s, 'constructor')).toBeNull();
+    expect(m.getMeta(s, 'RENAMED')).toEqual({ secret: false, inherit: [], tags: [] });
+  });
+});

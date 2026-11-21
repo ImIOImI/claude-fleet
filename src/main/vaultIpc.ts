@@ -35,15 +35,9 @@ function assertKey(key: unknown): asserts key is string {
   if (!isValidKey(key)) throw new Error('invalid vault key');
 }
 
-/** `ws` may be null only where the caller explicitly allows it (reveal, and the
- *  pre-manifest paths below) — every other scope-taking channel requires a string. */
-function assertWorkspaceIdOrNull(ws: unknown): asserts ws is string | null {
-  if (ws !== null) assertRendererWorkspaceId(ws);
-}
-
 /** Refuse a remote workspace outright; `allowUnknown` lets `applyWorkspaceEdits`
  *  and `copyWorkspace`'s `to` run before `workspace:create` has written a manifest. */
-async function assertWritableKind(ws: string, kind: VaultWorkspaceKind, allowUnknown: boolean): Promise<void> {
+function assertWritableKind(kind: VaultWorkspaceKind, allowUnknown: boolean): void {
   if (kind === 'remote') throw new Error('cannot write vault lines for a remote workspace');
   if (kind === null && !allowUnknown) throw new Error('unknown workspace');
 }
@@ -59,7 +53,33 @@ function assertLineShape(line: unknown): asserts line is { mode: 'inherit' } | {
   throw new Error('invalid vault line mode');
 }
 
-async function toVaultEntry(deps: VaultIpcDeps, e: ModelEntry): Promise<VaultEntry> {
+const EDIT_OPS = new Set(['inherit', 'override', 'remove', 'create']);
+
+function assertEdit(e: unknown): asserts e is VaultWorkspaceEdit {
+  if (typeof e !== 'object' || e === null) throw new Error('invalid vault edit');
+  const obj = e as Record<string, unknown>;
+  assertKey(obj.key);
+  if (!EDIT_OPS.has(obj.op as string)) throw new Error('invalid vault edit op');
+  if ((obj.op === 'override' || obj.op === 'create') && typeof obj.value !== 'string') {
+    throw new Error('vault edit value must be a string');
+  }
+  if (obj.op === 'create' && (typeof obj.secret !== 'boolean' || typeof obj.asRoot !== 'boolean')) {
+    throw new Error('vault edit secret/asRoot must be booleans');
+  }
+}
+
+function assertEdits(edits: unknown): asserts edits is VaultWorkspaceEdit[] {
+  if (!Array.isArray(edits)) throw new Error('vault edits must be an array');
+  edits.forEach(assertEdit);
+}
+
+interface ToEntryDeps {
+  revealValue(key: string, ws: string | null): Promise<string | null>;
+  getRootValue(key: string): Promise<string | null>;
+  pendingFor(ws: string): Promise<boolean>;
+}
+
+async function toVaultEntry(deps: ToEntryDeps, e: ModelEntry): Promise<VaultEntry> {
   const lines: VaultLine[] = [];
   for (const line of e.lines) {
     const value = e.meta.secret ? undefined : ((await deps.revealValue(e.key, line.workspaceId)) ?? undefined);
@@ -81,7 +101,18 @@ export function registerVaultIpc(ipc: IpcHandleLike, deps: VaultIpcDeps): void {
 
   ipc.handle('vault:list', async () => {
     const entries = await deps.listModelEntries();
-    const out = await Promise.all(entries.map((e) => toVaultEntry(deps, e)));
+    // one pendingFor call per workspace per list, however many keys reference it
+    const pendingCache = new Map<string, Promise<boolean>>();
+    const pendingFor = (ws: string): Promise<boolean> => {
+      let p = pendingCache.get(ws);
+      if (!p) {
+        p = deps.pendingFor(ws);
+        pendingCache.set(ws, p);
+      }
+      return p;
+    };
+    const entryDeps: ToEntryDeps = { revealValue: deps.revealValue, getRootValue: deps.getRootValue, pendingFor };
+    const out = await Promise.all(entries.map((e) => toVaultEntry(entryDeps, e)));
     for (const fk of FLEET_KEYS) {
       if (!out.some((e) => e.key === fk.key)) {
         out.push({ key: fk.key, secret: fk.secret, tags: [], fleet: true, root: { set: false }, lines: [] });
@@ -92,7 +123,7 @@ export function registerVaultIpc(ipc: IpcHandleLike, deps: VaultIpcDeps): void {
 
   ipc.handle('vault:reveal', (_e, key: unknown, ws: unknown) => {
     assertKey(key);
-    assertWorkspaceIdOrNull(ws);
+    if (ws !== null) assertRendererWorkspaceId(ws);
     return deps.revealValue(key, ws);
   });
 
@@ -121,7 +152,7 @@ export function registerVaultIpc(ipc: IpcHandleLike, deps: VaultIpcDeps): void {
     assertKey(key);
     assertRendererWorkspaceId(ws);
     assertLineShape(line);
-    await assertWritableKind(ws, await deps.workspaceKind(ws), false);
+    assertWritableKind(await deps.workspaceKind(ws), false);
     return deps.setLine(key, ws, line);
   });
 
@@ -134,15 +165,15 @@ export function registerVaultIpc(ipc: IpcHandleLike, deps: VaultIpcDeps): void {
   ipc.handle('vault:copyWorkspace', async (_e, from: unknown, to: unknown) => {
     assertRendererWorkspaceId(from);
     assertRendererWorkspaceId(to);
-    await assertWritableKind(to, await deps.workspaceKind(to), true);
+    assertWritableKind(await deps.workspaceKind(to), true);
     return deps.copyWorkspace(from, to);
   });
 
   ipc.handle('vault:applyWorkspaceEdits', async (_e, ws: unknown, edits: unknown) => {
     assertRendererWorkspaceId(ws);
-    if (!Array.isArray(edits)) throw new Error('vault edits must be an array');
-    await assertWritableKind(ws, await deps.workspaceKind(ws), true);
-    return deps.applyWorkspaceEdits(ws, edits as VaultWorkspaceEdit[]);
+    assertEdits(edits);
+    assertWritableKind(await deps.workspaceKind(ws), true);
+    return deps.applyWorkspaceEdits(ws, edits);
   });
 
   ipc.handle('vault:deleteAllForWorkspace', (_e, ws: unknown) => {
