@@ -19,6 +19,18 @@ export function stage(state: StagedState, edit: VaultWorkspaceEdit): StagedState
   return { edits: [...others, create] };
 }
 
+export function discard(state: StagedState, key: string): StagedState {
+  return { edits: state.edits.filter((e) => e.key !== key) };
+}
+
+/** Secret override values are never sent down, so a secret override counts as set. */
+export function resolvesNonEmpty(e: VaultEntry, workspaceId: string): boolean {
+  const line = e.lines.find((l) => l.workspaceId === workspaceId);
+  if (!line) return false;
+  if (line.mode === 'inherit') return e.root.set && (e.secret || e.root.value !== '');
+  return e.secret || !!line.value;
+}
+
 function withLine(e: VaultEntry, line: VaultLine): VaultEntry {
   return { ...e, lines: [...e.lines.filter((l) => l.workspaceId !== line.workspaceId), line] };
 }
@@ -34,7 +46,9 @@ export function previewEntries(entries: VaultEntry[], workspaceId: string, stage
     const e = out.get(edit.key);
     if (edit.op === 'create') {
       if (e) {
-        out.set(edit.key, withLine(e, overrideLine(e, workspaceId, edit.value)));
+        const line: VaultLine =
+          edit.asRoot && e.root.set ? { workspaceId, mode: 'inherit', pending: false } : overrideLine(e, workspaceId, edit.value);
+        out.set(edit.key, withLine(e, line));
         continue;
       }
       const rootValue = edit.secret ? {} : { value: edit.value };

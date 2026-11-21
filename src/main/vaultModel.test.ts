@@ -202,6 +202,20 @@ describe('applyWorkspaceEdits', () => {
     expect(m.getMeta(s, 'R')).toEqual({ secret: true, inherit: [], tags: ['keep'] });
     expect(s[W1]?.R).toBe('mine');
   });
+  it('root-backed create on an existing key with a root value inherits it, meta untouched', () => {
+    let s = m.putKey(base(), { key: 'R', secret: true, tags: ['keep'], rootValue: 'r' });
+    s = m.applyWorkspaceEdits(s, W1, [{ key: 'R', op: 'create', secret: false, tags: [], value: 'mine', asRoot: true }]);
+    expect(m.lineMode(s, 'R', W1)).toBe('inherit');
+    expect(m.getMeta(s, 'R')).toEqual({ secret: true, inherit: [W1], tags: ['keep'] });
+    expect(m.resolveWorkspaceEnv(s, W1)).toEqual({ R: 'r' });
+  });
+  it('root-backed create on an existing key without a root value overrides', () => {
+    let s = m.putKey(base(), { key: 'R', secret: true, tags: ['keep'] });
+    s = m.applyWorkspaceEdits(s, W1, [{ key: 'R', op: 'create', secret: false, tags: [], value: 'mine', asRoot: true }]);
+    expect(m.lineMode(s, 'R', W1)).toBe('override');
+    expect(m.getMeta(s, 'R')).toEqual({ secret: true, inherit: [], tags: ['keep'] });
+    expect(s[W1]?.R).toBe('mine');
+  });
   it('override on a bag-only key creates default metadata instead of throwing', () => {
     const s: m.Store = { [W1]: { ORPHAN: 'v' } };
     const t = m.applyWorkspaceEdits(s, W1, [{ key: 'ORPHAN', op: 'override', value: 'v2' }]);

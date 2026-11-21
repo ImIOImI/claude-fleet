@@ -115,10 +115,13 @@ export function WorkspaceModal({
   const defaultTab = (): TabKey =>
     initialNewTabValues ? 'new' : saved.length > 0 ? 'saved' : 'new';
   const [tab, setTab] = useState<TabKey>(defaultTab());
+  // One id per modal open so a retried create reuses the vault lines already applied to it.
+  const [mintedId, setMintedId] = useState(() => ulid());
   const lastOpen = useRef(open);
   useEffect(() => {
     if (open && !lastOpen.current) {
       setTab(defaultTab());
+      setMintedId(ulid());
     }
     lastOpen.current = open;
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -185,7 +188,7 @@ export function WorkspaceModal({
     submit: WorkspaceFormSubmit,
     setStatus: (msg: string | null) => void
   ): Promise<void> => {
-    await onCreate({ ...submit, id: submit.id ?? ulid() }, setStatus);
+    await onCreate({ ...submit, id: submit.id ?? mintedId }, setStatus);
     onClose();
   };
 

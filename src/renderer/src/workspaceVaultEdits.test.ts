@@ -1,5 +1,5 @@
 import { expect, it } from 'vitest';
-import { previewEntries, rekeyLines, stage } from './workspaceVaultEdits';
+import { discard, previewEntries, rekeyLines, resolvesNonEmpty, stage } from './workspaceVaultEdits';
 import type { VaultEntry, VaultWorkspaceEdit } from '../../preload/vaultTypes';
 const root = (key: string): VaultEntry => ({ key, secret: true, tags: [], fleet: false, root: { set: true }, lines: [] });
 
@@ -54,4 +54,21 @@ it('rekeyLines copies a source workspace line onto the target', () => {
     { workspaceId: 'S', mode: 'override', pending: true },
     { workspaceId: 'T', mode: 'override', pending: false }
   ]);
+});
+it('discard drops every staged edit for a key', () => {
+  const create: VaultWorkspaceEdit = { key: 'N', op: 'create', secret: true, tags: [], value: 'r', asRoot: true };
+  const s = stage(stage(stage({ edits: [] }, create), { key: 'N', op: 'override', value: 'o' }), { key: 'A', op: 'inherit' });
+  expect(discard(s, 'N').edits).toEqual([{ key: 'A', op: 'inherit' }]);
+});
+it('preview of a root-backed create on an existing rooted key inherits, like main', () => {
+  const s = stage({ edits: [] }, { key: 'A', op: 'create', secret: false, tags: [], value: 'v', asRoot: true });
+  expect(previewEntries([root('A')], 'W1', s)[0].lines).toEqual([{ workspaceId: 'W1', mode: 'inherit', pending: false }]);
+});
+it('resolvesNonEmpty: override, or inherit with a root value', () => {
+  const line = (mode: 'inherit' | 'override', value?: string) => [{ workspaceId: 'W1', mode, value, pending: false }];
+  expect(resolvesNonEmpty({ ...root('A'), lines: line('inherit') }, 'W1')).toBe(true);
+  expect(resolvesNonEmpty({ ...root('A'), root: { set: false }, lines: line('inherit') }, 'W1')).toBe(false);
+  expect(resolvesNonEmpty({ ...root('A'), root: { set: false }, lines: line('override') }, 'W1')).toBe(true);
+  expect(resolvesNonEmpty({ ...root('A'), secret: false, lines: line('override', '') }, 'W1')).toBe(false);
+  expect(resolvesNonEmpty(root('A'), 'W1')).toBe(false);
 });

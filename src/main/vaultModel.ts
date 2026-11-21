@@ -253,6 +253,8 @@ export function applyWorkspaceEdits(s: Store, ws: string, edits: WorkspaceEdit[]
       if (!getMeta(next, e.key)) {
         next = putKey(next, { key: e.key, secret: e.secret, tags: e.tags, rootValue: e.asRoot ? e.value : undefined });
         next = setLine(next, e.key, ws, e.asRoot ? { mode: 'inherit' } : { mode: 'override', value: e.value });
+      } else if (e.asRoot && hasOwnKey(next[APP_ENV_SCOPE], e.key)) {
+        next = setLine(next, e.key, ws, { mode: 'inherit' });
       } else {
         next = setLine(next, e.key, ws, { mode: 'override', value: e.value });
       }

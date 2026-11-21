@@ -12,7 +12,7 @@ import {
   tagSuggestions,
   workspaceTag
 } from '../vaultView';
-import { previewEntries, rekeyLines, type StagedState } from '../workspaceVaultEdits';
+import { previewEntries, rekeyLines, resolvesNonEmpty, type StagedState } from '../workspaceVaultEdits';
 import { VaultKeyRow } from './VaultKeyRow';
 
 type Kind = 'container' | 'local' | 'remote';
@@ -29,10 +29,12 @@ interface Props {
   readOnly: boolean;
   staged: StagedState;
   onStage: (edit: VaultWorkspaceEdit) => void;
+  /** Drops every staged edit for a key. */
+  onDiscard: (key: string) => void;
   /** Saved workspace whose lines a clone will copy (display only; copied via vault:copyWorkspace). */
   cloneFrom?: string;
-  /** Keys this workspace will have once staged edits apply. */
-  onKeysChange?: (keys: string[]) => void;
+  /** Keys that will resolve non-empty here once staged edits apply. */
+  onResolvedKeysChange?: (keys: string[]) => void;
 }
 
 /** A value typed into this form, which the vault doesn't have yet. */
@@ -52,7 +54,7 @@ export function WorkspaceVaultSection(p: Props) {
   const [error, setError] = useState<string | null>(null);
   const [open, setOpen] = useState(false);
   const [text, setText] = useState('');
-  const ownTag = p.workspaceId ? workspaceTag(p.names[p.workspaceId] ?? '') : '';
+  const ownTag = p.workspaceId ? workspaceTag(p.names[p.workspaceId] ?? p.workspaceId) || workspaceTag(p.workspaceId) : '';
   const [selected, setSelected] = useState<string[]>(ownTag ? [ownTag] : []);
   const [adding, setAdding] = useState(false);
   const [newKey, setNewKey] = useState({ name: '', value: '', tags: '', secret: true, asRoot: false });
@@ -67,10 +69,12 @@ export function WorkspaceVaultSection(p: Props) {
     () => (p.workspaceId ? p.names : { ...p.names, [NEW_WORKSPACE_ID]: 'This workspace' }),
     [p.names, p.workspaceId]
   );
-  const preview = useMemo(() => {
-    const base = list ?? [];
-    return previewEntries(p.cloneFrom ? rekeyLines(base, p.cloneFrom, id) : base, id, p.staged);
-  }, [list, p.cloneFrom, id, p.staged]);
+  const base = useMemo(() => {
+    const l = list ?? [];
+    return p.cloneFrom ? rekeyLines(l, p.cloneFrom, id) : l;
+  }, [list, p.cloneFrom, id]);
+  const preview = useMemo(() => previewEntries(base, id, p.staged), [base, id, p.staged]);
+  const savedKeys = useMemo(() => new Set(entriesForWorkspace(base, id).map((e) => e.key)), [base, id]);
   const mine = useMemo(() => entriesForWorkspace(preview, id), [preview, id]);
   const unpublished = preview.filter((e) => !mine.includes(e));
   const tags = useMemo(() => allTags(mine, names), [mine, names]);
@@ -84,13 +88,18 @@ export function WorkspaceVaultSection(p: Props) {
     if (mine.length) setOpen(true);
   }, [list, autoOpened, mine.length]);
 
-  const keySignature = mine.map((e) => e.key).join('\n');
-  const { onKeysChange } = p;
+  const keySignature = mine
+    .filter((e) => resolvesNonEmpty(e, id))
+    .map((e) => e.key)
+    .join('\n');
+  const { onResolvedKeysChange } = p;
   useEffect(() => {
-    onKeysChange?.(keySignature ? keySignature.split('\n') : []);
-  }, [keySignature, onKeysChange]);
+    onResolvedKeysChange?.(keySignature ? keySignature.split('\n') : []);
+  }, [keySignature, onResolvedKeysChange]);
 
   const reveal = async (key: string, ws: string | null): Promise<string | null> => {
+    // A create on an existing key never touches its root value.
+    if (ws === null && list?.some((e) => e.key === key)) return vault.reveal(key, null);
     const typed = stagedValue(p.staged, key, ws === null);
     if (typed !== null) return typed;
     if (ws === null) return vault.reveal(key, null);
@@ -124,7 +133,7 @@ export function WorkspaceVaultSection(p: Props) {
       onSetLine={async (_ws, line) =>
         p.onStage(line.mode === 'inherit' ? { key: e.key, op: 'inherit' } : { key: e.key, op: 'override', value: line.value })
       }
-      onRemoveLine={async () => p.onStage({ key: e.key, op: 'remove' })}
+      onRemoveLine={async () => (savedKeys.has(e.key) ? p.onStage({ key: e.key, op: 'remove' }) : p.onDiscard(e.key))}
     />
   );
 

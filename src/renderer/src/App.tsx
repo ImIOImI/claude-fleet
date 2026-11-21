@@ -1165,6 +1165,7 @@ export function App() {
 
   /** Main resolves env from the vault at create/start, so this must run before either. */
   const applyVaultEdits = async (id: string, submit: WorkspaceFormSubmit): Promise<void> => {
+    if (workspaces.find((w) => w.id === id)?.kind === 'remote') return;
     if (submit.copyVaultFrom && submit.copyVaultFrom !== id) await window.api.vault.copyWorkspace(submit.copyVaultFrom, id);
     if (submit.vaultEdits.length) await window.api.vault.applyWorkspaceEdits(id, submit.vaultEdits);
   };
@@ -1186,24 +1187,31 @@ export function App() {
     await applyVaultEdits(id, submit);
 
     setStatus('Creating workspace…');
-    await window.api.workspace.create({
-      id,
-      name: submit.name,
-      description: submit.description,
-      labels: submit.labels,
-      color: submit.color,
-      workspaceSubdir: submit.workspaceSubdir,
-      kind,
-      workspaceRoot: submit.workspaceRoot,
-      launcher: submit.launcher,
-      image: submit.image,
-      authMode: submit.authMode,
-      endpointId: submit.endpointId,
-      env: { plain: {}, secretKeys: [] },
-      resources: submit.resources,
-      mounts: submit.mounts,
-      mirror: submit.mirror
-    });
+    try {
+      await window.api.workspace.create({
+        id,
+        name: submit.name,
+        description: submit.description,
+        labels: submit.labels,
+        color: submit.color,
+        workspaceSubdir: submit.workspaceSubdir,
+        kind,
+        workspaceRoot: submit.workspaceRoot,
+        launcher: submit.launcher,
+        image: submit.image,
+        authMode: submit.authMode,
+        endpointId: submit.endpointId,
+        env: { plain: {}, secretKeys: [] },
+        resources: submit.resources,
+        mounts: submit.mounts,
+        mirror: submit.mirror
+      });
+    } catch (err) {
+      // No manifest ⇒ no workspace owns the lines just applied.
+      const manifest = await window.api.workspace.getManifest(id).catch(() => undefined);
+      if (manifest === null) await window.api.vault.deleteAllForWorkspace(id).catch(() => undefined);
+      throw err;
+    }
     focusWorkspaceWhenWarm(id);
     if (assignRoleOnCreate && kind === 'container') {
       setAssignRoleOnCreate(false);
@@ -1376,6 +1384,8 @@ export function App() {
    */
   const openCloneFrom = (source: WorkspaceFormSubmit | WorkspaceSummary): void => {
     const isSummary = 'state' in source;
+    const sourceKind = (id: string) => workspaces.find((w) => w.id === id)?.kind;
+    const vaultSource = isSummary ? source.id : source.id ?? source.copyVaultFrom;
     const baseName = source.name;
     const clone: Partial<WorkspaceFormSubmit & { id: string }> = {
       // No id — WorkspaceModal.handleCreate mints a fresh ULID on submit.
@@ -1391,7 +1401,7 @@ export function App() {
       authMode: source.authMode,
       endpointId: source.endpointId,
       // A form submit's unsaved edits ride on top of its saved source's lines.
-      copyVaultFrom: isSummary ? source.id : source.id ?? source.copyVaultFrom,
+      copyVaultFrom: vaultSource && sourceKind(vaultSource) !== 'remote' ? vaultSource : undefined,
       vaultEdits: isSummary ? [] : source.vaultEdits,
       resources: source.resources,
       mounts: source.mounts,

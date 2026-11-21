@@ -26,7 +26,7 @@ import { eligibleAcceptFromManagers, ManagerGlyph } from './committee';
 import { ModelCombobox, type EndpointEntry } from './ModelCombobox';
 import type { InboxConfig } from '../../../preload';
 import type { VaultWorkspaceEdit } from '../../../preload/vaultTypes';
-import { stage, type StagedState } from '../workspaceVaultEdits';
+import { discard, stage, type StagedState } from '../workspaceVaultEdits';
 import { WorkspaceVaultSection } from './WorkspaceVaultSection';
 import type { CaptureSettings } from '../../../preload/captureSettings';
 import { defaultContainerPath, type ExtraMount } from '../../../preload/extraMounts';
@@ -216,7 +216,7 @@ export function WorkspaceForm({
   const [endpoints, setEndpoints] = useState<EndpointEntry[]>([]);
   const [endpointsLoaded, setEndpointsLoaded] = useState(false);
   const [staged, setStaged] = useState<StagedState>(() => ({ edits: initial?.vaultEdits ?? [] }));
-  const [envKeys, setEnvKeys] = useState<string[]>([]);
+  const [resolvedKeys, setResolvedKeys] = useState<string[]>([]);
   const [cpus, setCpus] = useState<string>(
     initial?.resources?.cpus != null ? String(initial.resources.cpus) : ''
   );
@@ -344,7 +344,9 @@ export function WorkspaceForm({
     );
   }, [launcherMode, wslDistro]);
 
-  const apiKeyAvailable = envKeys.includes('ANTHROPIC_API_KEY');
+  const apiKeyAvailable = resolvedKeys.includes('ANTHROPIC_API_KEY');
+  // workspaceToFormInitial maps remote → container for the form's kind radio.
+  const isRemote = !!initial?.id && workspaces.some((w) => w.id === initial.id && w.kind === 'remote');
   const workspaceNames = useMemo(() => Object.fromEntries(workspaces.map((w) => [w.id, w.name])), [workspaces]);
   const workspaceKinds = useMemo(() => Object.fromEntries(workspaces.map((w) => [w.id, w.kind])), [workspaces]);
 
@@ -488,8 +490,8 @@ export function WorkspaceForm({
       image: kind === 'container' ? image.trim() : undefined,
       authMode,
       endpointId,
-      vaultEdits: staged.edits,
-      copyVaultFrom: initial?.copyVaultFrom,
+      vaultEdits: isRemote ? [] : staged.edits,
+      copyVaultFrom: isRemote ? undefined : initial?.copyVaultFrom,
       resources,
       mounts: kind === 'container' ? mountsFromRows(mountRows) : undefined,
       mirror: { default: mirrorDefault, cleanup: cleanupDefault },
@@ -1018,17 +1020,25 @@ export function WorkspaceForm({
         </div>
       )}
 
-      <WorkspaceVaultSection
-        workspaceId={initial?.id ?? null}
-        names={workspaceNames}
-        kinds={workspaceKinds}
-        workspaces={workspaces}
-        readOnly={busy || vaultAvailable === false}
-        staged={staged}
-        onStage={(edit) => setStaged((s) => stage(s, edit))}
-        cloneFrom={initial?.id ? undefined : initial?.copyVaultFrom}
-        onKeysChange={setEnvKeys}
-      />
+      {isRemote ? (
+        <div className="form-row">
+          <label>Env vars</label>
+          <span className="form-hint">Remote workspaces can't receive env from the vault.</span>
+        </div>
+      ) : (
+        <WorkspaceVaultSection
+          workspaceId={initial?.id ?? null}
+          names={workspaceNames}
+          kinds={workspaceKinds}
+          workspaces={workspaces}
+          readOnly={busy || vaultAvailable === false}
+          staged={staged}
+          onStage={(edit) => setStaged((s) => stage(s, edit))}
+          onDiscard={(key) => setStaged((s) => discard(s, key))}
+          cloneFrom={initial?.id ? undefined : initial?.copyVaultFrom}
+          onResolvedKeysChange={setResolvedKeys}
+        />
+      )}
 
       {kind === 'container' && (
         <details
