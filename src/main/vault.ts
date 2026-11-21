@@ -40,6 +40,9 @@ function filePath(): string {
 // In-memory copy of the decrypted store. We own every write, so the cache
 // stays authoritative once loaded.
 let cache: Store | null = null;
+// Set when secrets.enc exists but can't be decrypted/parsed (e.g. keychain key
+// changed). Writes are refused so the unreadable file is never clobbered.
+let loadFailed = false;
 
 function isStore(v: unknown): v is Store {
   return typeof v === 'object' && v !== null && !Array.isArray(v);
@@ -47,23 +50,35 @@ function isStore(v: unknown): v is Store {
 
 async function load(): Promise<Store> {
   if (cache) return cache;
+  let b64: string;
   try {
-    const b64 = await readFile(filePath(), 'utf8');
-    if (!b64.trim()) {
-      cache = {};
-      return cache;
-    }
-    const decrypted = safeStorage.decryptString(Buffer.from(b64, 'base64'));
-    const parsed = JSON.parse(decrypted) as unknown;
-    cache = isStore(parsed) ? parsed : {};
+    b64 = await readFile(filePath(), 'utf8');
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code !== 'ENOENT') loadFailed = true;
+    cache = {};
+    return cache;
+  }
+  if (!b64.trim()) {
+    cache = {};
+    return cache;
+  }
+  try {
+    const parsed = JSON.parse(safeStorage.decryptString(Buffer.from(b64, 'base64'))) as unknown;
+    if (!isStore(parsed)) throw new Error('vault payload is not an object');
+    cache = parsed;
   } catch {
-    // Missing file, undecryptable (key changed), or malformed → empty vault.
+    loadFailed = true;
     cache = {};
   }
   return cache;
 }
 
+function assertWritable(): void {
+  if (loadFailed) throw new Error("Vault file can't be decrypted; refusing to overwrite it.");
+}
+
 async function persist(store: Store): Promise<void> {
+  assertWritable();
   cache = store;
   const buf = safeStorage.encryptString(JSON.stringify(store));
   await writeFile(filePath(), buf.toString('base64'), 'utf8');
@@ -134,6 +149,7 @@ export async function setSecret(workspaceId: string, key: string, value: string)
   }
   await withLock(async () => {
     const store = await load();
+    assertWritable();
     const bag = { ...(store[workspaceId] ?? {}), [key]: value };
     await persist({ ...store, [workspaceId]: bag });
   });
@@ -143,6 +159,7 @@ export async function setSecret(workspaceId: string, key: string, value: string)
 export async function deleteSecret(workspaceId: string, key: string): Promise<void> {
   await withLock(async () => {
     const store = await load();
+    assertWritable();
     const bag = store[workspaceId];
     if (bag === undefined || !Object.hasOwn(bag, key)) return;
     const next: Record<string, string> = { ...bag };
@@ -167,6 +184,7 @@ export async function deleteAllForWorkspace(workspaceId: string): Promise<void> 
   }
   await withLock(async () => {
     const store = await load();
+    assertWritable();
     if (!Object.hasOwn(store, workspaceId)) return;
     const nextStore = { ...store };
     delete nextStore[workspaceId];
@@ -184,6 +202,7 @@ async function mutate(fn: (s: Store) => Store): Promise<void> {
   }
   await withLock(async () => {
     const store = await load();
+    assertWritable();
     const next = fn(store);
     if (next === store) return;
     await persist(next);
@@ -248,6 +267,10 @@ export async function workspaceKeys(ws: string): Promise<{ key: string; secret: 
   return model.workspaceKeys(await load(), ws);
 }
 
+export async function workspaceProvidedKeys(ws: string): Promise<string[]> {
+  return model.workspaceProvidedKeys(await load(), ws);
+}
+
 export async function workspaceSecretValues(ws: string): Promise<{ key: string; value: string }[]> {
   return model.workspaceSecretValues(await load(), ws);
 }
@@ -273,6 +296,7 @@ export async function isMigrated(): Promise<boolean> {
 /** Test-only: drop the in-memory cache + probe + encryption-ensured flag so a fresh read/probe hits disk. */
 export function _resetVaultCacheForTests(): void {
   cache = null;
+  loadFailed = false;
   probeResult = null;
   encryptionEnsured = false;
 }

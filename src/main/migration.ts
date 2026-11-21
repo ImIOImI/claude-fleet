@@ -66,8 +66,9 @@ export async function runStartupMigration(): Promise<void> {
 
 /**
  * One-shot: move every manifest's `env.plain`/`env.secretKeys` into the vault,
- * then rewrite the manifest with env cleared. Main never writes manifest env
- * again after this (ipc.ts forces it empty on create/writeManifest).
+ * then rewrite the manifest with env cleared. Once migrated, ipc.ts forces
+ * manifest env empty on create/writeManifest. A failed migrate (e.g. an
+ * undecryptable vault) throws before any manifest is cleared.
  *
  * Re-run safe: `deps.migrate` no-ops (returns false) once the vault's
  * `__migrated__` marker is set, but manifests are still swept and cleared —
@@ -95,6 +96,12 @@ export async function migrateEnvToVault(
       await deps.write({ ...m, env: { plain: {}, secretKeys: [] } });
     }
   }
+}
+
+/** Manifest env to persist on a renderer write: untouched until the vault
+ *  migration has captured it, empty afterwards. */
+export function manifestEnvOnWrite(migrated: boolean, existing: WorkspaceSpec['env'] | undefined): WorkspaceSpec['env'] {
+  return !migrated && existing ? existing : { plain: {}, secretKeys: [] };
 }
 
 /**

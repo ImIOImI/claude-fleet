@@ -3,7 +3,7 @@
 // workspaces use ipc.ts's host-trusted functions (no committee gate).
 import { app, BrowserWindow, ipcMain } from 'electron';
 import path from 'node:path';
-import { resolveWorkspaceEnv, workspaceKeys } from '../vault.js';
+import { resolveWorkspaceEnv, workspaceProvidedKeys } from '../vault.js';
 import { assertNotReservedVaultScope } from '../vaultScopes.js';
 import { setLoadoutAutomationHooks, setLoadoutChangeListener } from '../loadouts.js';
 import { prepareLoadoutAutomations, readLoadoutAutomations, readLoadoutVersion } from './loadoutAutomations.js';
@@ -126,7 +126,7 @@ export function registerAutomationIpc(inbox: InboxStore, notify: NotifyService |
     // automations workspace id, which should already be an ordinary workspace
     // id, but a script step secret is read on a less-trusted path than a
     // container's own env, so this is defence in depth (#444 final review M6).
-    secret: (ws, key) => { assertNotReservedVaultScope(ws); return resolveWorkspaceEnv(ws).then((e) => e[key] ?? null); },
+    secret: (ws, key) => { assertNotReservedVaultScope(ws); return resolveWorkspaceEnv(ws).then((e) => (Object.hasOwn(e, key) ? e[key] : null)); },
     emitTodo: async (id, runId, input) => { if (!sink) throw new Error('the inbox is unavailable'); await sink.todoFromAutomation(id, runId, input); },
     emitNotify: async (id, runId, input) => { if (!sink) throw new Error('the inbox is unavailable'); await sink.notifyFromAutomation(id, runId, input); },
     resolveWorkspace: resolveLocal,
@@ -169,7 +169,7 @@ export function registerAutomationIpc(inbox: InboxStore, notify: NotifyService |
     if (!sources.length) return [];
     const keys = new Map<string, string[]>();
     for (const ws of new Set([workspaceId, ...(roleWs ? [roleWs] : []), ...localWorkspaces(names).map((n) => n.id)])) {
-      keys.set(ws, await workspaceKeys(ws).then((ks) => ks.map((k) => k.key)).catch(() => []));
+      keys.set(ws, await workspaceProvidedKeys(ws).catch(() => []));
     }
     await refreshShells();
     return prepareLoadoutAutomations(sources, workspaceId, { workspace: resolveLocal, refusal: refuseRemote, hostShells: hostShellIds() },

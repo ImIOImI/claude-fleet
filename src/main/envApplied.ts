@@ -26,3 +26,21 @@ export async function readEnvApplied(workspaceId: string): Promise<string | null
     return null;
   }
 }
+
+/** True when the env last applied differs from the vault's current resolution.
+ *  A local workspace's env only applies to a running process, so a stopped
+ *  one is never pending; a container keeps its env until recreated. */
+export async function isEnvPending(
+  ws: string,
+  d: {
+    kind: (ws: string) => Promise<'container' | 'local' | 'remote' | null>;
+    localLive: (ws: string) => Promise<boolean>;
+    applied: (ws: string) => Promise<string | null>;
+    current: (ws: string) => Promise<Record<string, string>>;
+  }
+): Promise<boolean> {
+  const h = await d.applied(ws);
+  if (h === null) return false;
+  if ((await d.kind(ws)) === 'local' && !(await d.localLive(ws))) return false;
+  return h !== envHash(await d.current(ws));
+}

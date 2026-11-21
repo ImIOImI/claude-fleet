@@ -1,6 +1,7 @@
 // Unit tests for the small, Docker/broker-free async helpers in docker.ts.
 // docker.ts imports fine with no daemon present (dockerode's constructor
 // doesn't connect eagerly) — only electron needs a stub.
+import { readFileSync } from 'node:fs';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 vi.mock('electron', () => ({
@@ -58,9 +59,9 @@ describe('recordResumeUsageQuietly', () => {
   });
 });
 
-// Review finding: a disk error recording env-applied must not abort
-// container create (it's awaited at the create call site), matching
-// ensureContainerRetention's catch-and-log containment.
+// A disk error recording env-applied must not abort container create (it's
+// awaited at the create call site), matching ensureContainerRetention's
+// catch-and-log containment.
 describe('recordEnvAppliedQuietly', () => {
   it('resolves once the write settles', async () => {
     recordEnvAppliedMock.mockResolvedValue(undefined);
@@ -83,5 +84,15 @@ describe('recordEnvAppliedQuietly', () => {
       message: 'Error: disk full',
       workspaceId: 'ws-a'
     });
+  });
+});
+
+describe('env-applied record timing', () => {
+  it('records only after createContainer succeeds', () => {
+    const src = readFileSync(new URL('./docker.ts', import.meta.url), 'utf8');
+    const created = src.indexOf('await docker.createContainer({');
+    const recorded = src.indexOf('await recordEnvAppliedQuietly(spec.id, workspaceEnv);');
+    expect(created).toBeGreaterThan(-1);
+    expect(recorded).toBeGreaterThan(created);
   });
 });

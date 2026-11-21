@@ -270,8 +270,8 @@ export class IdentityService {
   }
 
   /** Runs inside `serial`; dropped if the vault PAT changed since the probe. */
-  private async recordProbe(sha: string, r: PatProbe, refresh: boolean): Promise<void> {
-    if (this.patInflight?.sha === sha) this.patInflight = null;
+  private async recordProbe(sha: string, p: Promise<PatProbe>, r: PatProbe, refresh: boolean): Promise<void> {
+    if (this.patInflight?.p === p) this.patInflight = null;
     const pat = await this.currentPat();
     if (!pat || sha256(pat) !== sha) return;
     if (r.ok) {
@@ -350,8 +350,9 @@ export class IdentityService {
       const step = await this.serial(() => this.loadStep());
       if (!step.verify) return step.saved;
       const { pat, sha } = step.verify;
-      const r = await this.probePat(pat, sha);
-      await this.serial(() => this.recordProbe(sha, r, false));
+      const p = this.probePat(pat, sha);
+      const r = await p;
+      await this.serial(() => this.recordProbe(sha, p, r, false));
     }
     // The PAT kept changing under us.
     return this.serial(() => this.loadDevice());
@@ -375,8 +376,9 @@ export class IdentityService {
   /** Probes even a rejected or backed-off PAT. */
   private async refreshPat(pat: string): Promise<Saved | null> {
     const sha = sha256(pat);
-    const r = await this.probePat(pat, sha);
-    await this.serial(() => this.recordProbe(sha, r, true));
+    const p = this.probePat(pat, sha);
+    const r = await p;
+    await this.serial(() => this.recordProbe(sha, p, r, true));
     return this.settled();
   }
 
@@ -444,6 +446,7 @@ export class IdentityService {
           if (!(await this.revoke(saved.token))) return this.toStatus(await this.settled());
           saved = null;
           this.notice = REVOKED_NOTICE;
+          this.patNotice = false;
         } else if (epoch !== this.epoch) {
           return this.toStatus(await this.settled());
         } else {

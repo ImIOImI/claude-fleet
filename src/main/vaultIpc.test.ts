@@ -1,7 +1,7 @@
 // vault:* IPC surface: renderer workspace ids are guarded, remote/unknown
 // workspaces refused for writes, and vault:list never returns secret values.
 import { describe, expect, it } from 'vitest';
-import { registerVaultIpc, type VaultIpcDeps, type VaultWorkspaceKind } from './vaultIpc.js';
+import { registerVaultIpc, resolveVaultWorkspaceKind, type VaultIpcDeps, type VaultWorkspaceKind } from './vaultIpc.js';
 import * as model from './vaultModel.js';
 import type { Store } from './vaultModel.js';
 import type { VaultEntry } from '../preload/vaultTypes.js';
@@ -10,6 +10,7 @@ function setup() {
   let store: Store = {};
   const pending = new Set<string>();
   const pendingCalls: string[] = [];
+  const putKeyCalls: { key: string; secret: boolean }[] = [];
   const kinds: Record<string, VaultWorkspaceKind> = {};
   const handlers = new Map<string, (...args: unknown[]) => unknown>();
   const ipc = { handle: (ch: string, fn: (...args: unknown[]) => unknown) => void handlers.set(ch, fn) };
@@ -23,6 +24,7 @@ function setup() {
       return model.lineMode(store, key, ws) ? (model.resolveWorkspaceEnv(store, ws)[key] ?? null) : null;
     },
     putKey: async (a) => {
+      putKeyCalls.push(a);
       store = model.putKey(store, a);
     },
     renameKey: async (key, next) => {
@@ -56,7 +58,7 @@ function setup() {
 
   registerVaultIpc(ipc, deps);
   const call = (ch: string, ...args: unknown[]) => Promise.resolve().then(() => handlers.get(ch)!({}, ...args));
-  return { handlers, call, pending, pendingCalls, kinds };
+  return { handlers, call, pending, pendingCalls, kinds, putKeyCalls };
 }
 
 const CHANNELS = [
@@ -174,5 +176,35 @@ describe('vault:* IPC', () => {
     await expect(call('vault:renameKey', 'bad key', 'OK')).rejects.toThrow(/key/);
     await expect(call('vault:deleteKey', 'bad key')).rejects.toThrow(/key/);
     await expect(call('vault:removeLine', 'bad key', '01HW1')).rejects.toThrow(/key/);
+  });
+});
+
+describe('fleet keys keep their registry secret flag', () => {
+  it('vault:putKey forces a fleet key to its registry secret flag', async () => {
+    const { call, putKeyCalls } = setup();
+    await call('vault:putKey', { key: 'GITHUB_TOKEN', secret: false, tags: [], rootValue: 'ghp_x' });
+    expect(putKeyCalls.at(-1)).toMatchObject({ key: 'GITHUB_TOKEN', secret: true });
+    const list = (await call('vault:list')) as VaultEntry[];
+    expect(JSON.stringify(list)).not.toContain('ghp_x');
+  });
+
+  it('leaves a non-fleet key\'s flag as given', async () => {
+    const { call, putKeyCalls } = setup();
+    await call('vault:putKey', { key: 'OTHER', secret: false, tags: [] });
+    expect(putKeyCalls.at(-1)).toMatchObject({ key: 'OTHER', secret: false });
+  });
+});
+
+describe('resolveVaultWorkspaceKind', () => {
+  const mockList = async () => [{ id: 'mock-1', kind: 'local' as const }];
+  it('prefers the manifest kind', async () => {
+    expect(await resolveVaultWorkspaceKind('mock-1', { manifestKind: async () => 'container', mockWorkspaces: mockList })).toBe('container');
+  });
+  it('falls back to the mock workspace kind when there is no manifest', async () => {
+    expect(await resolveVaultWorkspaceKind('mock-1', { manifestKind: async () => null, mockWorkspaces: mockList })).toBe('local');
+    expect(await resolveVaultWorkspaceKind('nope', { manifestKind: async () => null, mockWorkspaces: mockList })).toBeNull();
+  });
+  it('is null without a manifest outside mock mode', async () => {
+    expect(await resolveVaultWorkspaceKind('mock-1', { manifestKind: async () => null })).toBeNull();
   });
 });

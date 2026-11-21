@@ -139,6 +139,16 @@ export function workspaceKeys(s: Store, ws: string): { key: string; secret: bool
   return Object.keys(resolveWorkspaceEnv(s, ws)).sort().map((key) => ({ key, secret: metaOrDefault(s, key).secret }));
 }
 
+/** Keys that resolve to a value for `ws`: an inherit line counts only when
+ *  its root value is non-empty; an override always counts. */
+export function workspaceProvidedKeys(s: Store, ws: string): string[] {
+  const root = s[APP_ENV_SCOPE] ?? {};
+  const bag = s[ws] ?? {};
+  return Object.keys(resolveWorkspaceEnv(s, ws))
+    .filter((key) => hasOwnKey(bag, key) || Boolean(ownValue(root, key)))
+    .sort();
+}
+
 export function workspaceSecretValues(s: Store, ws: string): { key: string; value: string }[] {
   const env = resolveWorkspaceEnv(s, ws);
   return Object.keys(env)

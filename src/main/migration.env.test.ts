@@ -1,9 +1,9 @@
-// Unit tests for the manifest-env → vault migration (Task 6).
-import { expect, it, vi } from 'vitest';
+// Unit tests for the manifest-env → vault migration.
+import { describe, expect, it, vi } from 'vitest';
 
 vi.mock('electron', () => ({ app: { getPath: () => '/tmp' }, safeStorage: {} }));
 
-const { migrateEnvToVault } = await import('./migration.js');
+const { manifestEnvOnWrite, migrateEnvToVault } = await import('./migration.js');
 
 const ws = (id: string, plain: Record<string, string>, secretKeys: string[]) =>
   ({ id, env: { plain, secretKeys } }) as never;
@@ -48,4 +48,30 @@ it('still clears manifests on a re-run (crash between migrate and write)', async
     available: async () => true
   });
   expect(written).toHaveLength(1);
+});
+
+it('leaves manifests intact when the vault migrate fails', async () => {
+  const write = vi.fn();
+  await expect(
+    migrateEnvToVault({
+      list: async () => [ws('01HW1', { P: '1' }, ['S'])],
+      write,
+      migrate: async () => {
+        throw new Error("Vault file can't be decrypted; refusing to overwrite it.");
+      },
+      available: async () => true
+    })
+  ).rejects.toThrow(/can't be decrypted/);
+  expect(write).not.toHaveBeenCalled();
+});
+
+describe('manifestEnvOnWrite', () => {
+  const existing = { plain: { P: '1' }, secretKeys: ['S'] };
+  it('keeps the on-disk env until the vault is migrated', () => {
+    expect(manifestEnvOnWrite(false, existing)).toEqual(existing);
+    expect(manifestEnvOnWrite(false, undefined)).toEqual({ plain: {}, secretKeys: [] });
+  });
+  it('forces env empty once migrated', () => {
+    expect(manifestEnvOnWrite(true, existing)).toEqual({ plain: {}, secretKeys: [] });
+  });
 });

@@ -584,7 +584,6 @@ async function createWorkspaceInner(spec: CreateWorkspaceInput): Promise<Workspa
   // edits/key rotation apply on next create.
   const backendVars = spec.authMode === 'endpoint' ? await endpointEnv(spec.endpointId) : {};
   const workspaceEnv = await resolveWorkspaceEnv(spec.id);
-  await recordEnvAppliedQuietly(spec.id, workspaceEnv);
   const resolvedEnv = { ...backendVars, ...workspaceEnv };
   const envArr = ['HOME=/home/fleet', ...Object.entries(resolvedEnv).map(([k, v]) => `${k}=${v}`)];
   // Windows: tell the broker to listen on loopback TCP instead of a unix
@@ -709,6 +708,7 @@ async function createWorkspaceInner(spec: CreateWorkspaceInput): Promise<Workspa
     },
     HostConfig: hostCfg
   });
+  await recordEnvAppliedQuietly(spec.id, workspaceEnv);
 
   await created.start();
   const info = await created.inspect();

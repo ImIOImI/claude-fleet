@@ -89,10 +89,10 @@ import {
   setPortExposureHandlers,
 } from './mcpServer.js';
 import * as vault from './vault.js';
+import { manifestEnvOnWrite } from './migration.js';
 import { assertRendererWorkspaceId } from './vaultScopes.js';
-import { registerVaultIpc, type VaultIpcDeps, type VaultWorkspaceKind } from './vaultIpc.js';
-import { readEnvApplied } from './envApplied.js';
-import { envHash } from './vaultModel.js';
+import { registerVaultIpc, resolveVaultWorkspaceKind, type VaultIpcDeps, type VaultWorkspaceKind } from './vaultIpc.js';
+import { isEnvPending, readEnvApplied } from './envApplied.js';
 import { IdentityService } from './identity/identityService.js';
 import { BUILTIN_GITHUB_CLIENT_ID, GITHUB_CLIENT_ID_ENV } from './identity/clientId.js';
 import { readGithubClientId, registerGithubClientIdIpc, type GithubClientIdDeps } from './githubClientIdIpc.js';
@@ -1369,7 +1369,7 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
     'workspace:create',
     async (_e, input: WorkspaceCreatePayload) => {
       // The id becomes this workspace's vault scope (resolveWorkspaceEnv
-      // injects that bag into its env), so it may never name a host-only scope (#444).
+      // injects that bag into its env), so it may never name a host-only scope.
       assertRendererWorkspaceId(input?.id);
       const prior = await readWorkspaceManifest(input.id);
       assertNotRemoteSpec(input.kind, prior);
@@ -1447,8 +1447,7 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
           input.terminalRenderer === 'webgl'
             ? input.terminalRenderer
             : undefined,
-        // Never persisted: secrets live in the vault.
-        env: { plain: {}, secretKeys: [] },
+        env: manifestEnvOnWrite(await vault.isMigrated(), prior?.env),
         resources: input.resources,
         mounts,
         mirror: input.mirror ?? FACTORY_MIRROR,
@@ -1702,8 +1701,7 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
         launcher: incomingLauncher,
         mounts,
         publish,
-        // Never persisted: secrets live in the vault.
-        env: { plain: {}, secretKeys: [] },
+        env: manifestEnvOnWrite(await vault.isMigrated(), existing?.env),
         remote: undefined
       });
       for (const id of existing?.publish?.to ?? []) if (!publish?.to.includes(id)) await deletePublishCursor(spec.id, id);
@@ -2226,6 +2224,10 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
 
   // Per-workspace vault (vault:*): the guarded surface lives in vaultIpc.ts so
   // its fail-closed scope/key checks unit-test without electron (#444).
+  const vaultWorkspaceKind = (ws: string): Promise<VaultWorkspaceKind> => resolveVaultWorkspaceKind(ws, {
+    manifestKind: async (id) => (await readWorkspaceManifest(id))?.kind ?? null,
+    mockWorkspaces: MOCK_MODE ? () => mockDocker.listLiveWorkspaces() : undefined
+  });
   const vaultIpcDeps: VaultIpcDeps = {
     isVaultAvailable: vault.isVaultAvailable,
     listModelEntries: vault.listModelEntries,
@@ -2239,11 +2241,13 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
     copyWorkspace: vault.copyWorkspace,
     applyWorkspaceEdits: vault.applyWorkspaceEdits,
     deleteAllForWorkspace: vault.deleteAllForWorkspace,
-    pendingFor: async (ws: string) => {
-      const h = await readEnvApplied(ws);
-      return h !== null && h !== envHash(await vault.resolveWorkspaceEnv(ws));
-    },
-    workspaceKind: async (ws: string): Promise<VaultWorkspaceKind> => (await readWorkspaceManifest(ws))?.kind ?? null
+    pendingFor: (ws: string) => isEnvPending(ws, {
+      kind: vaultWorkspaceKind,
+      localLive: async (id) => (await localBackend.listLiveWorkspaces()).some((w) => w.id === id && w.state !== 'stopped'),
+      applied: readEnvApplied,
+      current: vault.resolveWorkspaceEnv
+    }),
+    workspaceKind: vaultWorkspaceKind
   };
   registerVaultIpc(ipcMain, vaultIpcDeps);
 

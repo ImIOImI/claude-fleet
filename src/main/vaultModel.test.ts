@@ -118,6 +118,16 @@ describe('lines and resolution', () => {
     expect(m.workspaceKeys(s, W1)).toEqual([{ key: 'A', secret: true }, { key: 'P', secret: false }]);
     expect(m.workspaceSecretValues(s, W1)).toEqual([{ key: 'A', value: 'root' }]);
   });
+  it('workspaceProvidedKeys drops inherit lines whose root value is unset or empty', () => {
+    let s = m.putKey(base(), { key: 'SET', secret: true, tags: [], rootValue: 'v' });
+    s = m.putKey(s, { key: 'EMPTY', secret: true, tags: [], rootValue: '' });
+    s = m.putKey(s, { key: 'UNSET', secret: true, tags: [] });
+    s = m.putKey(s, { key: 'OVR', secret: false, tags: [] });
+    for (const k of ['SET', 'EMPTY', 'UNSET']) s = m.setLine(s, k, W1, { mode: 'inherit' });
+    s = m.setLine(s, 'OVR', W1, { mode: 'override', value: 'o' });
+    expect(m.workspaceProvidedKeys(s, W1)).toEqual(['OVR', 'SET']);
+    expect(m.workspaceKeys(s, W1).map((k) => k.key)).toEqual(['EMPTY', 'OVR', 'SET', 'UNSET']);
+  });
   it('refuses reserved scopes as workspaces', () => {
     expect(() => m.resolveWorkspaceEnv(seeded(), 'app:env')).toThrow(/reserved/);
     expect(() => m.setLine(seeded(), 'A', 'endpoint:x', { mode: 'inherit' })).toThrow(/reserved/);

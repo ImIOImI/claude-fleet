@@ -32,4 +32,9 @@ describe('automation secret guard wiring (#444 final review M6)', () => {
     expect(line!.indexOf('assertNotReservedVaultScope(ws)')).toBeGreaterThan(-1);
     expect(line!.indexOf('assertNotReservedVaultScope(ws)')).toBeLessThan(line!.indexOf('resolveWorkspaceEnv(ws)'));
   });
+
+  it('reads the key as an own property, so a prototype-named key resolves to null', () => {
+    const line = src.split('\n').find((l) => l.includes('secret: (ws, key)'));
+    expect(line).toContain('Object.hasOwn(e, key) ? e[key] : null');
+  });
 });

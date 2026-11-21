@@ -1,5 +1,5 @@
 // The renderer-facing vault:* IPC surface: root/override/tag CRUD over the
-// app vault (#444), plus the Fleet key registry merged into `vault:list`.
+// app vault, plus the Fleet key registry merged into `vault:list`.
 import { assertRendererWorkspaceId } from './vaultScopes.js';
 import { isValidKey, type ModelEntry, type WorkspaceEdit } from './vaultModel.js';
 import { FLEET_KEYS, FLEET_KEY_NAMES } from '../preload/fleetKeys.js';
@@ -24,6 +24,17 @@ export interface VaultIpcDeps {
   pendingFor(ws: string): Promise<boolean>;
   /** Manifest `kind`, or null when no manifest exists yet (mid-`workspace:create`). */
   workspaceKind(ws: string): Promise<VaultWorkspaceKind>;
+}
+
+/** Manifest kind, else (mock mode, where seeded workspaces have no manifest)
+ *  the mock workspace's kind. */
+export async function resolveVaultWorkspaceKind(
+  ws: string,
+  d: { manifestKind(ws: string): Promise<VaultWorkspaceKind>; mockWorkspaces?: () => Promise<{ id: string; kind?: 'container' | 'local' | 'remote' }[]> }
+): Promise<VaultWorkspaceKind> {
+  const kind = await d.manifestKind(ws);
+  if (kind !== null || !d.mockWorkspaces) return kind;
+  return (await d.mockWorkspaces()).find((w) => w.id === ws)?.kind ?? null;
 }
 
 export interface IpcHandleLike {
@@ -134,7 +145,8 @@ export function registerVaultIpc(ipc: IpcHandleLike, deps: VaultIpcDeps): void {
     if (a.rootValue !== undefined && a.rootValue !== null && typeof a.rootValue !== 'string') {
       throw new Error('vault root value must be a string or null');
     }
-    return deps.putKey({ key: a.key, secret: a.secret, tags: a.tags as string[], rootValue: a.rootValue as string | null | undefined });
+    const secret = FLEET_KEYS.find((k) => k.key === a.key)?.secret ?? a.secret;
+    return deps.putKey({ key: a.key, secret, tags: a.tags as string[], rootValue: a.rootValue as string | null | undefined });
   });
 
   ipc.handle('vault:renameKey', (_e, key: unknown, next: unknown) => {

@@ -999,6 +999,36 @@ describe('IdentityService vault PAT', () => {
     expect(await st).toMatchObject({ signedIn: true, source: 'pat' });
   });
 
+  it('a PAT changed mid-probe drops the stale result and reports the new PAT', async () => {
+    const s = patSetup({ pat: 'ghp_a' });
+    let release!: () => void;
+    s.github.probe.mockImplementationOnce(
+      () =>
+        new Promise<GithubProbe>((r) => {
+          release = () => r(PAT_PROBE);
+        })
+    );
+    const st = s.svc.status();
+    await vi.waitFor(() => expect(release).toBeDefined());
+    s.setPat('ghp_b');
+    s.setProbe({ ...PAT_PROBE, identity: { ...PAT_IDENT, login: 'b-user' } });
+    release();
+    expect(await st).toMatchObject({ signedIn: true, source: 'pat', identity: { login: 'b-user' } });
+    expect(await s.svc.bearerToken()).toBe('ghp_b');
+    expect(s.github.probe).toHaveBeenNthCalledWith(2, 'ghp_b');
+  });
+
+  it('a device revoke notice survives the PAT being removed afterwards', async () => {
+    const s = await deviceThenPat();
+    s.setProbe(UNAUTHORIZED());
+    expect(await s.svc.status()).toMatchObject({ source: 'device', notice: REJECTED });
+    expect(await s.svc.status({ refresh: true })).toMatchObject({ signedIn: false });
+    s.setPat(null);
+    const st = await s.svc.status();
+    expect(st.signedIn).toBe(false);
+    expect(st.notice).toMatch(/no longer accepts the saved sign-in/);
+  });
+
   it('concurrent reads share one PAT probe', async () => {
     const s = patSetup();
     const [a, b] = await Promise.all([s.svc.status(), s.svc.bearerToken()]);
