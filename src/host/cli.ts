@@ -1,5 +1,5 @@
 // Bundle entry: the host, or a one-shot `init` (resolve or mint the workspace id), `bootstrap` or `migrate` (dbCli.ts),
-// `write-mcp-bridge <path>` or `embed-check [reference]` (image build).
+// `write-mcp-bridge <path>` or `embed-check [reference]` (image build), or `loadouts sync` (workspace pod start).
 import { existsSync } from 'node:fs';
 import { loadHostConfig, readHostEnv } from './config.js';
 import { openHostDb } from './hostDb.js';
@@ -41,6 +41,13 @@ async function cli(argv: string[]): Promise<void> {
     const { embedCheckCli } = await import('./embedCheck.js');
     const code = await embedCheckCli(argv.slice(1), process.env, (l) => process.stdout.write(l + '\n'));
     await new Promise<void>((r) => process.stdout.write('', () => r()));
+    process.exit(code);
+  }
+  if (argv[0] === 'loadouts') {
+    const { loadoutsCli } = await import('./loadoutsCli.js');
+    const code = await loadoutsCli(argv.slice(1), process.env);
+    await new Promise<void>((r) => process.stdout.write('', () => r()));
+    // The token request isn't abortable; don't wait on it.
     process.exit(code);
   }
   // Anything else exits (2 if unknown) rather than starting a host inside a Job.

@@ -19,6 +19,7 @@ const MAIN_ALLOWED = [/^main\/identity\/[^/]+\.ts$/, /^main\/broker\.ts$/, /^mai
   /^main\/claims\/searchHits\.ts$/,
   /^main\/publish\/(protocol|scrub)\.ts$/,
   /^main\/mcpContainerBridge\.ts$/, /^main\/remoteUrl\.ts$/,
+  /^main\/(loadoutCore|ociCore)\.ts$/,
   /^main\/state\/(attachmentCodec|ingestParse|rawCodec|serialQueue|transcriptPaths)\.ts$/,
   /^main\/inbox\/(inboxDb|inboxCore|inboxService|inboxPolicy|notifyService|notifyStore|notifyPolicy)\.ts$/,
   /^main\/automations\/(automationService|automationStore|proposalService|proposalStore|definition|freshArgv|cron|scheduler|runner|reschedule|template|scriptProtocol|classify)\.ts$/,
