@@ -1,6 +1,6 @@
 # Pinned loadouts in remote workspaces — design
 
-Status: approved by the owner (Troy) 2026-11-20. Decisions D159–D167 are recorded in the plan (`docs/superpowers/plans/2026-11-20-remote-pinned-loadouts.md`) and summarised here.
+Status: approved by the owner (Troy) 2026-11-20. Decisions D159–D168 are recorded in the plan (`docs/superpowers/plans/2026-11-20-remote-pinned-loadouts.md`) and summarised here.
 
 ## Goal
 
@@ -139,6 +139,7 @@ A remote workspace pod starts with the loadouts platform-ops pinned for it (for 
   - a tag ruleset on `*/v*` that only the publish workflow bypasses;
   - the publish workflow failing on an existing tag with a different tree.
   Appendix A lists these for platform-ops.
+- **D168, per-repo read-only clamp:** the loadouts repo has no branch protection, so without the clamp any session could mint a write token and push a tampered loadout that the next pod start installs. Host config `github.readOnlyRepositories` lists `SumerSports/claude-fleet-loadouts`; every token naming it is clamped to read (an explicit write is refused with 403).
 
 ## Testing (D166)
 
@@ -193,7 +194,7 @@ containers:
       # FLEET_LOADOUTS_TIMEOUT_S defaults to 60
 ```
 
-Host pod ConfigMap (`config.yaml`), only if these keys are already set:
+Host pod ConfigMap (`config.yaml`). `readOnlyRepositories` is always set (D168); `repositories` and `permissions` only if they are already set:
 
 ```yaml
 github:
@@ -202,6 +203,7 @@ github:
   keyFile: /var/run/secrets/github-app/key.pem
   repositories: [claude-fleet-loadouts, <reviewed repos…>]          # only if the allowlist is in use
   permissions: { contents: read, pull_requests: write, issues: write, checks: read, statuses: read, metadata: read }
+  readOnlyRepositories: [SumerSports/claude-fleet-loadouts]          # D168: always
 ```
 
 `SumerSports/claude-fleet-loadouts` settings:

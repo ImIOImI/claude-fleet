@@ -90,6 +90,8 @@ export function validateTokenRequest(raw: unknown): TokenRequest {
 }
 
 const LEVEL = { read: 1, write: 2 } as const;
+/** GitHub App permissions with no read level. */
+const WRITE_ONLY = new Set(['workflows']);
 
 /** Every entry of `p` is in `ceiling` at the same or a lower level. */
 function within(p: unknown, ceiling: Readonly<Permissions>): boolean {
@@ -109,6 +111,8 @@ export interface MinterOptions {
   allow?: () => readonly string[] | null;
   /** Host config `github.permissions`: the default and the ceiling; null = DEFAULT_PERMISSIONS. */
   permissions?: () => Permissions | null;
+  /** Host config `github.readOnlyRepositories` (owner/repo): a request naming one is clamped to read. */
+  readOnly?: () => readonly string[] | null;
 }
 
 export interface TokenMinter {
@@ -225,7 +229,21 @@ export function createTokenMinter(o: MinterOptions): TokenMinter {
       }
       const ceiling = o.permissions?.() ?? DEFAULT_PERMISSIONS;
       if (v.permissions && !within(v.permissions, ceiling)) throw new AppTokenError('permissions exceed github.permissions', 403);
-      const permissions = Object.fromEntries(Object.entries(v.permissions ?? ceiling).sort(([a], [b]) => a.localeCompare(b))) as Permissions;
+      // The installation mints only its own account's repositories, so the name decides; one token covers every
+      // repository it names, so a read-only one clamps the whole request.
+      const readOnlyNames = new Set((o.readOnly?.() ?? []).map((r) => r.slice(r.indexOf('/') + 1).toLowerCase()));
+      const readOnly = v.repositories.filter((r) => readOnlyNames.has(r));
+      let requested: Permissions = v.permissions ?? ceiling;
+      if (readOnly.length) {
+        if (v.permissions) {
+          if (Object.values(v.permissions).some((x) => x !== 'read')) {
+            throw new AppTokenError(`${readOnly.join(', ')} ${readOnly.length > 1 ? 'are' : 'is'} read-only (github.readOnlyRepositories)`, 403);
+          }
+        } else {
+          requested = Object.fromEntries(Object.keys(ceiling).filter((k) => !WRITE_ONLY.has(k)).map((k) => [k, 'read'])) as Permissions;
+        }
+      }
+      const permissions = Object.fromEntries(Object.entries(requested).sort(([a], [b]) => a.localeCompare(b))) as Permissions;
       const req = { repositories: v.repositories, permissions };
       const key = JSON.stringify(req);
       const hit = cache.get(key);

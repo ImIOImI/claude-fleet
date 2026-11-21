@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { repoFromCredentialInput, repoFromGhArgs, repoFromGitUrl, runCredCli, type CredIo } from './credCli.js';
 import { DEFAULT_PERMISSIONS } from './appToken.js';
+import type { HostGithubConfig } from './config.js';
 import { startCredHelper, type CredServer } from './credServer.js';
 import { createLogger } from './log.js';
 import { startFakeGithubApp, type FakeGithubApp } from './testGithubApp.js';
@@ -81,14 +82,14 @@ describe('runCredCli', () => {
     await gh?.close();
   });
 
-  async function rig() {
+  async function rig(github: HostGithubConfig | null = null) {
     gh = await startFakeGithubApp({ appId: '1', installationId: '2', account: 'acme', repos: ['a', 'b'] });
     const dir = mkdtempSync(join(tmpdir(), 'credcli-'));
     writeFileSync(join(dir, 'key.pem'), gh.privatePem, { mode: 0o400 });
     const sock = join(dir, 'run', 'cred.sock');
     srv = await startCredHelper({
       app: { appId: '1', installationId: '2', keyFile: join(dir, 'key.pem') }, listen: { path: sock },
-      github: () => null, log: createLogger(() => undefined), apiBase: gh.url
+      github: () => github, log: createLogger(() => undefined), apiBase: gh.url
     });
     return sock;
   }
@@ -110,6 +111,21 @@ describe('runCredCli', () => {
     expect(await runCredCli(['git-credential', 'get'], o)).toBe(0);
     expect(out.join('')).toMatch(/^username=x-access-token\npassword=ghs_fake\w+\n$/);
     expect(gh!.requests.at(-1)!.body).toEqual({ repositories: ['a'], permissions: DEFAULT_PERMISSIONS });
+  });
+
+  it('git-credential and gh-token get a read-only token for a github.readOnlyRepositories repo', async () => {
+    const sock = await rig({ app: null, repositories: null, permissions: null, readOnlyRepositories: ['acme/a'] });
+    const read = Object.fromEntries(Object.keys(DEFAULT_PERMISSIONS).sort().map((k) => [k, 'read']));
+    const push = io(sock, 'protocol=https\nhost=github.com\npath=acme/a.git\n\n');
+    expect(await runCredCli(['git-credential', 'get'], push.o)).toBe(0);
+    expect(push.out.join('')).toMatch(/^username=x-access-token\npassword=ghs_fake\w+\n$/);
+    expect(gh!.requests.at(-1)!.body).toEqual({ repositories: ['a'], permissions: read });
+    const ghCall = io(sock);
+    expect(await runCredCli(['gh-token', '--', 'pr', 'view', '-R', 'acme/a'], ghCall.o)).toBe(0);
+    expect(gh!.requests.filter((r) => r.method === 'POST').map((r) => r.body)).toEqual([{ repositories: ['a'], permissions: read }]);
+    const other = io(sock, 'protocol=https\nhost=github.com\npath=acme/b.git\n\n');
+    expect(await runCredCli(['git-credential', 'get'], other.o)).toBe(0);
+    expect(gh!.requests.at(-1)!.body).toEqual({ repositories: ['b'], permissions: DEFAULT_PERMISSIONS });
   });
 
   it('git-credential store/erase and non-GitHub hosts print nothing and succeed', async () => {

@@ -38,6 +38,8 @@ export interface HostGithubConfig {
   repositories: string[] | null;
   /** Default and ceiling for every token's `permissions`; null = DEFAULT_PERMISSIONS in appToken.ts. */
   permissions: Record<string, 'read' | 'write'> | null;
+  /** Lowercased owner/repo entries every token naming them is clamped to read for (D168); null = none. */
+  readOnlyRepositories: string[] | null;
 }
 
 export interface HostConfig {
@@ -143,7 +145,7 @@ function positiveInt(v: unknown, path: string): string {
 
 function parseGithub(v: unknown): HostGithubConfig {
   const g = record(v, 'github');
-  onlyKeys(g, 'github', ['appId', 'installationId', 'keyFile', 'repositories', 'permissions']);
+  onlyKeys(g, 'github', ['appId', 'installationId', 'keyFile', 'repositories', 'permissions', 'readOnlyRepositories']);
   let app: GithubAppConfig | null = null;
   const set = [g.appId, g.installationId, g.keyFile].filter((x) => x !== undefined).length;
   if (set !== 0 && set !== 3) throw new HostConfigError('github.appId, github.installationId and github.keyFile must be set together');
@@ -168,7 +170,24 @@ function parseGithub(v: unknown): HostGithubConfig {
       permissions[k] = val;
     }
   }
-  return { app, repositories, permissions };
+  let readOnlyRepositories: string[] | null = null;
+  if (g.readOnlyRepositories !== undefined) {
+    const r = g.readOnlyRepositories;
+    const ok = (x: unknown): boolean => {
+      if (typeof x !== 'string') return false;
+      const [owner, repo, ...rest] = x.split('/');
+      return rest.length === 0 && /^[A-Za-z0-9-]{1,39}$/.test(owner) && /^[A-Za-z0-9_.-]{1,100}$/.test(repo ?? '') && repo !== '.' && repo !== '..';
+    };
+    if (!Array.isArray(r) || r.length === 0 || r.length > 500 || !r.every(ok)) {
+      throw new HostConfigError('github.readOnlyRepositories must list 1 to 500 owner/repo names');
+    }
+    readOnlyRepositories = [...new Set((r as string[]).map((x) => x.toLowerCase()))].sort();
+    for (const x of readOnlyRepositories) {
+      const name = x.split('/')[1];
+      if (repositories && !repositories.includes(name)) throw new HostConfigError(`github.readOnlyRepositories: ${name} is not in github.repositories`);
+    }
+  }
+  return { app, repositories, permissions, readOnlyRepositories };
 }
 
 function parseDb(v: unknown): PostgresStoreConfig {

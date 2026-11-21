@@ -98,6 +98,10 @@ Every task's requirements include this section.
 - App permissions for review-pr: Contents read (the loadouts repo and the reviewed repos), Pull requests write, Issues write, Checks read, Statuses read, Metadata read. No Packages.
 - Host config: `github.repositories` (when set) lists `claude-fleet-loadouts`; `github.permissions` (when set) includes `contents` and matches what the App holds; the installation includes the repo; the pin repo's owner is the installation's account.
 
+**D168. Per-repo read-only clamp (controller, 2026-11-21).**
+- The loadouts repo has no branch protection, so without the clamp any session could mint a write token and push a tampered loadout that the next pod start installs.
+- Host config `github.readOnlyRepositories` (`owner/repo`, each in `github.repositories` when that is set). A token request naming one of them is clamped to read as a whole: explicit `permissions` must all be `read` (else 403 before GitHub); omitted `permissions` become the ceiling's keys at `read` (write-only `workflows` dropped). Platform-ops lists `SumerSports/claude-fleet-loadouts`.
+
 ## File structure
 
 | File | Responsibility |
