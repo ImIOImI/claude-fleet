@@ -32,12 +32,17 @@ function stagedOverride(staged: StagedState, key: string): string | null {
   return create?.op === 'create' ? create.value : null;
 }
 
-/** A staged override counts by its typed value; a saved secret override's
- *  value is never sent down, so it counts as set. */
-export function resolvesNonEmpty(e: VaultEntry, workspaceId: string, staged?: StagedState): boolean {
+/** A staged override, or a root-backed create of a key not in `existingKeys`
+ *  (pre-staging), counts by its typed value; a saved secret value is never
+ *  sent down, so it counts as set. */
+export function resolvesNonEmpty(e: VaultEntry, workspaceId: string, staged?: StagedState, existingKeys?: ReadonlySet<string>): boolean {
   const line = e.lines.find((l) => l.workspaceId === workspaceId);
   if (!line) return false;
-  if (line.mode === 'inherit') return e.root.set && (e.secret || e.root.value !== '');
+  if (line.mode === 'inherit') {
+    const rootCreate = staged?.edits.find((x) => x.key === e.key && x.op === 'create' && x.asRoot);
+    if (rootCreate?.op === 'create' && !existingKeys?.has(e.key)) return rootCreate.value !== '';
+    return e.root.set && (e.secret || e.root.value !== '');
+  }
   const typed = staged ? stagedOverride(staged, e.key) : null;
   if (typed !== null) return typed !== '';
   return e.secret || !!line.value;

@@ -83,3 +83,12 @@ it('resolvesNonEmpty: a staged override counts only with a non-empty typed value
   expect(resolvesNonEmpty(e, 'W1', created)).toBe(false);
   expect(resolvesNonEmpty(e, 'W1', { edits: [] })).toBe(true);
 });
+it('resolvesNonEmpty: a staged root-backed create counts only with a non-empty value', () => {
+  const empty = stage({ edits: [] }, { key: 'N', op: 'create', secret: true, tags: [], value: '', asRoot: true });
+  expect(resolvesNonEmpty(previewEntries([], 'W1', empty)[0], 'W1', empty)).toBe(false);
+  const set = stage({ edits: [] }, { key: 'N', op: 'create', secret: true, tags: [], value: 'v', asRoot: true });
+  expect(resolvesNonEmpty(previewEntries([], 'W1', set)[0], 'W1', set)).toBe(true);
+  // An existing rooted key keeps its root; the typed value doesn't apply.
+  const onExisting = stage({ edits: [] }, { key: 'A', op: 'create', secret: true, tags: [], value: '', asRoot: true });
+  expect(resolvesNonEmpty(previewEntries([root('A')], 'W1', onExisting)[0], 'W1', onExisting, new Set(['A']))).toBe(true);
+});

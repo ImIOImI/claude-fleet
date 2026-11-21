@@ -327,3 +327,22 @@ describe('prototype-member key names (constructor/__proto__/toString)', () => {
     expect(m.getMeta(s, 'RENAMED')).toEqual({ secret: false, inherit: [], tags: [] });
   });
 });
+
+describe('fleet keys keep their registry secret flag', () => {
+  it('putKey forces the registry flag', () => {
+    const s = m.putKey(base(), { key: 'GITHUB_TOKEN', secret: false, tags: [], rootValue: 'ghp_x' });
+    expect(m.getMeta(s, 'GITHUB_TOKEN')?.secret).toBe(true);
+  });
+  it('applyWorkspaceEdits create forces the registry flag', () => {
+    const s = m.applyWorkspaceEdits(base(), W1, [{ key: 'GITHUB_TOKEN', op: 'create', secret: false, tags: [], value: 'ghp_x', asRoot: false }]);
+    expect(m.getMeta(s, 'GITHUB_TOKEN')?.secret).toBe(true);
+  });
+  it('migrating a plain GITHUB_TOKEN marks it secret', () => {
+    const s = m.migrateManifestEnv(base(), [{ id: W1, plain: { GITHUB_TOKEN: 'ghp_x' }, secretKeys: [] }]);
+    expect(m.getMeta(s, 'GITHUB_TOKEN')?.secret).toBe(true);
+  });
+  it('renaming a plain key onto a fleet key name marks it secret', () => {
+    const s = m.renameKey(m.putKey(base(), { key: 'TOK', secret: false, tags: [], rootValue: 'v' }), 'TOK', 'GITHUB_TOKEN');
+    expect(m.getMeta(s, 'GITHUB_TOKEN')?.secret).toBe(true);
+  });
+});

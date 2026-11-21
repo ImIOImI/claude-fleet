@@ -2,6 +2,7 @@
 // in isolation; vault.ts owns the envelope and lock.
 import { createHash } from 'node:crypto';
 import { APP_ENV_SCOPE, APP_INDEX_SCOPE, assertNotReservedVaultScope, assertRendererWorkspaceId } from './vaultScopes.js';
+import { FLEET_KEYS } from '../preload/fleetKeys.js';
 
 export type Store = Record<string, Record<string, string>>;
 export interface KeyMeta { secret: boolean; inherit: string[]; tags: string[] }
@@ -75,9 +76,11 @@ function withScope(s: Store, scope: string, bag: Record<string, string>): Store 
   else next[scope] = bag;
   return next;
 }
+/** Every metadata write goes through here, so a registry key always keeps its registry secret flag. */
 function setMeta(s: Store, key: string, meta: KeyMeta | null): Store {
   const idx = { ...(s[APP_INDEX_SCOPE] ?? {}) };
-  if (meta) idx[key] = JSON.stringify(meta);
+  const fleetSecret = FLEET_KEYS.find((k) => k.key === key)?.secret;
+  if (meta) idx[key] = JSON.stringify(fleetSecret === undefined ? meta : { ...meta, secret: fleetSecret });
   else delete idx[key];
   return withScope(s, APP_INDEX_SCOPE, idx);
 }
@@ -185,7 +188,8 @@ export function renameKey(s: Store, key: string, nextKey: string): Store {
     if (v === undefined) continue;
     next = setBagValue(setBagValue(next, scope, key, null), scope, nextKey, v);
   }
-  return next;
+  const meta = getMeta(next, nextKey);
+  return meta ? setMeta(next, nextKey, meta) : next;
 }
 
 export function deleteKey(s: Store, key: string): Store {

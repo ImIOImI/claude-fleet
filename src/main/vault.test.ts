@@ -8,15 +8,18 @@ import { tmpdir } from 'node:os';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 let userDataDir = '';
-const encState = vi.hoisted(() => ({ available: true }));
+const encState = vi.hoisted(() => ({ available: true, calls: [] as string[] }));
 const fsSpies = vi.hoisted(() => ({ writeFile: vi.fn() }));
 vi.mock('electron', () => ({
   app: { getPath: () => userDataDir },
   safeStorage: {
     isEncryptionAvailable: () => encState.available,
-    setUsePlainTextEncryption: () => undefined,
+    setUsePlainTextEncryption: () => void encState.calls.push('plaintext'),
     encryptString: (s: string) => Buffer.from(s),
-    decryptString: (b: Buffer) => b.toString()
+    decryptString: (b: Buffer) => {
+      encState.calls.push('decrypt');
+      return b.toString();
+    }
   }
 }));
 // Spy on the real writeFile (kept functional) so a test can assert vault.ts's
@@ -37,6 +40,7 @@ const vault = await import('./vault.js');
 beforeEach(async () => {
   userDataDir = await mkdtemp(join(tmpdir(), 'vault-'));
   encState.available = true;
+  encState.calls = [];
   vault._resetVaultCacheForTests();
 });
 afterEach(async () => {
@@ -146,5 +150,16 @@ describe('undecryptable vault file', () => {
     vault._resetVaultCacheForTests();
     await vault.putKey({ key: 'A', secret: true, tags: [], rootValue: 'r' });
     expect(await vault.getRootValue('A')).toBe('r');
+  });
+});
+
+describe.runIf(process.platform === 'linux')('encryption init', () => {
+  it('a read enables the Linux plaintext backend before decrypting', async () => {
+    await vault.putKey({ key: 'A', secret: true, tags: [], rootValue: 'r' });
+    encState.available = false;
+    encState.calls = [];
+    vault._resetVaultCacheForTests();
+    await vault.getRootValue('A');
+    expect(encState.calls).toEqual(['plaintext', 'decrypt']);
   });
 });

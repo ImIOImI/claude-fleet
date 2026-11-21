@@ -50,6 +50,7 @@ function isStore(v: unknown): v is Store {
 
 async function load(): Promise<Store> {
   if (cache) return cache;
+  encryptionAvailable(); // enables the Linux plaintext backend before the first decrypt
   let b64: string;
   try {
     b64 = await readFile(filePath(), 'utf8');

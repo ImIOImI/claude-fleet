@@ -74,6 +74,7 @@ export function WorkspaceVaultSection(p: Props) {
     return p.cloneFrom ? rekeyLines(l, p.cloneFrom, id) : l;
   }, [list, p.cloneFrom, id]);
   const preview = useMemo(() => previewEntries(base, id, p.staged), [base, id, p.staged]);
+  const baseKeys = useMemo(() => new Set(base.map((e) => e.key)), [base]);
   const savedKeys = useMemo(() => new Set(entriesForWorkspace(base, id).map((e) => e.key)), [base, id]);
   const mine = useMemo(() => entriesForWorkspace(preview, id), [preview, id]);
   const unpublished = preview.filter((e) => !mine.includes(e));
@@ -89,7 +90,7 @@ export function WorkspaceVaultSection(p: Props) {
   }, [list, autoOpened, mine.length]);
 
   const keySignature = mine
-    .filter((e) => resolvesNonEmpty(e, id, p.staged))
+    .filter((e) => resolvesNonEmpty(e, id, p.staged, baseKeys))
     .map((e) => e.key)
     .join('\n');
   const { onResolvedKeysChange } = p;

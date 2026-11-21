@@ -58,7 +58,7 @@ function setup() {
 
   registerVaultIpc(ipc, deps);
   const call = (ch: string, ...args: unknown[]) => Promise.resolve().then(() => handlers.get(ch)!({}, ...args));
-  return { handlers, call, pending, pendingCalls, kinds, putKeyCalls };
+  return { handlers, call, pending, pendingCalls, kinds, putKeyCalls, setStore: (next: Store) => { store = next; } };
 }
 
 const CHANNELS = [
@@ -206,5 +206,15 @@ describe('resolveVaultWorkspaceKind', () => {
   });
   it('is null without a manifest outside mock mode', async () => {
     expect(await resolveVaultWorkspaceKind('mock-1', { manifestKind: async () => null })).toBeNull();
+  });
+});
+
+describe('migrated fleet key', () => {
+  it('a GITHUB_TOKEN migrated as plain lists with no value', async () => {
+    const { call, setStore } = setup();
+    setStore(model.migrateManifestEnv({}, [{ id: '01HW1', plain: { GITHUB_TOKEN: 'ghp_plain' }, secretKeys: [] }]));
+    const list = (await call('vault:list')) as VaultEntry[];
+    expect(list.find((e) => e.key === 'GITHUB_TOKEN')?.secret).toBe(true);
+    expect(JSON.stringify(list)).not.toContain('ghp_plain');
   });
 });
