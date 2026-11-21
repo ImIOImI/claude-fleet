@@ -4,9 +4,10 @@ import type { VaultEntry } from '../../preload/vaultTypes';
 
 export interface DerivedTag { tag: string; derived: true }
 
-/** Slug a workspace name into a tag: lowercase, non [a-z0-9-] runs collapse to one '-', edges trimmed. */
+/** Slug a workspace name into a tag: lowercase, non [a-z0-9-] runs collapse to one '-', edges trimmed, clamped to 32 chars. */
 export function workspaceTag(name: string): string {
-  return name.toLowerCase().replace(/[^a-z0-9-]+/g, '-').replace(/^-+|-+$/g, '');
+  const slug = name.toLowerCase().replace(/[^a-z0-9-]+/g, '-').replace(/^-+|-+$/g, '');
+  return slug.slice(0, 32).replace(/-+$/, '');
 }
 
 export function derivedTags(e: VaultEntry, names: Record<string, string>): string[] {
@@ -14,7 +15,10 @@ export function derivedTags(e: VaultEntry, names: Record<string, string>): strin
   if (e.root.set) tags.push('root');
   if (e.fleet) tags.push('fleet');
   tags.push(e.secret ? 'secret' : 'plain');
-  for (const line of e.lines) tags.push(workspaceTag(names[line.workspaceId] ?? line.workspaceId));
+  for (const line of e.lines) {
+    const tag = workspaceTag(names[line.workspaceId] ?? line.workspaceId) || workspaceTag(line.workspaceId);
+    if (tag) tags.push(tag);
+  }
   return tags;
 }
 

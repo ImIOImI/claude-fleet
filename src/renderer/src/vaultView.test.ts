@@ -33,4 +33,33 @@ describe('vaultView', () => {
   it('slugs workspace names', () => {
     expect(v.workspaceTag('Fleet Dev!')).toBe('fleet-dev');
   });
+  it('clamps slugs to 32 chars and trims a trailing dash after clamping', () => {
+    const long = v.workspaceTag('a'.repeat(40));
+    expect(long.length).toBeLessThanOrEqual(32);
+    expect(long).toMatch(/^[a-z0-9-]{1,32}$/);
+  });
+  it('falls back to the workspace id slug when the name slugs to empty', () => {
+    const x = e('A', { lines: [{ workspaceId: 'W1', mode: 'inherit', pending: false }] });
+    expect(v.derivedTags(x, { W1: '!!!' })).toContain(v.workspaceTag('W1'));
+  });
+  it('builds unique sorted tags across entries, derived winning on clash', () => {
+    const list = [
+      e('A', { tags: ['secret'], root: { set: true } }),
+      e('B', { tags: ['aws'], secret: false })
+    ];
+    expect(v.allTags(list, names)).toEqual([
+      { tag: 'aws', derived: false },
+      { tag: 'plain', derived: true },
+      { tag: 'root', derived: true },
+      { tag: 'secret', derived: true }
+    ]);
+  });
+  it('finds entries referencing a workspace via inherit or override lines', () => {
+    const list = [
+      e('A', { lines: [{ workspaceId: 'W1', mode: 'inherit', pending: false }] }),
+      e('B', { lines: [{ workspaceId: 'W1', mode: 'override', pending: false }] }),
+      e('C', { lines: [{ workspaceId: 'W2', mode: 'inherit', pending: false }] })
+    ];
+    expect(v.entriesForWorkspace(list, 'W1').map((x) => x.key)).toEqual(['A', 'B']);
+  });
 });
