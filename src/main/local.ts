@@ -851,10 +851,10 @@ export async function attachPty(
         platform: process.platform,
         // wsl.exe needs a valid WINDOWS cwd; the Linux cwd goes via --cd.
         windowsCwd: homedir(),
-        // All per-workspace env keys (plain + secret) must cross the WSL boundary
+        // All vault-resolved workspace env keys must cross the WSL boundary
         // so that keys not matching ANTHROPIC_*/CLAUDE_* prefixes (e.g. a
         // per-workspace MYAPP_TOKEN) still reach the in-distro claude.
-        passEnvKeys: [...Object.keys(m.env.plain), ...m.env.secretKeys]
+        passEnvKeys: Object.keys(resolvedWorkspaceEnv)
       })
     });
   };

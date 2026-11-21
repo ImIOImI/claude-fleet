@@ -1646,9 +1646,10 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
   /**
    * Update a workspace's manifest in place without touching the container.
    * Used by the Saved-tab Resume flow to apply edited fields (description,
-   * labels, env, etc.) before calling `workspace:start`. Container-level
-   * edits (env values, image) won't take effect until the container is
-   * restarted — see the Phase 2 *restart-to-apply* banner.
+   * labels, etc.) before calling `workspace:start`. Env lives in the vault,
+   * not the manifest (Task 6 migration) — it's edited via vault:* IPC.
+   * Container-level edits (env values, image) won't take effect until the
+   * container is restarted — see the Phase 2 *restart-to-apply* banner.
    */
   ipcMain.handle(
     'workspace:writeManifest',
@@ -1841,7 +1842,8 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
   setConfigResolver(async (callerId) => {
     const m = await readWorkspaceManifest(callerId);
     const ep = m?.authMode === 'endpoint' && m.endpointId ? await getEndpoint(m.endpointId) : null;
-    const effectiveEnv = { ...(ep ? { CF_SUMMARY_MODEL: ep.modelId } : {}), ...(m?.env?.plain ?? {}) };
+    const workspaceEnv = await vault.resolveWorkspaceEnv(callerId);
+    const effectiveEnv = { ...(ep ? { CF_SUMMARY_MODEL: ep.modelId } : {}), ...workspaceEnv };
     return resolveWorkspaceConfig(callerId, effectiveEnv, { version: appVersionString(), sha: appBuildSha() ?? null }, m?.image, {
       mode: m?.authMode ?? 'oauth',
       endpoint: ep ? { name: ep.name, baseUrl: ep.baseUrl, modelId: ep.modelId } : null
