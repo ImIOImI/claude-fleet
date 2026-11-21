@@ -2,6 +2,7 @@
 import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { safeLayerPath } from '../main/ociCore.js';
+import { ID, SEMVER } from './loadoutPins.js';
 
 export interface PinnedRecord {
   id: string;
@@ -32,12 +33,14 @@ export class RecordError extends Error {
   }
 }
 
+const COMMIT = /^[0-9a-f]{40}$/;
 const strings = (v: unknown): v is string[] => Array.isArray(v) && v.every((x) => typeof x === 'string');
 
 function validEntry(e: unknown, target: string): e is PinnedRecord {
   if (!e || typeof e !== 'object') return false;
   const r = e as Record<string, unknown>;
   if (typeof r.id !== 'string' || typeof r.version !== 'string' || typeof r.repo !== 'string' || typeof r.commit !== 'string') return false;
+  if (!ID.test(r.id) || !SEMVER.test(r.version) || !COMMIT.test(r.commit)) return false;
   if (!strings(r.files) || typeof r.claudeMd !== 'boolean' || !strings(r.settingsKeys) || !strings(r.mcpServers)) return false;
   if (typeof r.installedAt !== 'number') return false;
   if (!Array.isArray(r.hooks) || !r.hooks.every((h) => !!h && typeof h === 'object' && typeof (h as { event?: unknown }).event === 'string')) return false;

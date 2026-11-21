@@ -21,8 +21,8 @@ export const DEFAULT_LOADOUTS_REPO = 'SumerSports/claude-fleet-loadouts';
 export const DEFAULT_LOADOUTS_API = 'https://api.github.com';
 export const DEFAULT_SYNC_TIMEOUT_S = 60;
 
-const ID = /^[a-z0-9][a-z0-9-]{0,62}$/;
-const SEMVER = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(-[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?$/;
+export const ID = /^[a-z0-9][a-z0-9-]{0,62}$/;
+export const SEMVER = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(-[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?$/;
 const OWNER = /^[A-Za-z0-9-]{1,39}$/;
 const REPO = /^[A-Za-z0-9_.-]{1,100}$/;
 

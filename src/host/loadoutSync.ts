@@ -1,5 +1,5 @@
 // `fleet-host loadouts sync`: make /workspace hold exactly the FLEET_LOADOUTS pins (SPEC §7 Pinned loadouts).
-import { mkdtemp, rm, stat } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -90,11 +90,29 @@ async function revertRecord(target: string, r: PinnedRecord): Promise<void> {
   await revertLoadoutMerges(target, { settingsKeys: r.settingsKeys, mcpServers: r.mcpServers, hooks: r.hooks });
 }
 
-/** On failure, removes the files this apply added and its CLAUDE.md block, then rethrows. */
+const MERGED_FILES = [join('.claude', 'settings.json'), '.mcp.json'];
+
+/** Contents, null if absent, undefined if unreadable (left alone on restore). */
+async function snapshot(path: string): Promise<Buffer | null | undefined> {
+  try {
+    return await readFile(path);
+  } catch (e) {
+    return (e as NodeJS.ErrnoException).code === 'ENOENT' ? null : undefined;
+  }
+}
+
+async function restore(path: string, before: Buffer | null | undefined): Promise<void> {
+  if (before === undefined) return;
+  if (before === null) await rm(path, { force: true }).catch(() => undefined);
+  else await writeFile(path, before).catch(() => undefined);
+}
+
+/** On failure, removes the files this apply added and its CLAUDE.md block, restores the merged files, then rethrows. */
 async function applyFrom(target: string, dir: string, id: string): Promise<Applied> {
   const planned = await loadoutFileList(dir);
   const before = new Set<string>();
   for (const f of planned) if (await present(join(target, f))) before.add(f);
+  const merged = await Promise.all(MERGED_FILES.map((f) => snapshot(join(target, f))));
   try {
     const files = await applyLoadoutFiles(dir, target, id);
     const merges = await applyLoadoutMerges(dir, target);
@@ -112,6 +130,7 @@ async function applyFrom(target: string, dir: string, id: string): Promise<Appli
       if (f !== 'CLAUDE.md' && !before.has(f)) await rm(join(target, f), { force: true }).catch(() => undefined);
     }
     if (planned.includes('CLAUDE.md')) await revertLoadoutFiles(target, { files: [], claudeMd: true }, id).catch(() => undefined);
+    for (const [i, f] of MERGED_FILES.entries()) await restore(join(target, f), merged[i]);
     throw e;
   }
 }
@@ -155,8 +174,14 @@ async function runScripts(ctx: Ctx, id: string, dir: string, meta: LoadoutMeta):
 }
 
 async function rollback(ctx: Ctx, previous: PinnedRecord): Promise<void> {
-  const dir = await mkdtemp(join(ctx.o.stagingRoot ?? tmpdir(), 'fleet-loadout-'));
+  if (previous.repo.toLowerCase() !== ctx.repoName.toLowerCase()) {
+    await ctx.commitRecord(previous.id, null);
+    ctx.o.log.log('error', 'loadout rollback failed', { id: previous.id, version: previous.version, error: 'previous version came from another repo' });
+    return;
+  }
+  let dir: string | undefined;
   try {
+    dir = await mkdtemp(join(ctx.o.stagingRoot ?? tmpdir(), 'fleet-loadout-'));
     await fetchInto(ctx, previous.id, previous.commit, dir);
     const back = await applyFrom(ctx.o.target, dir, previous.id);
     await ctx.commitRecord(previous.id, toRecord(previous, previous.repo, previous.commit, back));
@@ -165,7 +190,7 @@ async function rollback(ctx: Ctx, previous: PinnedRecord): Promise<void> {
     await ctx.commitRecord(previous.id, null);
     ctx.o.log.log('error', 'loadout rollback failed', { id: previous.id, version: previous.version, error: errText(e) });
   } finally {
-    await rm(dir, { recursive: true, force: true });
+    if (dir) await rm(dir, { recursive: true, force: true }).catch(() => undefined);
   }
 }
 
@@ -203,7 +228,7 @@ async function installPin(ctx: Ctx, pin: Pin, previous: PinnedRecord | null): Pr
     await notices(ctx, pin.id, meta, staging);
     await runScripts(ctx, pin.id, staging, meta);
   } finally {
-    await rm(staging, { recursive: true, force: true });
+    await rm(staging, { recursive: true, force: true }).catch(() => undefined);
   }
 }
 
@@ -309,7 +334,13 @@ export async function syncLoadouts(o: SyncOptions): Promise<SyncSummary> {
   };
   for (const { pin, previous } of plan.install) {
     if (signal.aborted) fail('timeout', 'the sync ran out of time', pin);
-    else await installPin(ctx, pin, previous);
+    else {
+      try {
+        await installPin(ctx, pin, previous);
+      } catch (e) {
+        fail(stageOf(e, signal), errText(e), pin);
+      }
+    }
   }
   return finish();
 }

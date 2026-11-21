@@ -157,6 +157,21 @@ describe('loadoutFetch', () => {
     expect(gh.requests).toEqual([]);
   });
 
+  it('refuses a default branch with an empty, . or .. segment', async () => {
+    const real = globalThis.fetch;
+    let branch = '';
+    globalThis.fetch = (async () => Response.json({ default_branch: branch })) as typeof fetch;
+    try {
+      for (branch of ['', 'a//b', '/a', 'a/', '.', '..', 'a/./b', 'a/..', '../main']) {
+        await expect(defaultBranch(src, signal())).rejects.toThrow('resolve: the repository has no default branch');
+      }
+      branch = 'release/v1.x';
+      expect(await defaultBranch(src, signal())).toBe('release/v1.x');
+    } finally {
+      globalThis.fetch = real;
+    }
+  });
+
   it('times out a stalled download', async () => {
     gh.tags.set('demo/v1.0.0', { commit: sha(1), files: loadoutFiles('demo', '1.0.0') });
     gh.hangTarball = true;

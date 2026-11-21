@@ -92,6 +92,13 @@ describe('extractLoadout', () => {
     expect(await readdir(dir)).toEqual([]);
   });
 
+  it('refuses an entry that resolves to the loadout root', async () => {
+    for (const path of ['loadouts/demo/.', 'loadouts/demo/a/..']) {
+      await expect(extractLoadout(repo([md, { path, body: 'x' }]), 'demo', dir)).rejects.toThrow(`unsafe path ${path}`);
+    }
+    expect(await readdir(dir)).toEqual([]);
+  });
+
   it('refuses a NUL in a path', async () => {
     await expect(extractLoadout(repo([md, { path: `loadouts/demo/${'a'.repeat(101)}\0b`, body: 'x' }]), 'demo', dir)).rejects.toThrow(
       /^unsafe path /

@@ -129,14 +129,16 @@ export async function extractLoadout(tgz: Buffer, id: string, destDir: string, l
     if (e.type !== '0') throw new TarError(`${LINK_KINDS[e.type] ?? `entry type ${JSON.stringify(e.type)}`} at ${rel} is not allowed`);
     const inner = rel.slice(scope.length);
     let target: string;
+    let key: string;
     try {
       if (inner.includes('\0')) throw new Error('NUL');
       target = safeLayerPath(destDir, inner);
+      // Keyed by the resolved path, so `./x` and `x` collide here rather than at write time.
+      key = relative(dest, target).split(sep).join('/');
+      if (key === '') throw new Error('root');
     } catch {
       throw new TarError(`unsafe path ${rel}`);
     }
-    // Keyed by the resolved path, so `./x` and `x` collide here rather than at write time.
-    const key = relative(dest, target).split(sep).join('/');
     if (seen.has(key)) throw new TarError(`duplicate entry ${rel}`);
     seen.add(key);
     if (seen.size > limits.files) throw new TarError(`loadouts/${id} has more than ${limits.files} files`);

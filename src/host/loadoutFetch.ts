@@ -66,7 +66,7 @@ async function json(res: Response, stage: FetchStage, what: string): Promise<Rec
 export async function defaultBranch(src: GithubSource, signal: AbortSignal): Promise<string> {
   const j = await json(await get(src, repoUrl(src), 'resolve', signal), 'resolve', 'repository');
   const b = j.default_branch;
-  if (typeof b !== 'string' || !/^[A-Za-z0-9._/-]{1,255}$/.test(b)) throw new FetchError('resolve: the repository has no default branch', 'resolve');
+  if (typeof b !== 'string' || !/^[A-Za-z0-9._/-]{1,255}$/.test(b) || b.split('/').some((x) => x === '' || x === '.' || x === '..')) throw new FetchError('resolve: the repository has no default branch', 'resolve');
   return b;
 }
 

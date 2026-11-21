@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { readRecord } from './loadoutRecord.js';
+import { readRecord, writeRecord } from './loadoutRecord.js';
 import { syncLoadouts, type ScriptRun, type SyncOptions } from './loadoutSync.js';
 import { loadoutFiles, sha, startFakeGithubRepo, type FakeFile, type FakeGithubRepo } from './testGithubRepo.js';
 
@@ -265,6 +265,71 @@ describe('syncLoadouts', () => {
     expect(failures()).toEqual([expect.objectContaining({ stage: 'apply', id: 'demo' })]);
     expect(await read('CLAUDE.md')).toBe('mine\n');
     expect(await exists('.claude/skills/demo/SKILL.md')).toBe(false);
+  });
+
+  it('restores settings.json when a later .mcp.json merge fails', async () => {
+    tag('demo', '1.0.0', 1, {
+      'loadouts/demo/settings.json': '{"env":{"A":"1"}}',
+      'loadouts/demo/.mcp.json': JSON.stringify({ mcpServers: { demo: { command: 'x' } } })
+    });
+    await mkdir(join(target, '.mcp.json'), { recursive: true });
+    await syncLoadouts(opts('demo@1.0.0'));
+    expect(failures()).toEqual([expect.objectContaining({ stage: 'apply', id: 'demo' })]);
+    expect(await exists('.claude/settings.json')).toBe(false);
+    await mkdir(join(target, '.claude'), { recursive: true });
+    await writeFile(join(target, '.claude/settings.json'), '{"mine":true}\n');
+    await syncLoadouts(opts('demo@1.0.0'));
+    expect(await read('.claude/settings.json')).toBe('{"mine":true}\n');
+    expect((await stat(join(target, '.mcp.json'))).isDirectory()).toBe(true);
+  });
+
+  it('fails each pin, without throwing, when staging cannot be created', async () => {
+    tag('a', '1.0.0', 1);
+    tag('b', '1.0.0', 2);
+    const s = await syncLoadouts(opts('a@1.0.0 b@1.0.0', { stagingRoot: join(staging, 'missing') }));
+    expect(s.failed).toEqual(['a@1.0.0', 'b@1.0.0']);
+    expect(failures().map((f) => [f.id, f.stage])).toEqual([
+      ['a', 'verify'],
+      ['b', 'verify']
+    ]);
+    expect(lines.at(-1)).toMatchObject({ msg: 'loadout sync done' });
+  });
+
+  it('does not roll back to a version from another repo', async () => {
+    tag('demo', '2.0.0', 2, { 'loadouts/demo/skills/blocked/SKILL.md': 'x\n' });
+    tag('demo', '1.0.0', 1);
+    const prev = {
+      id: 'demo',
+      version: '1.0.0',
+      repo: 'Elsewhere/loadouts',
+      commit: sha(1),
+      files: [],
+      claudeMd: false,
+      settingsKeys: [],
+      mcpServers: [],
+      hooks: [],
+      installedAt: 1
+    };
+    await writeRecord(target, { version: 1, loadouts: [prev] });
+    await mkdir(join(target, '.claude/skills'), { recursive: true });
+    await writeFile(join(target, '.claude/skills/blocked'), 'a file where a directory must go\n');
+    await syncLoadouts(opts('demo@2.0.0'));
+    expect(lines).toContainEqual(
+      expect.objectContaining({ level: 'error', msg: 'loadout rollback failed', id: 'demo', version: '1.0.0', error: 'previous version came from another repo' })
+    );
+    expect(gh.requests.filter((r) => r.path.includes(sha(1)))).toEqual([]);
+    expect((await readRecord(target)).loadouts).toEqual([]);
+  });
+
+  it('rolls back to a version whose repo differs only in case', async () => {
+    tag('demo', '1.0.0', 1);
+    tag('demo', '2.0.0', 2, { 'loadouts/demo/skills/blocked/SKILL.md': 'x\n' });
+    await syncLoadouts(opts('demo@1.0.0'));
+    const rec = await readRecord(target);
+    await writeRecord(target, { version: 1, loadouts: rec.loadouts.map((r) => ({ ...r, repo: 'sumersports/CLAUDE-fleet-loadouts' })) });
+    await writeFile(join(target, '.claude/skills/blocked'), 'a file where a directory must go\n');
+    await syncLoadouts(opts('demo@2.0.0'));
+    expect(lines).toContainEqual(expect.objectContaining({ msg: 'loadout rolled back', id: 'demo', version: '1.0.0' }));
   });
 
   it('keeps the previous version recorded when reverting it fails', async () => {

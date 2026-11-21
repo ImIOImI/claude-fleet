@@ -46,6 +46,11 @@ describe('record file', () => {
     ['a missing field', JSON.stringify({ version: 1, loadouts: [{ id: 'demo' }] }), `${RECORD_PATH} is malformed`],
     ['a non-string id', JSON.stringify({ version: 1, loadouts: [rec({ id: 7 as unknown as string })] }), `${RECORD_PATH} is malformed`],
     ['files that are a string', JSON.stringify({ version: 1, loadouts: [rec({ files: 'abc' as unknown as string[] })] }), `${RECORD_PATH} is malformed`],
+    ['an id outside the pin grammar', JSON.stringify({ version: 1, loadouts: [rec({ id: '../x' })] }), `${RECORD_PATH} is malformed`],
+    ['a version that is not semver', JSON.stringify({ version: 1, loadouts: [rec({ version: 'v1.0' })] }), `${RECORD_PATH} is malformed`],
+    ['a short commit', JSON.stringify({ version: 1, loadouts: [rec({ commit: 'a'.repeat(39) })] }), `${RECORD_PATH} is malformed`],
+    ['a non-hex commit', JSON.stringify({ version: 1, loadouts: [rec({ commit: 'g'.repeat(40) })] }), `${RECORD_PATH} is malformed`],
+    ['a commit with a suffix', JSON.stringify({ version: 1, loadouts: [rec({ commit: `${'a'.repeat(40)}\n` })] }), `${RECORD_PATH} is malformed`],
     ['a hook without an event', JSON.stringify({ version: 1, loadouts: [rec({ hooks: [{ entry: 1 } as unknown as PinnedRecord['hooks'][0]] })] }), `${RECORD_PATH} is malformed`]
   ])('refuses %s', async (_what, body, message) => {
     await mkdir(join(dir, '.claude'), { recursive: true });
