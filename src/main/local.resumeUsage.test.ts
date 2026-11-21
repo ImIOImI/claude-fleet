@@ -4,7 +4,7 @@
 // call inside the mapping IIFE. Mirrors docker.test.ts's recordResumeUsageQuietly
 // coverage for the container backend's equivalent.
 //
-// Also covers recordEnvAppliedQuietly (app-vault Task 4 review finding):
+// Also covers recordEnvAppliedQuietly:
 // unlike the usage signal, it's awaited at attachPty's spawn site, so a
 // rejection must still resolve (logged, not thrown) rather than fail attach.
 import { beforeEach, describe, expect, it, vi } from 'vitest';
@@ -66,7 +66,7 @@ describe('recordResumeUsageQuietly', () => {
   });
 });
 
-// Review finding: a disk error recording env-applied must not abort attachPty
+// A disk error recording env-applied must not abort attachPty
 // (it's awaited at the spawn site, unlike the fire-and-forget usage signal
 // above), matching ensureLocalRetentionSettings's catch-and-log containment.
 describe('recordEnvAppliedQuietly', () => {

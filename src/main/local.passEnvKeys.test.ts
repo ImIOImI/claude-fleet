@@ -1,6 +1,5 @@
-// Regression for the vault migration (Task 6 fix): attachPty's WSL
-// passEnvKeys must come from the vault-resolved workspace env, not the
-// (now always-empty) manifest env.plain/secretKeys.
+// attachPty's WSL passEnvKeys must come from the vault-resolved workspace
+// env, not the manifest env.plain/secretKeys.
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { mkdir, rm } from 'node:fs/promises';

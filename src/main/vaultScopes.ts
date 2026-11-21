@@ -1,10 +1,11 @@
 // Vault scope naming for host-only secrets (#444). Pure — no electron — so it
-// unit-tests in isolation and ipc.ts can guard the generic vault:* surface.
+// unit-tests in isolation.
 //
 // Loadout-source tokens live in the same secrets.enc as workspace env and
 // endpoint keys, under `loadout-source:<normalised base>` / `TOKEN`. The
 // renderer may WRITE one (loadouts:addSource / loadouts:setSourceCredential)
-// but must never read one back, so the generic vault:* IPC refuses the prefix.
+// but must never read one back; the vault:* IPC takes no raw scope, only a
+// key plus a workspace id checked by assertRendererWorkspaceId.
 
 export const SOURCE_VAULT_PREFIX = 'loadout-source:';
 export const SOURCE_VAULT_KEY = 'TOKEN';
@@ -32,22 +33,8 @@ export const APP_INDEX_SCOPE = `${APP_VAULT_PREFIX}index`;
  */
 export const RESERVED_VAULT_PREFIXES: readonly string[] = [SOURCE_VAULT_PREFIX, ENDPOINT_VAULT_PREFIX, IDENTITY_VAULT_PREFIX, STORE_VAULT_PREFIX, APP_VAULT_PREFIX];
 
-/** Reserved prefixes the renderer may not read or write through vault:*. */
-const HOST_ONLY_PREFIXES: readonly string[] = [SOURCE_VAULT_PREFIX, IDENTITY_VAULT_PREFIX, STORE_VAULT_PREFIX, APP_VAULT_PREFIX];
-
 export function sourceVaultScope(normalisedBase: string): string {
   return `${SOURCE_VAULT_PREFIX}${normalisedBase}`;
-}
-
-/**
- * Throw when a renderer-supplied vault scope names a host-only bag. Fails
- * closed: anything that isn't a primitive string is refused, because an array
- * or String object survives structured clone and is coerced to the real scope
- * string when vault.ts indexes its store.
- */
-export function assertRendererVaultScope(scope: unknown): asserts scope is string {
-  if (typeof scope !== 'string') throw new Error('vault scope must be a string');
-  if (HOST_ONLY_PREFIXES.some((p) => scope.startsWith(p))) throw new Error('vault scope is host-only');
 }
 
 /**

@@ -6,7 +6,6 @@ import {
   GITHUB_IDENTITY_SCOPE,
   RESERVED_VAULT_PREFIXES,
   sourceVaultScope,
-  assertRendererVaultScope,
   assertRendererWorkspaceId,
   assertNotReservedVaultScope
 } from './vaultScopes.js';
@@ -16,29 +15,6 @@ describe('vaultScopes (#444)', () => {
     expect(SOURCE_VAULT_PREFIX).toBe('loadout-source:');
     expect(SOURCE_VAULT_KEY).toBe('TOKEN');
     expect(sourceVaultScope('ghcr.io/acme/loadouts')).toBe('loadout-source:ghcr.io/acme/loadouts');
-  });
-
-  it('refuses loadout-source scopes on the renderer vault surface', () => {
-    expect(() => assertRendererVaultScope('loadout-source:ghcr.io/acme/loadouts')).toThrow(/host-only/);
-  });
-
-  it('allows workspace and endpoint scopes', () => {
-    expect(() => assertRendererVaultScope('01HZXYWORKSPACEULID0000000')).not.toThrow();
-    expect(() => assertRendererVaultScope('endpoint:3f0c')).not.toThrow();
-  });
-});
-
-describe('assertRendererVaultScope fails closed (#444 security review)', () => {
-  const PRIV = 'loadout-source:ghcr.io/acme/private';
-  it.each([
-    ['an array', [PRIV]],
-    ['a String object', new String(PRIV)],
-    ['a number', 42],
-    ['undefined', undefined],
-    ['null', null],
-    ['an object', { toString: () => PRIV }]
-  ])('refuses %s', (_label, scope) => {
-    expect(() => assertRendererVaultScope(scope)).toThrow(/vault scope must be a string/);
   });
 });
 
@@ -79,16 +55,9 @@ describe('identity scope', () => {
     expect(IDENTITY_VAULT_PREFIX).toBe('identity:');
     expect(GITHUB_IDENTITY_SCOPE).toBe('identity:github');
   });
-  it('is host-only on the renderer vault surface', () => {
-    expect(() => assertRendererVaultScope('identity:github')).toThrow(/host-only/);
-    expect(() => assertRendererVaultScope('identity:other')).toThrow(/host-only/);
-  });
   it('is reserved as a workspace id and refused by resolveWorkspaceEnv', () => {
     expect(() => assertRendererWorkspaceId('identity:github')).toThrow(/workspace id/);
     expect(() => assertNotReservedVaultScope('identity:github')).toThrow(/reserved/);
-  });
-  it('leaves endpoint scopes renderer-readable', () => {
-    expect(() => assertRendererVaultScope('endpoint:3f0c')).not.toThrow();
   });
 });
 
@@ -96,10 +65,6 @@ describe('app: scope', () => {
   it('is reserved for workspace ids', () => {
     expect(() => assertRendererWorkspaceId('app:env')).toThrow();
     expect(RESERVED_VAULT_PREFIXES).toContain('app:');
-  });
-  it('is host-only on the generic surface', () => {
-    expect(() => assertRendererVaultScope('app:env')).toThrow(/host-only/);
-    expect(() => assertRendererVaultScope('app:index')).toThrow(/host-only/);
   });
   it('is never resolved into a workspace env', () => {
     expect(() => assertNotReservedVaultScope('app:env')).toThrow(/reserved/);
