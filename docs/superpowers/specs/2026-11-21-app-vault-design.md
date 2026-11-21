@@ -104,7 +104,7 @@ Main reads recognized root values directly from `app:env`. Root values are **nev
 
 New `vault:*` channels (`vaultIpc.ts`), all main-side validated, failing closed on non-primitive arguments like the existing surface:
 
-- `vault:list()` → `VaultEntry[]`: `{ key, secret, tags, fleet, root: { set, value? }, lines: { workspaceId, mode: 'inherit' | 'override', value?, pending: 'recreate' | 'restart' | null }[] }`. `value` is present only for **plain** keys. Secret values never appear.
+- `vault:list()` → `VaultEntry[]`: `{ key, secret, tags, fleet, root: { set, value? }, lines: { workspaceId, mode: 'inherit' | 'override', value?, pending: boolean }[] }` (the renderer labels a pending line "recreate to apply" for containers, "restart to apply" for local)`. `value` is present only for **plain** keys. Secret values never appear.
 - `vault:reveal(key, workspaceId | null)` → `string | null`: one value (root when `workspaceId` is null). Replaces the renderer's `vault:getSecret` use in `secretReveal.ts`.
 - `vault:putKey({ key, secret, tags, rootValue? })` → `void`: create or update a key's metadata and root value. `rootValue: null` deletes the root value; absent leaves it.
 - `vault:renameKey(key, newKey)` → `void`.
@@ -113,7 +113,9 @@ New `vault:*` channels (`vaultIpc.ts`), all main-side validated, failing closed 
 - `vault:removeLine(key, workspaceId)` → `void`.
 - `vault:copyWorkspace(fromId, toId)` → `void`.
 
-Workspace ids are checked with `assertRendererWorkspaceId`; keys with the key regex. `vault:listKeys`, `vault:getSecret`, `vault:setSecret`, `vault:deleteSecret` remain for endpoint scopes only; they now refuse workspace scopes (workspace env goes through the channels above).
+- `vault:applyWorkspaceEdits(workspaceId, edits)` → `void`: the workspace form's staged edits in one locked write (accepts a not-yet-created workspace id).
+
+Workspace ids are checked with `assertRendererWorkspaceId`; keys with the key regex. `vault:listKeys`, `vault:getSecret`, `vault:setSecret`, `vault:deleteSecret` are removed (only workspace env used them); `vault:available` and `vault:deleteAllForWorkspace` stay.
 
 ## 5. UI
 
