@@ -3,7 +3,7 @@
 // workspaces use ipc.ts's host-trusted functions (no committee gate).
 import { app, BrowserWindow, ipcMain } from 'electron';
 import path from 'node:path';
-import { getSecret, listKeys } from '../vault.js';
+import { resolveWorkspaceEnv, workspaceKeys } from '../vault.js';
 import { assertNotReservedVaultScope } from '../vaultScopes.js';
 import { setLoadoutAutomationHooks, setLoadoutChangeListener } from '../loadouts.js';
 import { prepareLoadoutAutomations, readLoadoutAutomations, readLoadoutVersion } from './loadoutAutomations.js';
@@ -121,12 +121,12 @@ export function registerAutomationIpc(inbox: InboxStore, notify: NotifyService |
       ? hostExecScript(target.workspaceId, o)
       : runScript({ shell: target.shell, script: o.script, env: o.env, cwd: path.join(app.getPath('userData'), 'automations', o.automationId), timeoutMs: o.timeoutMs }),
     automationsWorkspace: () => roleWs,
-    // Same reserved-scope backstop vault.resolveEnv applies before injecting a
-    // bag into a workspace env: `ws` here is resolveWorkspace's output or the
+    // Same reserved-scope backstop resolveWorkspaceEnv applies before injecting
+    // a bag into a workspace env: `ws` here is resolveWorkspace's output or the
     // automations workspace id, which should already be an ordinary workspace
     // id, but a script step secret is read on a less-trusted path than a
     // container's own env, so this is defence in depth (#444 final review M6).
-    secret: (ws, key) => { assertNotReservedVaultScope(ws); return getSecret(ws, key); },
+    secret: (ws, key) => { assertNotReservedVaultScope(ws); return resolveWorkspaceEnv(ws).then((e) => e[key] ?? null); },
     emitTodo: async (id, runId, input) => { if (!sink) throw new Error('the inbox is unavailable'); await sink.todoFromAutomation(id, runId, input); },
     emitNotify: async (id, runId, input) => { if (!sink) throw new Error('the inbox is unavailable'); await sink.notifyFromAutomation(id, runId, input); },
     resolveWorkspace: resolveLocal,
@@ -168,7 +168,9 @@ export function registerAutomationIpc(inbox: InboxStore, notify: NotifyService |
     const sources = await readLoadoutAutomations(srcDir);
     if (!sources.length) return [];
     const keys = new Map<string, string[]>();
-    for (const ws of new Set([workspaceId, ...(roleWs ? [roleWs] : []), ...localWorkspaces(names).map((n) => n.id)])) keys.set(ws, await listKeys(ws).catch(() => []));
+    for (const ws of new Set([workspaceId, ...(roleWs ? [roleWs] : []), ...localWorkspaces(names).map((n) => n.id)])) {
+      keys.set(ws, await workspaceKeys(ws).then((ks) => ks.map((k) => k.key)).catch(() => []));
+    }
     await refreshShells();
     return prepareLoadoutAutomations(sources, workspaceId, { workspace: resolveLocal, refusal: refuseRemote, hostShells: hostShellIds() },
       (ws) => keys.get(ws) ?? [], roleWs);

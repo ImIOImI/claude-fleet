@@ -1,5 +1,5 @@
 // Regression coverage for the #444 security-review finding: a workspace id is
-// also a vault scope (resolveEnv injects that bag into the workspace's env),
+// also a vault scope (resolveWorkspaceEnv injects that bag into the workspace's env),
 // so `workspace:create` and `workspace:writeManifest` must reject a reserved
 // or colon-bearing id *before* doing anything else. `registerIpc` itself pulls
 // in dockerode, better-sqlite3, the broker client, etc., so standing up a real

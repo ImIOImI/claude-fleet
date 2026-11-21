@@ -1182,7 +1182,7 @@ export function App() {
    * Mint workspace identity + persist any secret env values to the OS
    * keychain, then call `workspace:create`. Secrets are written *before*
    * the container is created so the main process can resolve them at
-   * start time (see docker.ts → vault.resolveEnv).
+   * start time (see docker.ts → vault.resolveWorkspaceEnv).
    */
   const handleCreate = async (
     submit: WorkspaceFormSubmit,

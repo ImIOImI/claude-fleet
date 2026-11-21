@@ -1366,8 +1366,8 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
   ipcMain.handle(
     'workspace:create',
     async (_e, input: WorkspaceCreatePayload) => {
-      // The id becomes this workspace's vault scope (resolveEnv injects that
-      // bag into its env), so it may never name a host-only scope (#444).
+      // The id becomes this workspace's vault scope (resolveWorkspaceEnv
+      // injects that bag into its env), so it may never name a host-only scope (#444).
       assertRendererWorkspaceId(input?.id);
       const prior = await readWorkspaceManifest(input.id);
       assertNotRemoteSpec(input.kind, prior);

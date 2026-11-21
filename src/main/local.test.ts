@@ -50,10 +50,6 @@ vi.mock('./config.js', async (orig) => ({
 const { buildEnv, localMcpTransport } = await import('./local.js');
 const { setActiveStoreConfig } = await import('./store/activeStore.js');
 
-const fakeEnv = (plain: Record<string, string> = {}) => ({
-  env: { plain, secretKeys: [] as string[] }
-});
-
 describe('buildEnv — ANTHROPIC_API_KEY inheritance', () => {
   const REAL_KEY = 'sk-ant-real-host-key';
 
@@ -66,24 +62,24 @@ describe('buildEnv — ANTHROPIC_API_KEY inheritance', () => {
   });
 
   it('endpoint workspace does NOT inherit the host ANTHROPIC_API_KEY', async () => {
-    const env = await buildEnv('ws1', { ...fakeEnv(), authMode: 'endpoint', endpointId: 'ep1' });
+    const env = await buildEnv('ws1', { authMode: 'endpoint', endpointId: 'ep1' });
     expect(env.ANTHROPIC_API_KEY).toBeUndefined();
   });
 
   it('oauth workspace still inherits the host ANTHROPIC_API_KEY', async () => {
-    const env = await buildEnv('ws1', { ...fakeEnv(), authMode: 'oauth' });
+    const env = await buildEnv('ws1', { authMode: 'oauth' });
     expect(env.ANTHROPIC_API_KEY).toBe(REAL_KEY);
   });
 
   it('apikey workspace still inherits the host ANTHROPIC_API_KEY', async () => {
-    const env = await buildEnv('ws1', { ...fakeEnv(), authMode: 'apikey' });
+    const env = await buildEnv('ws1', { authMode: 'apikey' });
     expect(env.ANTHROPIC_API_KEY).toBe(REAL_KEY);
   });
 
   it('endpoint workspace with a vault-resolved ANTHROPIC_API_KEY keeps that value', async () => {
     const explicit = 'sk-ant-workspace-explicit';
     resolveWorkspaceEnvMock.mockResolvedValueOnce({ ANTHROPIC_API_KEY: explicit });
-    const env = await buildEnv('ws1', { ...fakeEnv(), authMode: 'endpoint', endpointId: 'ep1' });
+    const env = await buildEnv('ws1', { authMode: 'endpoint', endpointId: 'ep1' });
     expect(env.ANTHROPIC_API_KEY).toBe(explicit);
   });
 });
@@ -101,20 +97,20 @@ describe('buildEnv — claude child-session markers (#285)', () => {
   // nothing, and the session shows $0.00 with no busy attribution.
   it('strips CLAUDE_CODE_CHILD_SESSION so the spawned claude saves its transcript', async () => {
     vi.stubEnv('CLAUDE_CODE_CHILD_SESSION', '1');
-    const env = await buildEnv('ws1', { ...fakeEnv(), authMode: 'oauth' });
+    const env = await buildEnv('ws1', { authMode: 'oauth' });
     expect(env.CLAUDE_CODE_CHILD_SESSION).toBeUndefined();
   });
 
   it('strips the CLAUDECODE nested marker', async () => {
     vi.stubEnv('CLAUDECODE', '1');
-    const env = await buildEnv('ws1', { ...fakeEnv(), authMode: 'oauth' });
+    const env = await buildEnv('ws1', { authMode: 'oauth' });
     expect(env.CLAUDECODE).toBeUndefined();
   });
 
   it('a vault-resolved override of a marker is still honoured', async () => {
     vi.stubEnv('CLAUDE_CODE_CHILD_SESSION', '1');
     resolveWorkspaceEnvMock.mockResolvedValueOnce({ CLAUDE_CODE_CHILD_SESSION: 'keep-me' });
-    const env = await buildEnv('ws1', { ...fakeEnv(), authMode: 'oauth' });
+    const env = await buildEnv('ws1', { authMode: 'oauth' });
     expect(env.CLAUDE_CODE_CHILD_SESSION).toBe('keep-me');
   });
 });
@@ -161,7 +157,7 @@ describe('buildEnv — loadout-source tokens never reach a workspace (#444)', ()
   it('strips FLEET_LOADOUT_TOKEN and FLEET_LOADOUT_TOKEN_* from the inherited host env', async () => {
     vi.stubEnv('FLEET_LOADOUT_TOKEN', 'sentinel-generic-tok');
     vi.stubEnv('FLEET_LOADOUT_TOKEN_GHCR_IO_ACME_PRIVATE', 'sentinel-specific-tok');
-    const env = await buildEnv('ws1', { ...fakeEnv(), authMode: 'oauth' });
+    const env = await buildEnv('ws1', { authMode: 'oauth' });
     expect(env.FLEET_LOADOUT_TOKEN).toBeUndefined();
     expect(env.FLEET_LOADOUT_TOKEN_GHCR_IO_ACME_PRIVATE).toBeUndefined();
     // Boolean assertion: a failure must not print the (real host) env.
@@ -181,7 +177,7 @@ describe('buildEnv — store credentials stay host-only', () => {
     vi.stubEnv('PGPASSWORD', 'pw');
     vi.stubEnv('PGSERVICE', 'fleet');
     vi.stubEnv('UNRELATED_VAR', 'kept');
-    const env = await buildEnv('ws1', { ...fakeEnv(), authMode: 'oauth' });
+    const env = await buildEnv('ws1', { authMode: 'oauth' });
     expect(env.FLEET_DB_URL).toBeUndefined();
     expect(env.PGPASSWORD).toBeUndefined();
     expect(env.PGSERVICE).toBeUndefined();
@@ -194,27 +190,27 @@ describe('buildEnv — store credentials stay host-only', () => {
       connection: { host: 'h', port: 5432, database: 'd', user: 'u', password: { kind: 'env', name: 'FLEET_DB_PW' }, ssl: 'disable' }
     };
     vi.stubEnv('fleet_db_pw', 'pw');
-    const env = await buildEnv('ws1', { ...fakeEnv(), authMode: 'oauth' });
+    const env = await buildEnv('ws1', { authMode: 'oauth' });
     expect(env.fleet_db_pw).toBeUndefined();
   });
 
   it('still drops libpq credential vars when the store config cannot be read', async () => {
     storeConfig.current = new Error('config.json is not valid JSON');
     vi.stubEnv('PGPASSWORD', 'pw');
-    const env = await buildEnv('ws1', { ...fakeEnv(), authMode: 'oauth' });
+    const env = await buildEnv('ws1', { authMode: 'oauth' });
     expect(env.PGPASSWORD).toBeUndefined();
   });
 
   it('leaves libpq vars alone on the SQLite store', async () => {
     vi.stubEnv('PGPASSWORD', 'users-own');
-    const env = await buildEnv('ws1', { ...fakeEnv(), authMode: 'oauth' });
+    const env = await buildEnv('ws1', { authMode: 'oauth' });
     expect(env.PGPASSWORD).toBe('users-own');
   });
 
   it('drops libpq vars on the managed store', async () => {
     storeConfig.current = { kind: 'managed', poolMax: 4 };
     vi.stubEnv('PGPASSWORD', 'pw');
-    const env = await buildEnv('ws1', { ...fakeEnv(), authMode: 'oauth' });
+    const env = await buildEnv('ws1', { authMode: 'oauth' });
     expect(env.PGPASSWORD).toBeUndefined();
   });
 
@@ -223,7 +219,7 @@ describe('buildEnv — store credentials stay host-only', () => {
     try {
       vi.stubEnv('FLEET_DB_URL', 'postgres://u:pw@db/fleet');
       vi.stubEnv('PGPASSWORD', 'pw');
-      const env = await buildEnv('ws1', { ...fakeEnv(), authMode: 'oauth' });
+      const env = await buildEnv('ws1', { authMode: 'oauth' });
       expect(env.FLEET_DB_URL).toBeUndefined();
       expect(env.PGPASSWORD).toBeUndefined();
     } finally {

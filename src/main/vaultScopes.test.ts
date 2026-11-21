@@ -82,7 +82,7 @@ describe('identity scope', () => {
     expect(() => assertRendererVaultScope('identity:github')).toThrow(/host-only/);
     expect(() => assertRendererVaultScope('identity:other')).toThrow(/host-only/);
   });
-  it('is reserved as a workspace id and refused by resolveEnv', () => {
+  it('is reserved as a workspace id and refused by resolveWorkspaceEnv', () => {
     expect(() => assertRendererWorkspaceId('identity:github')).toThrow(/workspace id/);
     expect(() => assertNotReservedVaultScope('identity:github')).toThrow(/reserved/);
   });

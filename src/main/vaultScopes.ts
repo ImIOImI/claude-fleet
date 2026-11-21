@@ -27,8 +27,8 @@ export const APP_INDEX_SCOPE = `${APP_VAULT_PREFIX}index`;
 
 /**
  * Every vault scope prefix that names a non-workspace bag. A workspace's id is
- * its vault scope (resolveEnv injects that bag into the workspace's env), so a
- * workspace may never be created under one of these.
+ * its vault scope (resolveWorkspaceEnv injects that bag into the workspace's
+ * env), so a workspace may never be created under one of these.
  */
 export const RESERVED_VAULT_PREFIXES: readonly string[] = [SOURCE_VAULT_PREFIX, ENDPOINT_VAULT_PREFIX, IDENTITY_VAULT_PREFIX, STORE_VAULT_PREFIX, APP_VAULT_PREFIX];
 
@@ -66,8 +66,8 @@ export function assertRendererWorkspaceId(id: unknown): asserts id is string {
 /**
  * Throw when a vault scope used to read/write a secret is one of the reserved
  * (non-workspace) bags — `loadout-source:`, `endpoint:`, `identity:`, `store:` or `app:` — rather than an
- * actual workspace id. `vault.resolveEnv` applies this before injecting a
- * vault bag into a workspace's env; any other main-process call site that
+ * actual workspace id. `vault.resolveWorkspaceEnv` applies this before
+ * injecting a vault bag into a workspace's env; any other main-process call site that
  * takes a caller-influenced scope and hands its secrets somewhere (a script
  * step, a log, a response) should apply the same backstop (#444 final review
  * M6: the automation runner's script-secret lookup did not).

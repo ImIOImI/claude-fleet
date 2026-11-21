@@ -9,6 +9,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 let userDataDir = '';
 const encState = vi.hoisted(() => ({ available: true }));
+const fsSpies = vi.hoisted(() => ({ writeFile: vi.fn() }));
 vi.mock('electron', () => ({
   app: { getPath: () => userDataDir },
   safeStorage: {
@@ -18,6 +19,18 @@ vi.mock('electron', () => ({
     decryptString: (b: Buffer) => b.toString()
   }
 }));
+// Spy on the real writeFile (kept functional) so a test can assert vault.ts's
+// `mutate` skipped the write entirely, not just that content didn't change.
+vi.mock('node:fs/promises', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:fs/promises')>();
+  return {
+    ...actual,
+    writeFile: (...args: Parameters<typeof actual.writeFile>) => {
+      fsSpies.writeFile(...args);
+      return actual.writeFile(...args);
+    }
+  };
+});
 
 const vault = await import('./vault.js');
 
@@ -76,5 +89,12 @@ describe('workspace env via the model', () => {
     expect(await vault.migrateManifestEnv([{ id: '01HW1', plain: { P: '1' }, secretKeys: [] }])).toBe(true);
     expect(await vault.migrateManifestEnv([{ id: '01HW1', plain: { P: '2' }, secretKeys: [] }])).toBe(false);
     expect(await vault.resolveWorkspaceEnv('01HW1')).toEqual({ P: '1' });
+  });
+
+  it('migrateManifestEnv does not rewrite secrets.enc once already migrated', async () => {
+    await vault.migrateManifestEnv([{ id: '01HW1', plain: { P: '1' }, secretKeys: [] }]);
+    fsSpies.writeFile.mockClear();
+    await vault.migrateManifestEnv([{ id: '01HW1', plain: { P: '2' }, secretKeys: [] }]);
+    expect(fsSpies.writeFile).not.toHaveBeenCalled();
   });
 });

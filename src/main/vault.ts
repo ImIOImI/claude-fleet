@@ -173,14 +173,19 @@ export async function deleteAllForWorkspace(workspaceId: string): Promise<void> 
   });
 }
 
-/** Apply a store transform, persisting it. Throws when encryption isn't available. */
+/** Apply a store transform, persisting it. Throws when encryption isn't available.
+ *  Skips the write when `fn` returns the same store reference (a declared no-op,
+ *  e.g. an already-migrated `migrateManifestEnv`) so it doesn't re-encrypt and
+ *  rewrite secrets.enc for nothing on every launch. */
 async function mutate(fn: (s: Store) => Store): Promise<void> {
   if (!encryptionAvailable()) {
     throw new Error('Vault unavailable (secret encryption not available on this system).');
   }
   await withLock(async () => {
     const store = await load();
-    await persist(fn(store));
+    const next = fn(store);
+    if (next === store) return;
+    await persist(next);
   });
 }
 

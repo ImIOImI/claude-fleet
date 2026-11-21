@@ -72,6 +72,7 @@ import { logError } from './errorLog.js';
 import { learnMapping as learnMirrorMapping } from './mirrorPolicy.js';
 import { workspaceStateDir, assertValidWorkspaceId } from './paths.js';
 import { resolveWorkspaceEnv } from './vault.js';
+import { recordEnvApplied } from './envApplied.js';
 import { getStoreConfig } from './config.js';
 import { storeSecretEnvNames, type StoreConfig } from './store/storeConfig.js';
 import { activeStoreConfig } from './store/activeStore.js';
@@ -400,10 +401,11 @@ async function hostEnvForWorkspaces(): Promise<NodeJS.ProcessEnv> {
  */
 export async function buildEnv(
   id: string,
-  ws: { env: Workspace['env']; authMode?: Workspace['authMode']; endpointId?: string }
+  ws: { authMode?: Workspace['authMode']; endpointId?: string },
+  resolved?: Record<string, string>
 ): Promise<NodeJS.ProcessEnv> {
   const backendVars = ws.authMode === 'endpoint' ? await endpointEnv(ws.endpointId) : {};
-  const resolved = await resolveWorkspaceEnv(id);
+  const resolvedEnv = resolved ?? (await resolveWorkspaceEnv(id));
   const base = await hostEnvForWorkspaces();
   // Endpoint workspaces must not inherit the host's real Anthropic key (dev
   // fallback mode) into a process whose base URL is a third-party endpoint.
@@ -415,9 +417,9 @@ export async function buildEnv(
   // sees CLAUDE_CODE_CHILD_SESSION and turns transcript saving OFF — no .jsonl
   // is written, the watcher ingests nothing, and the session shows $0.00 with
   // no busy attribution (#285). Scrub the markers so it saves its transcript.
-  // (An explicit workspace env override re-appears below via `resolved`.)
+  // (An explicit workspace env override re-appears below via `resolvedEnv`.)
   for (const marker of CLAUDE_CHILD_SESSION_MARKERS) delete base[marker];
-  return { ...base, ...backendVars, ...resolved, TERM: 'xterm-256color' };
+  return { ...base, ...backendVars, ...resolvedEnv, TERM: 'xterm-256color' };
 }
 
 // ── Backend surface ────────────────────────────────────────────────────────
@@ -717,7 +719,8 @@ export async function attachPty(
   // own flags so the spawn becomes `node <stub> [--mcp-config …] [--session-id …]`.
   const rawExtra = process.env.CLAUDE_FLEET_LOCAL_CLAUDE_EXTRA_ARGS;
   const extraArgs = rawExtra ? rawExtra.split('\0').filter(Boolean) : undefined;
-  const env = await buildEnv(id, m);
+  const resolvedWorkspaceEnv = await resolveWorkspaceEnv(id);
+  const env = await buildEnv(id, m, resolvedWorkspaceEnv);
   const mcpConfigPath = await ensureMcpConfig(id, launcher);
   // claude reads --mcp-config INSIDE the distro for wsl mode.
   const mcpConfigArg =
@@ -744,6 +747,7 @@ export async function attachPty(
     await signalWslSessions(launcher, id, 'CONT');
   }
   await persistLiveState(id);
+  await recordEnvApplied(id, resolvedWorkspaceEnv);
   // Cross-restart continuity: a restored tab whose process died with the
   // previous app run resumes its mapped conversation instead of spawning a
   // fresh one. Looked up before queueing: the queue is serial, so a slow DB
