@@ -44,7 +44,7 @@ describe('assertRendererVaultScope fails closed (#444 security review)', () => {
 
 describe('assertRendererWorkspaceId (#444 security review)', () => {
   it('exports the reserved vault prefixes', () => {
-    expect(RESERVED_VAULT_PREFIXES).toEqual(['loadout-source:', 'endpoint:', 'identity:', 'store:']);
+    expect(RESERVED_VAULT_PREFIXES).toEqual(['loadout-source:', 'endpoint:', 'identity:', 'store:', 'app:']);
   });
   it.each([
     ['a loadout-source scope', 'loadout-source:ghcr.io/acme/private'],
@@ -88,5 +88,19 @@ describe('identity scope', () => {
   });
   it('leaves endpoint scopes renderer-readable', () => {
     expect(() => assertRendererVaultScope('endpoint:3f0c')).not.toThrow();
+  });
+});
+
+describe('app: scope', () => {
+  it('is reserved for workspace ids', () => {
+    expect(() => assertRendererWorkspaceId('app:env')).toThrow();
+    expect(RESERVED_VAULT_PREFIXES).toContain('app:');
+  });
+  it('is host-only on the generic surface', () => {
+    expect(() => assertRendererVaultScope('app:env')).toThrow(/host-only/);
+    expect(() => assertRendererVaultScope('app:index')).toThrow(/host-only/);
+  });
+  it('is never resolved into a workspace env', () => {
+    expect(() => assertNotReservedVaultScope('app:env')).toThrow(/reserved/);
   });
 });
