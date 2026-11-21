@@ -23,11 +23,23 @@ export function discard(state: StagedState, key: string): StagedState {
   return { edits: state.edits.filter((e) => e.key !== key) };
 }
 
-/** Secret override values are never sent down, so a secret override counts as set. */
-export function resolvesNonEmpty(e: VaultEntry, workspaceId: string): boolean {
+/** The override value typed for `key` in staged edits, if any. */
+function stagedOverride(staged: StagedState, key: string): string | null {
+  const mine = staged.edits.filter((e) => e.key === key);
+  const override = mine.find((e) => e.op === 'override');
+  if (override?.op === 'override') return override.value;
+  const create = mine.find((e) => e.op === 'create');
+  return create?.op === 'create' ? create.value : null;
+}
+
+/** A staged override counts by its typed value; a saved secret override's
+ *  value is never sent down, so it counts as set. */
+export function resolvesNonEmpty(e: VaultEntry, workspaceId: string, staged?: StagedState): boolean {
   const line = e.lines.find((l) => l.workspaceId === workspaceId);
   if (!line) return false;
   if (line.mode === 'inherit') return e.root.set && (e.secret || e.root.value !== '');
+  const typed = staged ? stagedOverride(staged, e.key) : null;
+  if (typed !== null) return typed !== '';
   return e.secret || !!line.value;
 }
 

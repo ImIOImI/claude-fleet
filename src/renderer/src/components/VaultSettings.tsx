@@ -9,6 +9,8 @@ type Kind = 'container' | 'local' | 'remote';
 
 interface Props {
   workspaces: { id: string; name: string; kind: Kind }[];
+  /** Fallback names for workspaces not in `workspaces` (e.g. the automations workspace). */
+  names?: Record<string, string>;
   focusKey?: string;
 }
 
@@ -17,7 +19,7 @@ function errorText(err: unknown): string {
   return raw.replace(/^Error invoking remote method '[^']+': (?:Error: )?/, '');
 }
 
-export function VaultSettings({ workspaces, focusKey }: Props) {
+export function VaultSettings({ workspaces, names: fallbackNames, focusKey }: Props) {
   const vault = window.api.vault;
   const [entries, setEntries] = useState<VaultEntry[] | null>(null);
   const [available, setAvailable] = useState<boolean | null>(null);
@@ -28,7 +30,10 @@ export function VaultSettings({ workspaces, focusKey }: Props) {
   const listRef = useRef<HTMLDivElement>(null);
   const focused = useRef(false);
 
-  const names = useMemo(() => Object.fromEntries(workspaces.map((w) => [w.id, w.name])), [workspaces]);
+  const names = useMemo(
+    () => ({ ...fallbackNames, ...Object.fromEntries(workspaces.map((w) => [w.id, w.name])) }),
+    [workspaces, fallbackNames]
+  );
   const kinds = useMemo(() => Object.fromEntries(workspaces.map((w) => [w.id, w.kind])) as Record<string, Kind>, [workspaces]);
 
   const reload = useCallback(async () => {
@@ -85,7 +90,12 @@ export function VaultSettings({ workspaces, focusKey }: Props) {
         tags: a.tags
       };
       if (a.rootValue !== undefined) put.rootValue = a.rootValue;
-      await vault.putKey(put);
+      try {
+        await vault.putKey(put);
+      } catch (err) {
+        if (a.rename) throw new Error(`Renamed to ${a.rename}, but saving changes failed: ${errorText(err)}`);
+        throw err;
+      }
     });
 
   const row = (e: VaultEntry) => (
@@ -115,7 +125,7 @@ export function VaultSettings({ workspaces, focusKey }: Props) {
         </div>
       )}
       {available === false && (
-        <div className="account-notice vault-degraded">OS keychain unavailable · env-var fallback active</div>
+        <div className="account-notice vault-degraded">Secret storage unavailable · vault is read-only</div>
       )}
       <div className="vault-header">
         <input

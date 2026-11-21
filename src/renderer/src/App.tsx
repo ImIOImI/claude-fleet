@@ -1184,10 +1184,9 @@ export function App() {
       await window.api.workspace.ensureImage(({ message }) => setStatus(message), submit.image);
     }
 
-    await applyVaultEdits(id, submit);
-
     setStatus('Creating workspace…');
     try {
+      await applyVaultEdits(id, submit);
       await window.api.workspace.create({
         id,
         name: submit.name,

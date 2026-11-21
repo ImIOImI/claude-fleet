@@ -420,7 +420,7 @@ export function SettingsModal({ onClose, onSaved, initialTab, names = {}, worksp
 
         {activeTab === 'vault' && (
           <>
-            <VaultSettings workspaces={workspaces} focusKey={focusKey} />
+            <VaultSettings workspaces={workspaces} names={names} focusKey={focusKey} />
             <div className="modal-footer notif-footer">
               <span className="modal-footer-spacer" />
               <button type="button" className="btn" onClick={onClose}>Close</button>

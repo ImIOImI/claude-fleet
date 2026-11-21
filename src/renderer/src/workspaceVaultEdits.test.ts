@@ -72,3 +72,14 @@ it('resolvesNonEmpty: override, or inherit with a root value', () => {
   expect(resolvesNonEmpty({ ...root('A'), secret: false, lines: line('override', '') }, 'W1')).toBe(false);
   expect(resolvesNonEmpty(root('A'), 'W1')).toBe(false);
 });
+it('resolvesNonEmpty: a staged override counts only with a non-empty typed value', () => {
+  const ovr = [{ workspaceId: 'W1', mode: 'override' as const, pending: false }];
+  const e: VaultEntry = { ...root('A'), lines: ovr };
+  const plain: VaultEntry = { ...root('P'), secret: false, lines: [{ ...ovr[0], value: 'old' }] };
+  expect(resolvesNonEmpty(e, 'W1', stage({ edits: [] }, { key: 'A', op: 'override', value: '' }))).toBe(false);
+  expect(resolvesNonEmpty(e, 'W1', stage({ edits: [] }, { key: 'A', op: 'override', value: 'x' }))).toBe(true);
+  expect(resolvesNonEmpty(plain, 'W1', stage({ edits: [] }, { key: 'P', op: 'override', value: '' }))).toBe(false);
+  const created = stage({ edits: [] }, { key: 'A', op: 'create', secret: true, tags: [], value: '', asRoot: false });
+  expect(resolvesNonEmpty(e, 'W1', created)).toBe(false);
+  expect(resolvesNonEmpty(e, 'W1', { edits: [] })).toBe(true);
+});

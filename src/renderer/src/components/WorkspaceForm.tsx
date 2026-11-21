@@ -1022,7 +1022,7 @@ export function WorkspaceForm({
 
       {isRemote ? (
         <div className="form-row">
-          <label>Env vars</label>
+          <span className="form-label">Env vars</span>
           <span className="form-hint">Remote workspaces can't receive env from the vault.</span>
         </div>
       ) : (

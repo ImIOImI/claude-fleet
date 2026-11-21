@@ -55,7 +55,7 @@ function useReveals(entry: VaultEntry, reveal: VaultKeyRowProps['reveal']) {
   const signature = JSON.stringify(entry);
   useEffect(() => revealer.hideAll(), [revealer, signature]);
   const toggle = (slot: string): void => (revealer.isActive(slot) ? revealer.hide(slot) : revealer.reveal(slot));
-  return { reveals, toggle };
+  return { reveals, toggle, hideAll: () => revealer.hideAll() };
 }
 
 function ValueCell({ secret, value, state, onToggle, label }: {
@@ -111,7 +111,7 @@ export function VaultKeyRow(p: VaultKeyRowProps) {
   const [overriding, setOverriding] = useState<string | null>(null);
   const [overrideValue, setOverrideValue] = useState('');
   const [busy, setBusy] = useState(false);
-  const { reveals, toggle } = useReveals(entry, p.reveal);
+  const { reveals, toggle, hideAll } = useReveals(entry, p.reveal);
 
   const fleetKey = entry.fleet ? FLEET_KEYS.find((k) => k.key === entry.key) : undefined;
   const lines = scopeWorkspaceId ? entry.lines.filter((l) => l.workspaceId === scopeWorkspaceId) : entry.lines;
@@ -135,7 +135,11 @@ export function VaultKeyRow(p: VaultKeyRowProps) {
     setOverrideValue('');
   };
   const saveOverride = async (ws: string): Promise<void> => {
-    if (await run(() => p.onSetLine(ws, { mode: 'override', value: overrideValue }))) setOverriding(null);
+    if (await run(() => p.onSetLine(ws, { mode: 'override', value: overrideValue }))) cancelOverride();
+  };
+  const cancelOverride = (): void => {
+    setOverriding(null);
+    setOverrideValue('');
   };
 
   const rootCell = entry.root.set ? (
@@ -176,7 +180,14 @@ export function VaultKeyRow(p: VaultKeyRowProps) {
               label={`${entry.key} for ${p.names[ws] ?? ws}`}
             />
             <span className="vault-spacer" />
-            <button type="button" className="btn-mini" onClick={() => startOverride(ws)} disabled={locked} title="Replace override value">
+            <button
+              type="button"
+              className="btn-mini"
+              onClick={() => startOverride(ws)}
+              disabled={locked}
+              title="Replace override value"
+              aria-label={`Replace override of ${entry.key} for ${p.names[ws] ?? ws}`}
+            >
               ✎
             </button>
             <button
@@ -220,8 +231,8 @@ export function VaultKeyRow(p: VaultKeyRowProps) {
               autoComplete="off"
               disabled={busy}
             />
-            <button type="submit" className="btn-mini primary" disabled={busy}>Save</button>
-            <button type="button" className="btn-mini" onClick={() => setOverriding(null)} disabled={busy}>Cancel</button>
+            <button type="submit" className="btn-mini primary" disabled={busy || !overrideValue}>Save</button>
+            <button type="button" className="btn-mini" onClick={cancelOverride} disabled={busy}>Cancel</button>
           </form>
         )}
       </div>
@@ -236,7 +247,10 @@ export function VaultKeyRow(p: VaultKeyRowProps) {
           className="vault-chevron"
           aria-expanded={open}
           aria-label={`${open ? 'Collapse' : 'Expand'} ${entry.key}`}
-          onClick={() => setOpen(!open)}
+          onClick={() => {
+            if (open) hideAll();
+            setOpen(!open);
+          }}
         >
           {open ? '▾' : '▸'}
         </button>
@@ -263,9 +277,15 @@ export function VaultKeyRow(p: VaultKeyRowProps) {
                 className={`vault-icon-btn${entry.secret ? ' on' : ''}`}
                 aria-label={entry.secret ? `Make ${entry.key} plain` : `Make ${entry.key} secret`}
                 aria-pressed={entry.secret}
-                title={entry.secret ? 'Secret — click to store as plain text' : 'Plain — click to make secret'}
+                title={
+                  fleetKey
+                    ? 'Fleet keys keep their built-in secret setting'
+                    : entry.secret
+                      ? 'Secret — click to store as plain text'
+                      : 'Plain — click to make secret'
+                }
                 onClick={() => void run(() => p.onEditKey!({ key: entry.key, secret: !entry.secret, tags: entry.tags }))}
-                disabled={locked}
+                disabled={locked || !!fleetKey}
               >
                 <IconLock open={!entry.secret} />
               </button>

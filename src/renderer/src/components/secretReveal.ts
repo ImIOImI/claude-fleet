@@ -1,6 +1,6 @@
 // Temporary reveal of stored secret env values in the workspace edit form.
 // The renderer normally never holds a saved secret value (SPEC §9); a reveal
-// is the deliberate exception: fetched once via vault:getSecret on the
+// is the deliberate exception: fetched once via vault:reveal on the
 // user's click, held only while shown, and dropped on hide / timeout /
 // modal close. Kept React-free so the timer logic is unit-testable.
 

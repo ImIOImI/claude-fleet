@@ -1,5 +1,6 @@
 // Inline add/edit form for a vault key (Settings → Vault).
 import { useId, useState } from 'react';
+import { FLEET_KEYS } from '../../../preload/fleetKeys';
 import type { VaultEntry } from '../../../preload/vaultTypes';
 import { inheritCount, isValidKeyName, parseTagInput, tagSuggestions } from '../vaultView';
 
@@ -35,6 +36,7 @@ export function VaultKeyForm({ entry, tagOptions, onSubmit, onCancel }: Props) {
   const [busy, setBusy] = useState(false);
 
   const losing = entry ? inheritCount(entry) : 0;
+  const fleetSecret = FLEET_KEYS.find((k) => k.key === name.trim())?.secret;
 
   const submit = async (confirmed: boolean): Promise<void> => {
     const key = name.trim();
@@ -49,7 +51,7 @@ export function VaultKeyForm({ entry, tagOptions, onSubmit, onCancel }: Props) {
     else if (value !== '' && value !== (entry?.root.value ?? '')) rootValue = value;
     if (rootValue === null && losing > 0 && !confirmed) return setConfirmClear(true);
 
-    const a: VaultKeySubmit = { key: entry?.key ?? key, secret, tags };
+    const a: VaultKeySubmit = { key: entry?.key ?? key, secret: fleetSecret ?? secret, tags };
     if (rootValue !== undefined) a.rootValue = rootValue;
     if (entry && key !== entry.key) a.rename = key;
     setBusy(true);
@@ -95,7 +97,7 @@ export function VaultKeyForm({ entry, tagOptions, onSubmit, onCancel }: Props) {
         <input
           className="vault-form-value"
           aria-label="Root value"
-          type={secret ? 'password' : 'text'}
+          type={(fleetSecret ?? secret) ? 'password' : 'text'}
           placeholder={valuePlaceholder}
           value={value}
           onChange={(e) => {
@@ -126,7 +128,12 @@ export function VaultKeyForm({ entry, tagOptions, onSubmit, onCancel }: Props) {
         </datalist>
         {!entry && (
           <label className="vault-form-secret">
-            <input type="checkbox" checked={secret} onChange={(e) => setSecret(e.target.checked)} disabled={busy} />
+            <input
+              type="checkbox"
+              checked={fleetSecret ?? secret}
+              onChange={(e) => setSecret(e.target.checked)}
+              disabled={busy || fleetSecret !== undefined}
+            />
             <span>secret</span>
           </label>
         )}
@@ -149,7 +156,7 @@ export function VaultKeyForm({ entry, tagOptions, onSubmit, onCancel }: Props) {
           {entry ? 'Save' : 'Add key'}
         </button>
       </div>
-      {problem && <div className="vault-note err">{problem}</div>}
+      {problem && <div className="vault-note err" role="alert">{problem}</div>}
       {confirmClear && (
         <div className="vault-confirm" role="group" aria-label="Confirm clearing root value">
           <span>

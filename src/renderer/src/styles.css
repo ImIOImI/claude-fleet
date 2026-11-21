@@ -1552,7 +1552,8 @@ button.obs-ws-row:hover .obs-ws-icon { opacity: 1; color: var(--ink); }
 
 /* form rows */
 .form-row { display: flex; flex-direction: column; margin-bottom: 12px; }
-.form-row label {
+.form-row label,
+.form-row .form-label {
   font-family: var(--font-mono);
   font-size: 10px;
   font-weight: 600;

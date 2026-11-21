@@ -89,7 +89,7 @@ export function WorkspaceVaultSection(p: Props) {
   }, [list, autoOpened, mine.length]);
 
   const keySignature = mine
-    .filter((e) => resolvesNonEmpty(e, id))
+    .filter((e) => resolvesNonEmpty(e, id, p.staged))
     .map((e) => e.key)
     .join('\n');
   const { onResolvedKeysChange } = p;
