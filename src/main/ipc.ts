@@ -90,7 +90,9 @@ import {
 } from './mcpServer.js';
 import * as vault from './vault.js';
 import { assertRendererWorkspaceId } from './vaultScopes.js';
-import { registerVaultIpc } from './vaultIpc.js';
+import { registerVaultIpc, type VaultIpcDeps, type VaultWorkspaceKind } from './vaultIpc.js';
+import { readEnvApplied } from './envApplied.js';
+import { envHash } from './vaultModel.js';
 import { IdentityService } from './identity/identityService.js';
 import { BUILTIN_GITHUB_CLIENT_ID, GITHUB_CLIENT_ID_ENV } from './identity/clientId.js';
 import { readGithubClientId, registerGithubClientIdIpc, type GithubClientIdDeps } from './githubClientIdIpc.js';
@@ -2219,7 +2221,26 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
 
   // Per-workspace vault (vault:*): the guarded surface lives in vaultIpc.ts so
   // its fail-closed scope/key checks unit-test without electron (#444).
-  registerVaultIpc(ipcMain, vault);
+  const vaultIpcDeps: VaultIpcDeps = {
+    isVaultAvailable: vault.isVaultAvailable,
+    listModelEntries: vault.listModelEntries,
+    getRootValue: vault.getRootValue,
+    revealValue: vault.revealValue,
+    putKey: vault.putKey,
+    renameKey: vault.renameKey,
+    deleteKey: vault.deleteKey,
+    setLine: vault.setLine,
+    removeLine: vault.removeLine,
+    copyWorkspace: vault.copyWorkspace,
+    applyWorkspaceEdits: vault.applyWorkspaceEdits,
+    deleteAllForWorkspace: vault.deleteAllForWorkspace,
+    pendingFor: async (ws: string) => {
+      const h = await readEnvApplied(ws);
+      return h !== null && h !== envHash(await vault.resolveWorkspaceEnv(ws));
+    },
+    workspaceKind: async (ws: string): Promise<VaultWorkspaceKind> => (await readWorkspaceManifest(ws))?.kind ?? null
+  };
+  registerVaultIpc(ipcMain, vaultIpcDeps);
 
   // GitHub sign-in (identity:*). The token stays in the host-only vault scope
   // identity:github; private ghcr.io loadout sources borrow it via the hook.
