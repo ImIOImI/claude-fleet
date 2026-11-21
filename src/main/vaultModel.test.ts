@@ -49,6 +49,10 @@ describe('putKey', () => {
     const s = m.putKey(base(), { key: 'A', secret: true, tags: ['a', 'a', 'b'] });
     expect(m.getMeta(s, 'A')?.tags).toEqual(['a', 'b']);
   });
+  it('fails closed to secret when the flag is omitted', () => {
+    const s = m.putKey(base(), { key: 'A', tags: [] } as unknown as Parameters<typeof m.putKey>[1]);
+    expect(m.getMeta(s, 'A')?.secret).toBe(true);
+  });
 });
 
 describe('lines and resolution', () => {
@@ -78,6 +82,30 @@ describe('lines and resolution', () => {
   });
   it('setLine requires an existing key', () => {
     expect(() => m.setLine(base(), 'NOPE', W1, { mode: 'inherit' })).toThrow(/unknown key/);
+  });
+  it('setLine on a bag-only key creates default metadata instead of throwing', () => {
+    const s: m.Store = { [W1]: { ORPHAN: 'v' } };
+    const t = m.setLine(s, 'ORPHAN', W1, { mode: 'override', value: 'v2' });
+    expect(t[W1]?.ORPHAN).toBe('v2');
+    expect(m.getMeta(t, 'ORPHAN')).toEqual({ secret: true, inherit: [], tags: [] });
+  });
+  it('lineMode validates the workspace id', () => {
+    expect(() => m.lineMode(seeded(), 'A', '')).toThrow(/workspace id must be a non-empty string/);
+  });
+  it('rejects an empty workspace id', () => {
+    expect(() => m.resolveWorkspaceEnv(seeded(), '')).toThrow(/workspace id must be a non-empty string/);
+  });
+  it('a dual bag+inherit entry resolves as override; removeLine clears both', () => {
+    let s = m.putKey(base(), { key: 'A', secret: true, tags: [], rootValue: 'root' });
+    s = m.setLine(s, 'A', W1, { mode: 'inherit' });
+    s = { ...s, [W1]: { ...s[W1], A: 'override-val' } };
+    expect(m.getMeta(s, 'A')?.inherit).toEqual([W1]);
+    expect(m.lineMode(s, 'A', W1)).toBe('override');
+    expect(m.resolveWorkspaceEnv(s, W1)).toEqual({ A: 'override-val' });
+    s = m.removeLine(s, 'A', W1);
+    expect(m.lineMode(s, 'A', W1)).toBeNull();
+    expect(m.getMeta(s, 'A')?.inherit).toEqual([]);
+    expect(W1 in s).toBe(false);
   });
   it('removeLine clears both states and drops an orphan bag', () => {
     let s = m.removeLine(seeded(), 'P', W1);
@@ -114,6 +142,9 @@ describe('rename / delete / copy / removeWorkspace', () => {
     const s = m.putKey(seeded(), { key: 'B', secret: true, tags: [] });
     expect(() => m.renameKey(s, 'A', 'B')).toThrow(/exists/);
   });
+  it('rename throws when the source key exists nowhere', () => {
+    expect(() => m.renameKey(base(), 'NOPE', 'OTHER')).toThrow(/unknown key: NOPE/);
+  });
   it('deleteKey removes everything', () => {
     const s = m.deleteKey(seeded(), 'A');
     expect(m.listEntries(s)).toEqual([]);
@@ -125,6 +156,12 @@ describe('rename / delete / copy / removeWorkspace', () => {
     const t = m.copyWorkspace(seeded(), W1, '01HW3');
     expect(m.lineMode(t, 'A', '01HW3')).toBe('inherit');
   });
+  it('copyWorkspace of a bag-only key creates default metadata instead of throwing', () => {
+    const s: m.Store = { [W1]: { ORPHAN: 'v' } };
+    const t = m.copyWorkspace(s, W1, W2);
+    expect(m.lineMode(t, 'ORPHAN', W2)).toBe('override');
+    expect(m.getMeta(t, 'ORPHAN')).toEqual({ secret: true, inherit: [], tags: [] });
+  });
   it('removeWorkspace drops links, bag, and orphan index entries', () => {
     let s = m.putKey(seeded(), { key: 'ONLY', secret: true, tags: [] });
     s = m.setLine(s, 'ONLY', W2, { mode: 'override', value: 'x' });
@@ -133,6 +170,14 @@ describe('rename / delete / copy / removeWorkspace', () => {
     expect(m.getMeta(s, 'A')?.inherit).toEqual([]);
     expect(m.getMeta(s, 'ONLY')).toBeNull();
     expect(W2 in s).toBe(false);
+  });
+  it('removeWorkspace keeps an index entry still referenced by another workspace', () => {
+    let s = m.putKey(base(), { key: 'A', secret: true, tags: [] });
+    s = m.setLine(s, 'A', W1, { mode: 'inherit' });
+    s = m.setLine(s, 'A', W2, { mode: 'inherit' });
+    s = m.removeWorkspace(s, W1);
+    expect(m.getMeta(s, 'A')?.inherit).toEqual([W2]);
+    expect(m.lineMode(s, 'A', W2)).toBe('inherit');
   });
 });
 
@@ -157,6 +202,12 @@ describe('applyWorkspaceEdits', () => {
     expect(m.getMeta(s, 'R')).toEqual({ secret: true, inherit: [], tags: ['keep'] });
     expect(s[W1]?.R).toBe('mine');
   });
+  it('override on a bag-only key creates default metadata instead of throwing', () => {
+    const s: m.Store = { [W1]: { ORPHAN: 'v' } };
+    const t = m.applyWorkspaceEdits(s, W1, [{ key: 'ORPHAN', op: 'override', value: 'v2' }]);
+    expect(t[W1]?.ORPHAN).toBe('v2');
+    expect(m.getMeta(t, 'ORPHAN')).toEqual({ secret: true, inherit: [], tags: [] });
+  });
 });
 
 describe('listEntries', () => {
@@ -173,6 +224,10 @@ describe('listEntries', () => {
   it('tolerates a corrupt index entry as a secret key with no links', () => {
     const s: m.Store = { [APP_INDEX_SCOPE]: { X: 'not json' }, [W1]: { X: 'v' } };
     expect(m.listEntries(s)[0]).toMatchObject({ key: 'X', meta: { secret: true, inherit: [], tags: [] } });
+  });
+  it('drops inherit ids that contain \':\' or are empty', () => {
+    const s: m.Store = { [APP_INDEX_SCOPE]: { A: JSON.stringify({ secret: true, inherit: ['ok', '', 'bad:scope'], tags: [] }) } };
+    expect(m.getMeta(s, 'A')?.inherit).toEqual(['ok']);
   });
 });
 
@@ -192,6 +247,26 @@ describe('migrateManifestEnv', () => {
   it('skips invalid keys and reserved ids', () => {
     const s = m.migrateManifestEnv({}, [{ id: 'app:x', plain: { A: '1' }, secretKeys: [] }, { id: W1, plain: { 'bad-key': '1' }, secretKeys: [] }]);
     expect(m.listEntries(s)).toEqual([]);
+  });
+  it('deletes bag keys referenced by neither secretKeys nor plain', () => {
+    const s0: m.Store = { [W1]: { STALE: 'old', TOK: 's' } };
+    const s = m.migrateManifestEnv(s0, [{ id: W1, plain: {}, secretKeys: ['TOK'] }]);
+    expect(s[W1]).toEqual({ TOK: 's' });
+  });
+  it('keeps the stored bag value over a plain value for the same key', () => {
+    const s0: m.Store = { [W1]: { TOK: 'stored-secret' } };
+    const s = m.migrateManifestEnv(s0, [{ id: W1, plain: { TOK: 'plain-val' }, secretKeys: ['TOK'] }]);
+    expect(s[W1]).toEqual({ TOK: 'stored-secret' });
+  });
+  it('a secretKeys entry with no stored value becomes an empty override, not an orphan', () => {
+    const s = m.migrateManifestEnv({}, [{ id: W1, plain: {}, secretKeys: ['TOK'] }]);
+    expect(s[W1]).toEqual({ TOK: '' });
+    expect(m.getMeta(s, 'TOK')).toEqual({ secret: true, inherit: [], tags: [] });
+  });
+  it('does not touch bags of workspaces outside the manifest list', () => {
+    const s0: m.Store = { [W2]: { OTHER: 'x' } };
+    const s = m.migrateManifestEnv(s0, [{ id: W1, plain: { A: '1' }, secretKeys: [] }]);
+    expect(s[W2]).toEqual({ OTHER: 'x' });
   });
 });
 

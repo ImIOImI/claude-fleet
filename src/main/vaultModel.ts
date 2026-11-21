@@ -1,7 +1,7 @@
 // Pure model of the decrypted secrets.enc object. Electron-free so it unit-tests
 // in isolation; vault.ts owns the envelope and lock.
 import { createHash } from 'node:crypto';
-import { APP_ENV_SCOPE, APP_INDEX_SCOPE, assertNotReservedVaultScope } from './vaultScopes.js';
+import { APP_ENV_SCOPE, APP_INDEX_SCOPE, assertNotReservedVaultScope, assertRendererWorkspaceId } from './vaultScopes.js';
 
 export type Store = Record<string, Record<string, string>>;
 export interface KeyMeta { secret: boolean; inherit: string[]; tags: string[] }
@@ -36,8 +36,8 @@ function cleanTags(tags: unknown): string[] {
   return out as string[];
 }
 function assertWorkspace(ws: string): void {
+  assertRendererWorkspaceId(ws);
   assertNotReservedVaultScope(ws);
-  if (!ws || ws.includes(':')) throw new Error('refusing to resolve a reserved vault scope');
 }
 
 function parseMeta(raw: string | undefined): KeyMeta | null {
@@ -46,7 +46,9 @@ function parseMeta(raw: string | undefined): KeyMeta | null {
     const v = JSON.parse(raw) as Partial<KeyMeta>;
     return {
       secret: v.secret !== false,
-      inherit: Array.isArray(v.inherit) ? v.inherit.filter((x): x is string => typeof x === 'string') : [],
+      inherit: Array.isArray(v.inherit)
+        ? v.inherit.filter((x): x is string => typeof x === 'string' && x !== '' && !x.includes(':'))
+        : [],
       tags: Array.isArray(v.tags) ? v.tags.filter(isValidTag) : []
     };
   } catch {
@@ -78,7 +80,7 @@ function setBagValue(s: Store, scope: string, key: string, value: string | null)
   return withScope(s, scope, bag);
 }
 
-/** Workspace bags: every scope that is not reserved. */
+/** Workspace bags: scopes with no ':'. */
 function workspaceScopes(s: Store): string[] {
   return Object.keys(s).filter((k) => !k.includes(':'));
 }
@@ -96,6 +98,7 @@ function metaOrDefault(s: Store, key: string): KeyMeta {
 }
 
 export function lineMode(s: Store, key: string, ws: string): LineMode | null {
+  assertWorkspace(ws);
   if (s[ws] && key in s[ws]) return 'override';
   return getMeta(s, key)?.inherit.includes(ws) ? 'inherit' : null;
 }
@@ -130,7 +133,10 @@ export function workspaceKeys(s: Store, ws: string): { key: string; secret: bool
 
 export function workspaceSecretValues(s: Store, ws: string): { key: string; value: string }[] {
   const env = resolveWorkspaceEnv(s, ws);
-  return workspaceKeys(s, ws).filter((k) => k.secret && env[k.key]).map((k) => ({ key: k.key, value: env[k.key] }));
+  return Object.keys(env)
+    .sort()
+    .filter((key) => metaOrDefault(s, key).secret && env[key])
+    .map((key) => ({ key, value: env[key] }));
 }
 
 export function putKey(s: Store, a: { key: string; secret: boolean; tags: string[]; rootValue?: string | null }): Store {
@@ -145,13 +151,14 @@ export function putKey(s: Store, a: { key: string; secret: boolean; tags: string
   } else if (typeof a.rootValue === 'string') {
     next = setBagValue(next, APP_ENV_SCOPE, a.key, a.rootValue);
   }
-  return setMeta(next, a.key, { secret: a.secret === true, inherit, tags });
+  return setMeta(next, a.key, { secret: a.secret !== false, inherit, tags });
 }
 
 export function renameKey(s: Store, key: string, nextKey: string): Store {
   assertKey(key);
   assertKey(nextKey);
   if (key === nextKey) return s;
+  if (!allKeys(s).includes(key)) throw new Error(`unknown key: ${key}`);
   if (allKeys(s).includes(nextKey)) throw new Error(`key exists: ${nextKey}`);
   let next = s;
   for (const scope of [APP_ENV_SCOPE, APP_INDEX_SCOPE, ...workspaceScopes(s)]) {
@@ -177,7 +184,7 @@ export function setLine(
 ): Store {
   assertKey(key);
   assertWorkspace(ws);
-  const meta = getMeta(s, key);
+  const meta = getMeta(s, key) ?? (allKeys(s).includes(key) ? { secret: true, inherit: [], tags: [] } : null);
   if (!meta) throw new Error(`unknown key: ${key}`);
   const others = meta.inherit.filter((w) => w !== ws);
   if (line.mode === 'inherit') {
@@ -253,12 +260,19 @@ export function migrateManifestEnv(
   const secret = new Map<string, boolean>();
   for (const man of manifests) {
     if (!man.id || man.id.includes(':')) continue;
-    for (const [k, v] of Object.entries(man.plain)) {
-      if (!isValidKey(k) || typeof v !== 'string') continue;
-      next = setBagValue(next, man.id, k, v);
-      secret.set(k, secret.get(k) ?? false);
+    const existingBag = s[man.id] ?? {};
+    const secretKeySet = new Set(man.secretKeys.filter(isValidKey));
+    const plain: Record<string, string> = {};
+    for (const [k, v] of Object.entries(man.plain)) if (isValidKey(k) && typeof v === 'string') plain[k] = v;
+    const relevant = new Set<string>([...secretKeySet, ...Object.keys(plain)]);
+    // stale bag keys (no longer in secretKeys/plain) must not resurface
+    for (const k of Object.keys(existingBag)) if (!relevant.has(k)) next = setBagValue(next, man.id, k, null);
+    for (const k of relevant) {
+      // a secret always wins over a same-named plain value, even an absent one ('' on no stored value)
+      const value = secretKeySet.has(k) ? existingBag[k] ?? '' : plain[k];
+      next = setBagValue(next, man.id, k, value);
+      secret.set(k, (secret.get(k) ?? false) || secretKeySet.has(k));
     }
-    for (const k of man.secretKeys) if (isValidKey(k)) secret.set(k, true);
   }
   for (const [key, isSecret] of secret) {
     const prev = getMeta(next, key);
