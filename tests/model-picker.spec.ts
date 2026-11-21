@@ -61,11 +61,13 @@ test('radio memory: model switch away and back keeps the Claude auth choice', as
   try {
     await mockMainIpc(app, { endpoints: [EP] });
     await window.locator('.top-strip').getByRole('button', { name: 'Add workspace' }).click();
-    // Enable the API-key radio by adding the env var, then select it.
-    await window.getByText('Env vars').click();
-    await window.getByRole('button', { name: '+ Add env var' }).click();
-    await window.getByLabel('Env key 1').fill('ANTHROPIC_API_KEY');
-    await window.getByLabel('Env value 1').fill('sk-test');
+    // Enable the API-key radio by staging the env var, then select it.
+    await window.locator('.form-disclosure > summary', { hasText: 'Env vars' }).click();
+    await window.locator('.workspace-vault').getByRole('button', { name: '+ New key' }).click();
+    const form = window.getByRole('form', { name: 'New env key' });
+    await form.getByLabel('New key name').fill('ANTHROPIC_API_KEY');
+    await form.getByLabel('New key value').fill('sk-test');
+    await form.getByRole('button', { name: 'Add key' }).click();
     // Radio accessible name includes help text ("ANTHROPIC_API_KEY in env" etc.) — use regex.
     await window.getByRole('radio', { name: /API key/ }).check();
 
