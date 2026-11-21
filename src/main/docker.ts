@@ -584,7 +584,7 @@ async function createWorkspaceInner(spec: CreateWorkspaceInput): Promise<Workspa
   // edits/key rotation apply on next create.
   const backendVars = spec.authMode === 'endpoint' ? await endpointEnv(spec.endpointId) : {};
   const workspaceEnv = await resolveWorkspaceEnv(spec.id);
-  await recordEnvApplied(spec.id, workspaceEnv);
+  await recordEnvAppliedQuietly(spec.id, workspaceEnv);
   const resolvedEnv = { ...backendVars, ...workspaceEnv };
   const envArr = ['HOME=/home/fleet', ...Object.entries(resolvedEnv).map(([k, v]) => `${k}=${v}`)];
   // Windows: tell the broker to listen on loopback TCP instead of a unix
@@ -1005,6 +1005,15 @@ export async function closeHeadless(workspaceId: string, sessionId: string): Pro
 export function recordResumeUsageQuietly(workspaceId: string, sessionId: string): void {
   void recordUsageEvent({ workspaceId, sessionId, kind: 'resumed' }).catch((e: unknown) =>
     logError({ source: 'main', level: 'warn', type: 'usage-record-failed', message: String(e), workspaceId })
+  );
+}
+
+/** Record the vault's resolved env for observability, matching
+ *  ensureContainerRetention's containment: a disk error here must never
+ *  abort container create, so a rejection is logged, not thrown. */
+export function recordEnvAppliedQuietly(workspaceId: string, env: Record<string, string>): Promise<void> {
+  return recordEnvApplied(workspaceId, env).catch((e: unknown) =>
+    logError({ source: 'main', type: 'env-applied-record-failed', level: 'warn', message: String(e), workspaceId })
   );
 }
 

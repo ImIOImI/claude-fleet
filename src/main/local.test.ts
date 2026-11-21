@@ -227,3 +227,22 @@ describe('buildEnv — store credentials stay host-only', () => {
     }
   });
 });
+
+describe('buildEnv — pre-resolved env (attachPty resolves once, not twice)', () => {
+  beforeEach(() => {
+    resolveWorkspaceEnvMock.mockClear();
+  });
+
+  it('uses the given `resolved` env instead of calling resolveWorkspaceEnv again', async () => {
+    const env = await buildEnv('ws1', { authMode: 'oauth' }, { ANTHROPIC_API_KEY: 'sk-pre-resolved' });
+    expect(env.ANTHROPIC_API_KEY).toBe('sk-pre-resolved');
+    expect(resolveWorkspaceEnvMock).not.toHaveBeenCalled();
+  });
+
+  it('falls back to resolving its own env when no `resolved` value is given (captureExec)', async () => {
+    resolveWorkspaceEnvMock.mockResolvedValueOnce({ ANTHROPIC_API_KEY: 'sk-self-resolved' });
+    const env = await buildEnv('ws1', { authMode: 'oauth' });
+    expect(env.ANTHROPIC_API_KEY).toBe('sk-self-resolved');
+    expect(resolveWorkspaceEnvMock).toHaveBeenCalledWith('ws1');
+  });
+});

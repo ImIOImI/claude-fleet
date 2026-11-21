@@ -17,11 +17,17 @@ vi.mock('./errorLog.js', () => ({
   logError: (...args: unknown[]) => logErrorMock(...args)
 }));
 
-const { recordResumeUsageQuietly } = await import('./docker.js');
+const recordEnvAppliedMock = vi.fn();
+vi.mock('./envApplied.js', () => ({
+  recordEnvApplied: (...args: unknown[]) => recordEnvAppliedMock(...args)
+}));
+
+const { recordResumeUsageQuietly, recordEnvAppliedQuietly } = await import('./docker.js');
 
 beforeEach(() => {
   recordUsageEventMock.mockReset();
   logErrorMock.mockReset();
+  recordEnvAppliedMock.mockReset();
 });
 
 describe('recordResumeUsageQuietly', () => {
@@ -47,6 +53,34 @@ describe('recordResumeUsageQuietly', () => {
       level: 'warn',
       type: 'usage-record-failed',
       message: 'Error: db wedged',
+      workspaceId: 'ws-a'
+    });
+  });
+});
+
+// Review finding: a disk error recording env-applied must not abort
+// container create (it's awaited at the create call site), matching
+// ensureContainerRetention's catch-and-log containment.
+describe('recordEnvAppliedQuietly', () => {
+  it('resolves once the write settles', async () => {
+    recordEnvAppliedMock.mockResolvedValue(undefined);
+
+    await expect(recordEnvAppliedQuietly('ws-a', { A: '1' })).resolves.toBeUndefined();
+
+    expect(recordEnvAppliedMock).toHaveBeenCalledWith('ws-a', { A: '1' });
+    expect(logErrorMock).not.toHaveBeenCalled();
+  });
+
+  it('logs a warning and resolves instead of rejecting when the write fails', async () => {
+    recordEnvAppliedMock.mockRejectedValue(new Error('disk full'));
+
+    await expect(recordEnvAppliedQuietly('ws-a', { A: '1' })).resolves.toBeUndefined();
+
+    expect(logErrorMock).toHaveBeenCalledWith({
+      source: 'main',
+      type: 'env-applied-record-failed',
+      level: 'warn',
+      message: 'Error: disk full',
       workspaceId: 'ws-a'
     });
   });

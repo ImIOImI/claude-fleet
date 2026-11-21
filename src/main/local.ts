@@ -623,6 +623,15 @@ export function recordResumeUsageQuietly(workspaceId: string, sessionId: string)
   );
 }
 
+/** Record the vault's resolved env for observability, matching
+ *  ensureLocalRetentionSettings's containment: a disk error here must never
+ *  abort the attach, so a rejection is logged, not thrown. */
+export function recordEnvAppliedQuietly(workspaceId: string, env: Record<string, string>): Promise<void> {
+  return recordEnvApplied(workspaceId, env).catch((e: unknown) =>
+    logError({ source: 'main', type: 'env-applied-record-failed', level: 'warn', message: String(e), workspaceId })
+  );
+}
+
 const spawnQueue = createSpawnQueue();
 let resumeLookupTimeoutMs = 3000;
 let resumeTimeoutLogged = false;
@@ -747,7 +756,7 @@ export async function attachPty(
     await signalWslSessions(launcher, id, 'CONT');
   }
   await persistLiveState(id);
-  await recordEnvApplied(id, resolvedWorkspaceEnv);
+  await recordEnvAppliedQuietly(id, resolvedWorkspaceEnv);
   // Cross-restart continuity: a restored tab whose process died with the
   // previous app run resumes its mapped conversation instead of spawning a
   // fresh one. Looked up before queueing: the queue is serial, so a slow DB
