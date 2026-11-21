@@ -10,6 +10,7 @@ import { clampDailyCap, DAILY_CAP_DEFAULT } from '../../../preload/captureSettin
 import { ModalBackdrop } from './ModalBackdrop';
 import { NotificationsSettings } from './NotificationsSettings';
 import { AccountSettings } from './AccountSettings';
+import { VaultSettings } from './VaultSettings';
 import { StorageSettings } from './StorageSettings';
 
 /** Compact token formatter for preset labels (e.g. 19_000_000 → "19M"). */
@@ -69,7 +70,7 @@ function formFromEndpoint(ep: ModelEndpoint): EndpointFormState {
   };
 }
 
-export type ActiveTab = 'settings' | 'endpoints' | 'notifications' | 'account';
+export type ActiveTab = 'settings' | 'endpoints' | 'notifications' | 'account' | 'vault';
 
 interface Props {
   onClose: () => void;
@@ -79,10 +80,15 @@ interface Props {
   initialTab?: ActiveTab;
   /** Workspace names for the Notifications tab's rule labels. */
   names?: Record<string, string>;
+  /** Workspaces for the Vault tab's lines and publish picker. */
+  workspaces?: { id: string; name: string; kind: 'container' | 'local' | 'remote' }[];
+  /** Vault tab: expand and scroll to this key on open. */
+  focusKey?: string;
 }
 
-export function SettingsModal({ onClose, onSaved, initialTab, names = {} }: Props) {
+export function SettingsModal({ onClose, onSaved, initialTab, names = {}, workspaces = [], focusKey: initialFocusKey }: Props) {
   const [activeTab, setActiveTab] = useState<ActiveTab>(initialTab ?? 'settings');
+  const [focusKey, setFocusKey] = useState(initialFocusKey);
 
   // ── Settings tab state ──────────────────────────────────────────────────
   const [fleetRoot, setFleetRoot] = useState('');
@@ -387,11 +393,34 @@ export function SettingsModal({ onClose, onSaved, initialTab, names = {} }: Prop
           >
             Account
           </div>
+          <div
+            className={`modal-tab${activeTab === 'vault' ? ' active' : ''}`}
+            aria-current={activeTab === 'vault' ? 'page' : undefined}
+            onClick={() => setActiveTab('vault')}
+            style={{ cursor: 'pointer' }}
+          >
+            Vault
+          </div>
         </div>
 
         {activeTab === 'account' && (
           <>
-            <AccountSettings />
+            <AccountSettings
+              onManageVault={(k) => {
+                setFocusKey(k);
+                setActiveTab('vault');
+              }}
+            />
+            <div className="modal-footer notif-footer">
+              <span className="modal-footer-spacer" />
+              <button type="button" className="btn" onClick={onClose}>Close</button>
+            </div>
+          </>
+        )}
+
+        {activeTab === 'vault' && (
+          <>
+            <VaultSettings workspaces={workspaces} names={names} focusKey={focusKey} />
             <div className="modal-footer notif-footer">
               <span className="modal-footer-spacer" />
               <button type="button" className="btn" onClick={onClose}>Close</button>

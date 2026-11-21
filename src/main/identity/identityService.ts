@@ -1,7 +1,9 @@
 // Desktop GitHub sign-in: device-flow state, the token (vault scope
 // identity:github, never sent to the renderer) and the cached profile.
+// A vault GITHUB_TOKEN (PAT), when set, wins over the device-flow token.
 // ipc.ts injects the real vault + client-id resolver; tests inject fakes.
 
+import { createHash } from 'node:crypto';
 import { GITHUB_IDENTITY_SCOPE } from '../vaultScopes.js';
 import { DeviceFlowError, SLOW_DOWN_STEP_MS, pollDeviceToken, requestDeviceCode, type DeviceCode, type PollResult } from './deviceFlow.js';
 import { createGithubProvider, type GithubProbe } from './githubProvider.js';
@@ -12,8 +14,15 @@ import type { AccountSso, AccountStatus, SignInPoll, SignInStart } from '../../p
 
 export const TOKEN_KEY = 'TOKEN';
 export const PROFILE_KEY = 'PROFILE';
+/** The verified profile of the vault PAT, keyed by its sha256; never paired with TOKEN. */
+export const PAT_PROFILE_KEY = 'PAT_PROFILE';
 
 const REVOKED_NOTICE = 'GitHub no longer accepts the saved sign-in (revoked or expired). Sign in again.';
+const PAT_REJECTED = 'The GitHub token in the Vault was rejected (401).';
+/** A PAT probe that failed transiently is not retried (except on refresh) for this long. */
+const PAT_RETRY_MS = 60_000;
+const FINE_GRAINED_NOTICE =
+  'Fine-grained tokens report no scopes: GHCR access and team grants need a classic token with read:org and read:packages.';
 const NO_FLOW = 'No sign-in in progress.';
 const CANCELLED = 'Sign-in was cancelled.';
 /** The renderer re-asks at least this often; main still gates real polls. */
@@ -37,6 +46,8 @@ export interface IdentityServiceDeps {
   clientId(): Promise<string | null>;
   github?: GithubSignInApi;
   now?: () => number;
+  /** The vault GITHUB_TOKEN; absent on fleet-host. */
+  patToken?: () => Promise<string | null>;
 }
 
 interface Profile {
@@ -45,10 +56,15 @@ interface Profile {
   sso: SsoHint | null;
   verifiedAt: number;
 }
+type Source = 'device' | 'pat';
 interface Saved {
   token: string;
   profile: Profile;
+  source: Source;
 }
+type PatProbe = { ok: true; probe: GithubProbe } | { ok: false; err: unknown };
+/** A PAT with no usable verification yet needs a probe, run outside `serial`. */
+type Step = { saved: Saved | null; verify?: undefined } | { saved?: undefined; verify: { pat: string; sha: string } };
 interface Pending {
   clientId: string;
   code: DeviceCode;
@@ -121,9 +137,27 @@ function isProfile(v: unknown): v is Profile {
     isStrArray(i.teams) &&
     isStrArray(p.scopes) &&
     (p.sso === null || isSso(p.sso)) &&
-    typeof p.verifiedAt === 'number'
+    typeof p.verifiedAt === 'number' &&
+    (p.source === undefined || p.source === 'pat') &&
+    (p.tokenSha === undefined || isStr(p.tokenSha))
   );
 }
+
+function parseProfile(raw: string | null): Profile | null {
+  let v: unknown = null;
+  try {
+    v = raw ? JSON.parse(raw) : null;
+  } catch {
+    v = null;
+  }
+  return isProfile(v) ? v : null;
+}
+
+function patFields(p: Profile): { source?: unknown; tokenSha?: unknown } {
+  return p as { source?: unknown; tokenSha?: unknown };
+}
+
+const sha256 = (s: string): string => createHash('sha256').update(s).digest('hex');
 
 /** IdentityError messages are token-free by contract; anything else is not echoed. */
 function safeMessage(err: unknown): string {
@@ -144,8 +178,17 @@ export class IdentityService {
   private readonly clientId: () => Promise<string | null>;
   private readonly github: GithubSignInApi;
   private readonly now: () => number;
+  private readonly patToken: (() => Promise<string | null>) | undefined;
   /** Used only while the vault is unavailable (sign-in lasts this run). */
   private memory: Saved | null = null;
+  private patMemory: { sha: string; profile: Profile } | null = null;
+  /** sha256 of a PAT GitHub answered 401 for; also tombstoned in PAT_PROFILE.
+   *  Only status({ refresh: true }) or a different PAT probes again. */
+  private patRejected: string | null = null;
+  private patFailed: { sha: string; until: number; notice: string } | null = null;
+  private patInflight: { sha: string; p: Promise<PatProbe> } | null = null;
+  /** `notice` describes the PAT verification and goes once that resolves. */
+  private patNotice = false;
   private pending: Pending | null = null;
   private notice: string | null = null;
   /** Bumped by sign-out, cancel, start and a completed sign-in: a save
@@ -159,24 +202,121 @@ export class IdentityService {
     this.clientId = deps.clientId;
     this.github = deps.github ?? defaultGithub();
     this.now = deps.now ?? Date.now;
+    this.patToken = deps.patToken;
   }
 
   private persisted(): Promise<boolean> {
     return this.vault.isVaultAvailable();
   }
 
-  private async load(): Promise<Saved | null> {
+  private async currentPat(): Promise<string | null> {
+    return (await this.patToken?.())?.trim() || null;
+  }
+
+  /** Runs inside `serial`; never probes. A rejected or backed-off PAT falls
+   *  back to the device token, keeping the PAT notice. */
+  private async loadStep(): Promise<Step> {
+    const pat = await this.currentPat();
+    if (!pat) {
+      this.setPatNotice(null);
+      return { saved: await this.loadDevice() };
+    }
+    const sha = sha256(pat);
+    const cached = await this.readPatProfile(sha);
+    if (cached === 'rejected' || this.patRejected === sha) {
+      this.patRejected = sha;
+      this.setPatNotice(PAT_REJECTED);
+      return { saved: await this.loadDevice() };
+    }
+    if (cached) {
+      this.setPatNotice(null);
+      return { saved: { token: pat, profile: cached, source: 'pat' } };
+    }
+    const f = this.patFailed;
+    if (f?.sha === sha && this.now() < f.until) {
+      this.setPatNotice(f.notice);
+      return { saved: await this.loadDevice() };
+    }
+    return { verify: { pat, sha } };
+  }
+
+  private async loadDevice(): Promise<Saved | null> {
     if (!(await this.persisted())) return this.memory;
     const token = await this.vault.getSecret(GITHUB_IDENTITY_SCOPE, TOKEN_KEY);
     if (!token) return null;
-    const raw = await this.vault.getSecret(GITHUB_IDENTITY_SCOPE, PROFILE_KEY);
-    let profile: unknown = null;
-    try {
-      profile = raw ? JSON.parse(raw) : null;
-    } catch {
-      profile = null;
+    const profile = parseProfile(await this.vault.getSecret(GITHUB_IDENTITY_SCOPE, PROFILE_KEY));
+    return profile && patFields(profile).source === undefined ? { token, profile, source: 'device' } : null;
+  }
+
+  private setPatNotice(notice: string | null): void {
+    if (notice !== null) {
+      this.notice = notice;
+      this.patNotice = true;
+    } else if (this.patNotice) {
+      this.notice = null;
+      this.patNotice = false;
     }
-    return isProfile(profile) ? { token, profile } : null;
+  }
+
+  /** One probe per PAT until its result is recorded. */
+  private probePat(pat: string, sha: string): Promise<PatProbe> {
+    if (this.patInflight?.sha === sha) return this.patInflight.p;
+    const p = this.github.probe(pat).then(
+      (probe): PatProbe => ({ ok: true, probe }),
+      (err: unknown): PatProbe => ({ ok: false, err })
+    );
+    this.patInflight = { sha, p };
+    return p;
+  }
+
+  /** Runs inside `serial`; dropped if the vault PAT changed since the probe. */
+  private async recordProbe(sha: string, p: Promise<PatProbe>, r: PatProbe, refresh: boolean): Promise<void> {
+    if (this.patInflight?.p === p) this.patInflight = null;
+    const pat = await this.currentPat();
+    if (!pat || sha256(pat) !== sha) return;
+    if (r.ok) {
+      const profile: Profile = { identity: r.probe.identity, scopes: r.probe.scopes, sso: r.probe.sso, verifiedAt: this.now() };
+      this.patRejected = null;
+      this.patFailed = null;
+      await this.writePatProfile(JSON.stringify({ ...profile, source: 'pat', tokenSha: sha }), { sha, profile });
+      if (refresh) {
+        this.notice = null;
+        this.patNotice = false;
+      }
+      return;
+    }
+    if (r.err instanceof IdentityError && r.err.kind === 'unauthorized') {
+      this.patRejected = sha;
+      this.patFailed = null;
+      await this.writePatProfile(JSON.stringify({ rejectedSha: sha }), null);
+      return;
+    }
+    const cached = refresh ? await this.readPatProfile(sha) : null;
+    if (cached && cached !== 'rejected') {
+      this.notice = `Couldn't refresh your GitHub account (${safeMessage(r.err)}). Showing the last saved details.`;
+      this.patNotice = false;
+      return;
+    }
+    this.patFailed = { sha, until: this.now() + PAT_RETRY_MS, notice: `Couldn't verify the GitHub token in the Vault (${safeMessage(r.err)}).` };
+  }
+
+  private async writePatProfile(json: string, mem: { sha: string; profile: Profile } | null): Promise<void> {
+    if (await this.persisted()) await this.vault.setSecret(GITHUB_IDENTITY_SCOPE, PAT_PROFILE_KEY, json);
+    else this.patMemory = mem;
+  }
+
+  private async readPatProfile(sha: string): Promise<Profile | 'rejected' | null> {
+    if (!(await this.persisted())) return this.patMemory?.sha === sha ? this.patMemory.profile : null;
+    const raw = await this.vault.getSecret(GITHUB_IDENTITY_SCOPE, PAT_PROFILE_KEY);
+    try {
+      if (raw && (JSON.parse(raw) as { rejectedSha?: unknown }).rejectedSha === sha) return 'rejected';
+    } catch {
+      return null;
+    }
+    const p = parseProfile(raw);
+    if (!p) return null;
+    const f = patFields(p);
+    return f.source === 'pat' && f.tokenSha === sha ? p : null;
   }
 
   private serial<T>(fn: () => Promise<T>): Promise<T> {
@@ -191,7 +331,7 @@ export class IdentityService {
   private save(s: Saved, epoch: number, sameToken = false): Promise<boolean> {
     return this.serial(async () => {
       if (epoch !== this.epoch) return false;
-      if (sameToken && (await this.load())?.token !== s.token) return false;
+      if (sameToken && (await this.loadDevice())?.token !== s.token) return false;
       if (!(await this.persisted())) {
         this.memory = s;
         return true;
@@ -203,25 +343,50 @@ export class IdentityService {
     });
   }
 
-  /** Read after every queued write and clear has settled. */
-  private settled(): Promise<Saved | null> {
-    return this.serial(() => this.load());
+  /** Read after every queued write and clear has settled. A PAT probe runs
+   *  between two serial steps so it doesn't hold up queued writes. */
+  private async settled(): Promise<Saved | null> {
+    for (let i = 0; i < 3; i++) {
+      const step = await this.serial(() => this.loadStep());
+      if (!step.verify) return step.saved;
+      const { pat, sha } = step.verify;
+      const p = this.probePat(pat, sha);
+      const r = await p;
+      await this.serial(() => this.recordProbe(sha, p, r, false));
+    }
+    // The PAT kept changing under us.
+    return this.serial(() => this.loadDevice());
   }
 
   private async clearNow(): Promise<void> {
     this.memory = null;
-    if (await this.persisted()) await this.vault.deleteAllForWorkspace(GITHUB_IDENTITY_SCOPE);
+    if (!(await this.persisted())) return;
+    await this.vault.deleteAllForWorkspace(GITHUB_IDENTITY_SCOPE);
+    if (this.patRejected) await this.vault.setSecret(GITHUB_IDENTITY_SCOPE, PAT_PROFILE_KEY, JSON.stringify({ rejectedSha: this.patRejected }));
   }
 
-  private clear(): Promise<void> {
-    return this.serial(() => this.clearNow());
+  /** A vault PAT is managed in the Vault, so sign-out leaves it (and the device token) be. */
+  private clearUnlessPat(): Promise<void> {
+    return this.serial(async () => {
+      if ((await this.loadStep()).saved?.source === 'pat') return;
+      await this.clearNow();
+    });
+  }
+
+  /** Probes even a rejected or backed-off PAT. */
+  private async refreshPat(pat: string): Promise<Saved | null> {
+    const sha = sha256(pat);
+    const p = this.probePat(pat, sha);
+    const r = await p;
+    await this.serial(() => this.recordProbe(sha, p, r, true));
+    return this.settled();
   }
 
   /** Clears only if `token` is still the stored one, so revoking an old token
    *  can't undo a newer sign-in. */
   private revoke(token: string): Promise<boolean> {
     return this.serial(async () => {
-      if ((await this.load())?.token !== token) return false;
+      if ((await this.loadDevice())?.token !== token) return false;
       await this.clearNow();
       return true;
     });
@@ -230,6 +395,7 @@ export class IdentityService {
   private async toStatus(saved: Saved | null): Promise<AccountStatus> {
     const clientId = await this.clientId();
     const p = saved?.profile ?? null;
+    const source = saved?.source ?? null;
     return {
       configured: clientId !== null,
       persisted: await this.persisted(),
@@ -248,7 +414,8 @@ export class IdentityService {
       scopes: p ? [...p.scopes] : [],
       packagesAccess: p ? hasPackagesRead(p.scopes) : false,
       sso: p?.sso ? toAccountSso(p.sso, clientId) : null,
-      notice: this.notice
+      notice: this.notice ?? (source === 'pat' && p?.scopes.length === 0 ? FINE_GRAINED_NOTICE : null),
+      source
     };
   }
 
@@ -256,7 +423,9 @@ export class IdentityService {
    *  notice); any other failure keeps the cached profile (with a notice). */
   async status(opts: { refresh?: boolean } = {}): Promise<AccountStatus> {
     const epoch = this.epoch;
-    let saved = await this.settled();
+    const pat = opts.refresh ? await this.currentPat() : null;
+    let saved = pat ? await this.refreshPat(pat) : await this.settled();
+    if (saved?.source === 'pat') return this.toStatus(saved);
     if (saved && opts.refresh) {
       try {
         const probe = await this.github.probe(saved.token);
@@ -266,16 +435,18 @@ export class IdentityService {
         const scopes = probe.scopes.length > 0 ? probe.scopes : saved.profile.scopes;
         const next: Saved = {
           token: saved.token,
-          profile: { identity: probe.identity, scopes, sso: probe.sso, verifiedAt: this.now() }
+          profile: { identity: probe.identity, scopes, sso: probe.sso, verifiedAt: this.now() },
+          source: 'device'
         };
         if (!(await this.save(next, epoch, true)) || epoch !== this.epoch) return this.toStatus(await this.settled());
         saved = next;
-        this.notice = null;
+        if (!this.patNotice) this.notice = null;
       } catch (err) {
         if (err instanceof IdentityError && err.kind === 'unauthorized') {
           if (!(await this.revoke(saved.token))) return this.toStatus(await this.settled());
           saved = null;
           this.notice = REVOKED_NOTICE;
+          this.patNotice = false;
         } else if (epoch !== this.epoch) {
           return this.toStatus(await this.settled());
         } else {
@@ -355,7 +526,7 @@ export class IdentityService {
     }
     if (epoch !== this.epoch) return { state: 'error', message: CANCELLED };
     const scopes = probe.scopes.length > 0 ? probe.scopes : tokenScopes;
-    const saved: Saved = { token, profile: { identity: probe.identity, scopes, sso: probe.sso, verifiedAt: this.now() } };
+    const saved: Saved = { token, profile: { identity: probe.identity, scopes, sso: probe.sso, verifiedAt: this.now() }, source: 'device' };
     const saveEpoch = ++this.epoch;
     if (!(await this.save(saved, saveEpoch))) return { state: 'error', message: CANCELLED };
     if (saveEpoch !== this.epoch) {
@@ -375,8 +546,9 @@ export class IdentityService {
   async signOut(): Promise<void> {
     this.pending = null;
     this.notice = null;
+    this.patNotice = false;
     this.epoch++;
-    await this.clear();
+    await this.clearUnlessPat();
   }
 
   /** For RemoteClient: the signed-in token, attached to fleet-host requests. Main process only. */

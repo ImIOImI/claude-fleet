@@ -29,11 +29,7 @@ vi.mock('electron', () => ({
   }
 }));
 vi.mock('./vault.js', () => ({
-  resolveEnv: async (
-    _id: string,
-    plain: Record<string, string>,
-    _k: string[]
-  ): Promise<Record<string, string>> => ({ ...plain })
+  resolveWorkspaceEnv: async (_id: string): Promise<Record<string, string>> => ({})
 }));
 vi.mock('./endpoints.js', () => ({
   endpointEnv: async (): Promise<Record<string, string>> => ({})

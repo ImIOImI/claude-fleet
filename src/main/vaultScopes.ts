@@ -1,10 +1,11 @@
 // Vault scope naming for host-only secrets (#444). Pure — no electron — so it
-// unit-tests in isolation and ipc.ts can guard the generic vault:* surface.
+// unit-tests in isolation.
 //
 // Loadout-source tokens live in the same secrets.enc as workspace env and
 // endpoint keys, under `loadout-source:<normalised base>` / `TOKEN`. The
 // renderer may WRITE one (loadouts:addSource / loadouts:setSourceCredential)
-// but must never read one back, so the generic vault:* IPC refuses the prefix.
+// but must never read one back; the vault:* IPC takes no raw scope, only a
+// key plus a workspace id checked by assertRendererWorkspaceId.
 
 export const SOURCE_VAULT_PREFIX = 'loadout-source:';
 export const SOURCE_VAULT_KEY = 'TOKEN';
@@ -20,30 +21,20 @@ export const STORE_VAULT_PREFIX = 'store:';
 /** The managed Postgres container's bag: key APP_PASSWORD (the fleet_app role's password). */
 export const MANAGED_STORE_SCOPE = `${STORE_VAULT_PREFIX}managed`;
 export const MANAGED_STORE_PASSWORD_KEY = 'APP_PASSWORD';
+/** App-level vault: root env values and per-key metadata. Host-only. */
+export const APP_VAULT_PREFIX = 'app:';
+export const APP_ENV_SCOPE = `${APP_VAULT_PREFIX}env`;
+export const APP_INDEX_SCOPE = `${APP_VAULT_PREFIX}index`;
 
 /**
  * Every vault scope prefix that names a non-workspace bag. A workspace's id is
- * its vault scope (resolveEnv injects that bag into the workspace's env), so a
- * workspace may never be created under one of these.
+ * its vault scope (resolveWorkspaceEnv injects that bag into the workspace's
+ * env), so a workspace may never be created under one of these.
  */
-export const RESERVED_VAULT_PREFIXES: readonly string[] = [SOURCE_VAULT_PREFIX, ENDPOINT_VAULT_PREFIX, IDENTITY_VAULT_PREFIX, STORE_VAULT_PREFIX];
-
-/** Reserved prefixes the renderer may not read or write through vault:*. */
-const HOST_ONLY_PREFIXES: readonly string[] = [SOURCE_VAULT_PREFIX, IDENTITY_VAULT_PREFIX, STORE_VAULT_PREFIX];
+export const RESERVED_VAULT_PREFIXES: readonly string[] = [SOURCE_VAULT_PREFIX, ENDPOINT_VAULT_PREFIX, IDENTITY_VAULT_PREFIX, STORE_VAULT_PREFIX, APP_VAULT_PREFIX];
 
 export function sourceVaultScope(normalisedBase: string): string {
   return `${SOURCE_VAULT_PREFIX}${normalisedBase}`;
-}
-
-/**
- * Throw when a renderer-supplied vault scope names a host-only bag. Fails
- * closed: anything that isn't a primitive string is refused, because an array
- * or String object survives structured clone and is coerced to the real scope
- * string when vault.ts indexes its store.
- */
-export function assertRendererVaultScope(scope: unknown): asserts scope is string {
-  if (typeof scope !== 'string') throw new Error('vault scope must be a string');
-  if (HOST_ONLY_PREFIXES.some((p) => scope.startsWith(p))) throw new Error('vault scope is host-only');
 }
 
 /**
@@ -54,16 +45,16 @@ export function assertRendererVaultScope(scope: unknown): asserts scope is strin
  */
 export function assertRendererWorkspaceId(id: unknown): asserts id is string {
   if (typeof id !== 'string' || !id) throw new Error('workspace id must be a non-empty string');
-  if (id.includes(':') || RESERVED_VAULT_PREFIXES.some((p) => id.startsWith(p))) {
-    throw new Error('workspace id may not contain ":" or use a reserved vault prefix');
+  if (id === '__proto__' || id.includes(':') || RESERVED_VAULT_PREFIXES.some((p) => id.startsWith(p))) {
+    throw new Error('workspace id may not be "__proto__", contain ":", or use a reserved vault prefix');
   }
 }
 
 /**
  * Throw when a vault scope used to read/write a secret is one of the reserved
- * (non-workspace) bags — `loadout-source:`, `endpoint:`, `identity:` or `store:` — rather than an
- * actual workspace id. `vault.resolveEnv` applies this before injecting a
- * vault bag into a workspace's env; any other main-process call site that
+ * (non-workspace) bags — `loadout-source:`, `endpoint:`, `identity:`, `store:` or `app:` — rather than an
+ * actual workspace id. `vault.resolveWorkspaceEnv` applies this before
+ * injecting a vault bag into a workspace's env; any other main-process call site that
  * takes a caller-influenced scope and hands its secrets somewhere (a script
  * step, a log, a response) should apply the same backstop (#444 final review
  * M6: the automation runner's script-secret lookup did not).

@@ -13,11 +13,6 @@
 import type { WorkspaceSummary } from '../App';
 import type { WorkspaceFormSubmit } from './WorkspaceForm';
 
-/**
- * `secretKeys` is an output-only concept on submit, but the form's
- * initial reader looks for it on the partial object so edit surfaces can
- * show pre-existing secret keys as a "•••••" placeholder.
- */
 export function workspaceToFormInitial(
   w: WorkspaceSummary
 ): Partial<WorkspaceFormSubmit> & { id: string } {
@@ -35,8 +30,6 @@ export function workspaceToFormInitial(
     image: w.image,
     authMode: w.authMode,
     endpointId: w.endpointId,
-    plainEnv: w.env.plain,
-    secretKeys: w.env.secretKeys,
     resources: w.resources,
     mounts: w.mounts,
     mirror: w.mirror,

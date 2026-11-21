@@ -309,6 +309,7 @@ export function App() {
     }),
     [workspaces, automationList]
   );
+  const vaultWorkspaces = useMemo(() => workspaces.map(({ id, name, kind }) => ({ id, name, kind })), [workspaces]);
   const [createOpen, setCreateOpen] = useState(false);
   const [settingsTab, setSettingsTab] = useState<null | 'settings' | 'endpoints' | 'notifications'>(null);
   const [browseOpen, setBrowseOpen] = useState(false);
@@ -1162,28 +1163,14 @@ export function App() {
   const selected = selectedWorkspace;
   const liveCount = workspaces.filter((w) => w.state !== 'deleted').length;
 
-  /**
-   * Persist any newly-typed secret env values to the keychain. Pre-existing
-   * secrets the form passed through unchanged (no value in `secrets`,
-   * still listed in `secretKeys`) are left alone.
-   */
-  const persistSecrets = async (id: string, submit: WorkspaceFormSubmit): Promise<void> => {
-    for (const [key, value] of Object.entries(submit.secrets)) {
-      if (!value) continue;
-      try {
-        await window.api.vault.setSecret(id, key, value);
-      } catch (err) {
-        console.warn(`vault.setSecret(${id}, ${key}) failed:`, err);
-      }
-    }
+  /** Main resolves env from the vault at create/start, so this must run before either. */
+  const applyVaultEdits = async (id: string, submit: WorkspaceFormSubmit): Promise<void> => {
+    if (workspaces.find((w) => w.id === id)?.kind === 'remote') return;
+    if (submit.copyVaultFrom && submit.copyVaultFrom !== id) await window.api.vault.copyWorkspace(submit.copyVaultFrom, id);
+    if (submit.vaultEdits.length) await window.api.vault.applyWorkspaceEdits(id, submit.vaultEdits);
   };
 
-  /**
-   * Mint workspace identity + persist any secret env values to the OS
-   * keychain, then call `workspace:create`. Secrets are written *before*
-   * the container is created so the main process can resolve them at
-   * start time (see docker.ts → vault.resolveEnv).
-   */
+  /** Applies the form's vault edits against the minted id, then calls `workspace:create`. */
   const handleCreate = async (
     submit: WorkspaceFormSubmit,
     setStatus: (msg: string | null) => void
@@ -1197,27 +1184,33 @@ export function App() {
       await window.api.workspace.ensureImage(({ message }) => setStatus(message), submit.image);
     }
 
-    await persistSecrets(id, submit);
-
     setStatus('Creating workspace…');
-    await window.api.workspace.create({
-      id,
-      name: submit.name,
-      description: submit.description,
-      labels: submit.labels,
-      color: submit.color,
-      workspaceSubdir: submit.workspaceSubdir,
-      kind,
-      workspaceRoot: submit.workspaceRoot,
-      launcher: submit.launcher,
-      image: submit.image,
-      authMode: submit.authMode,
-      endpointId: submit.endpointId,
-      env: { plain: submit.plainEnv, secretKeys: submit.secretKeys },
-      resources: submit.resources,
-      mounts: submit.mounts,
-      mirror: submit.mirror
-    });
+    try {
+      await applyVaultEdits(id, submit);
+      await window.api.workspace.create({
+        id,
+        name: submit.name,
+        description: submit.description,
+        labels: submit.labels,
+        color: submit.color,
+        workspaceSubdir: submit.workspaceSubdir,
+        kind,
+        workspaceRoot: submit.workspaceRoot,
+        launcher: submit.launcher,
+        image: submit.image,
+        authMode: submit.authMode,
+        endpointId: submit.endpointId,
+        env: { plain: {}, secretKeys: [] },
+        resources: submit.resources,
+        mounts: submit.mounts,
+        mirror: submit.mirror
+      });
+    } catch (err) {
+      // No manifest ⇒ no workspace owns the lines just applied.
+      const manifest = await window.api.workspace.getManifest(id).catch(() => undefined);
+      if (manifest === null) await window.api.vault.deleteAllForWorkspace(id).catch(() => undefined);
+      throw err;
+    }
     focusWorkspaceWhenWarm(id);
     if (assignRoleOnCreate && kind === 'container') {
       setAssignRoleOnCreate(false);
@@ -1248,7 +1241,7 @@ export function App() {
     const id = submit.id;
     if (!id) throw new Error('handleResume requires submit.id');
 
-    await persistSecrets(id, submit);
+    await applyVaultEdits(id, submit);
 
     // Always write the manifest first so renderer-visible edits
     // (description, labels, color) take effect immediately even if the
@@ -1267,7 +1260,7 @@ export function App() {
       image: submit.image,
       authMode: submit.authMode,
       endpointId: submit.endpointId,
-      env: { plain: submit.plainEnv, secretKeys: submit.secretKeys },
+      env: { plain: {}, secretKeys: [] },
       resources: submit.resources,
       mounts: submit.mounts,
       mirror: submit.mirror,
@@ -1324,7 +1317,7 @@ export function App() {
       image: submit.image,
       authMode: submit.authMode,
       endpointId: submit.endpointId,
-      env: { plain: submit.plainEnv, secretKeys: submit.secretKeys },
+      env: { plain: {}, secretKeys: [] },
       resources: submit.resources,
       mounts: submit.mounts,
       mirror: submit.mirror
@@ -1344,7 +1337,7 @@ export function App() {
     const before = workspaces.find((w) => w.id === id);
     if (!before) throw new Error(`Workspace ${id} not found`);
 
-    await persistSecrets(id, submit);
+    await applyVaultEdits(id, submit);
     await window.api.workspace.writeManifest({
       id,
       name: submit.name,
@@ -1358,7 +1351,7 @@ export function App() {
       image: submit.image,
       authMode: submit.authMode,
       endpointId: submit.endpointId,
-      env: { plain: submit.plainEnv, secretKeys: submit.secretKeys },
+      env: { plain: {}, secretKeys: [] },
       resources: submit.resources,
       mounts: submit.mounts,
       mirror: submit.mirror,
@@ -1390,9 +1383,9 @@ export function App() {
    */
   const openCloneFrom = (source: WorkspaceFormSubmit | WorkspaceSummary): void => {
     const isSummary = 'state' in source;
+    const sourceKind = (id: string) => workspaces.find((w) => w.id === id)?.kind;
+    const vaultSource = isSummary ? source.id : source.id ?? source.copyVaultFrom;
     const baseName = source.name;
-    const plain = isSummary ? source.env.plain : source.plainEnv;
-    const secretKeys = isSummary ? source.env.secretKeys : source.secretKeys;
     const clone: Partial<WorkspaceFormSubmit & { id: string }> = {
       // No id — WorkspaceModal.handleCreate mints a fresh ULID on submit.
       name: suggestCloneName(baseName, workspaces),
@@ -1406,13 +1399,9 @@ export function App() {
       image: source.image,
       authMode: source.authMode,
       endpointId: source.endpointId,
-      plainEnv: { ...plain },
-      // Don't carry secret *values* across — they live in the source's
-      // vault entry, not in the clone's. The user re-enters them in the
-      // env editor before submitting. (Showing pre-existing secret keys
-      // would be misleading: those keys exist for the *source* id.)
-      secretKeys: [...secretKeys],
-      secrets: {},
+      // A form submit's unsaved edits ride on top of its saved source's lines.
+      copyVaultFrom: vaultSource && sourceKind(vaultSource) !== 'remote' ? vaultSource : undefined,
+      vaultEdits: isSummary ? [] : source.vaultEdits,
       resources: source.resources,
       mounts: source.mounts,
       mirror: source.mirror
@@ -1814,6 +1803,7 @@ export function App() {
         <SettingsModal
           initialTab={settingsTab}
           names={workspaceNames}
+          workspaces={vaultWorkspaces}
           onClose={() => setSettingsTab(null)}
           onSaved={(cfg) => {
             setSharedDir(cfg.sharedDir);

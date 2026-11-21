@@ -3,6 +3,7 @@ import { spawn, type ChildProcess } from 'node:child_process';
 import { homedir } from 'node:os';
 import { execScript as dockerExecScript, isContainerRunning, managedMcpConfigJson } from '../docker.js';
 import { buildEnv as localBuildEnv, ensureMcpConfig as localEnsureMcpConfig, resolveClaude as localResolveClaude } from '../local.js';
+import { workspaceKeys } from '../vault.js';
 import { logError } from '../errorLog.js';
 import { killTree } from '../automations/hostScript.js';
 import {
@@ -88,17 +89,9 @@ const DEFAULT_DEPS: CaptureExecDeps = {
   spawnFile: spawnCaptureProcess,
   buildEnv: async (id) => {
     const m = await readWorkspaceManifest(id);
-    // `local.ts:buildEnv`'s second parameter types `env` as `Workspace['env']`
-    // (`WorkspaceEnv = { plain: Record<string,string>; secretKeys: string[] }`,
-    // a required field on WorkspaceSpec) — neither `[]` nor `{}` satisfy that
-    // shape, so the empty default has to be a real (empty) WorkspaceEnv.
-    return localBuildEnv(id, { env: m?.env ?? { plain: {}, secretKeys: [] }, authMode: m?.authMode, endpointId: m?.endpointId });
+    return localBuildEnv(id, { authMode: m?.authMode, endpointId: m?.endpointId });
   },
-  workspaceEnvKeys: async (id) => {
-    const m = await readWorkspaceManifest(id);
-    if (!m) return [];
-    return [...Object.keys(m.env.plain), ...m.env.secretKeys];
-  },
+  workspaceEnvKeys: async (id) => (await workspaceKeys(id)).map((k) => k.key),
   ensureMcpConfig: localEnsureMcpConfig,
   // local.ts:resolveClaude resolves to `string | null` (null = not found).
   // CaptureExecDeps needs a non-nullable resolver, so turn "not found" into a

@@ -35,6 +35,8 @@ export interface AccountStatus {
   sso: AccountSso | null;
   /** One-off explanation, e.g. the saved token was revoked. */
   notice: string | null;
+  /** Which token signed in: the device flow, or the vault GITHUB_TOKEN. */
+  source: 'device' | 'pat' | null;
 }
 
 export interface SignInStart {
