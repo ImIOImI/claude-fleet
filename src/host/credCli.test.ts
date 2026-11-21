@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { repoFromCredentialInput, repoFromGhArgs, repoFromGitUrl, runCredCli, type CredIo } from './credCli.js';
 import { DEFAULT_PERMISSIONS } from './appToken.js';
-import type { HostGithubConfig } from './config.js';
+import { parseHostConfig, type HostGithubConfig } from './config.js';
 import { startCredHelper, type CredServer } from './credServer.js';
 import { createLogger } from './log.js';
 import { startFakeGithubApp, type FakeGithubApp } from './testGithubApp.js';
@@ -82,8 +82,8 @@ describe('runCredCli', () => {
     await gh?.close();
   });
 
-  async function rig(github: HostGithubConfig | null = null) {
-    gh = await startFakeGithubApp({ appId: '1', installationId: '2', account: 'acme', repos: ['a', 'b'] });
+  async function rig(github: HostGithubConfig | null = null, repos = ['a', 'b']) {
+    gh = await startFakeGithubApp({ appId: '1', installationId: '2', account: 'acme', repos });
     const dir = mkdtempSync(join(tmpdir(), 'credcli-'));
     writeFileSync(join(dir, 'key.pem'), gh.privatePem, { mode: 0o400 });
     const sock = join(dir, 'run', 'cred.sock');
@@ -126,6 +126,15 @@ describe('runCredCli', () => {
     const other = io(sock, 'protocol=https\nhost=github.com\npath=acme/b.git\n\n');
     expect(await runCredCli(['git-credential', 'get'], other.o)).toBe(0);
     expect(gh!.requests.at(-1)!.body).toEqual({ repositories: ['b'], permissions: DEFAULT_PERMISSIONS });
+  });
+
+  it('a host config without readOnlyRepositories still mints only read tokens for the loadouts repo (D168)', async () => {
+    const github = parseHostConfig({ workspace: { name: 'w' }, grants: [], github: {} }).github;
+    const sock = await rig(github, ['claude-fleet-loadouts']);
+    const read = Object.fromEntries(Object.keys(DEFAULT_PERMISSIONS).sort().map((k) => [k, 'read']));
+    const push = io(sock, 'protocol=https\nhost=github.com\npath=acme/claude-fleet-loadouts.git\n\n');
+    expect(await runCredCli(['git-credential', 'get'], push.o)).toBe(0);
+    expect(gh!.requests.at(-1)!.body).toEqual({ repositories: ['claude-fleet-loadouts'], permissions: read });
   });
 
   it('git-credential store/erase and non-GitHub hosts print nothing and succeed', async () => {

@@ -81,6 +81,7 @@ export function validateTokenRequest(raw: unknown): TokenRequest {
       if (!PERMISSION.test(k) || (v !== 'read' && v !== 'write')) throw new AppTokenError('permissions must map names to "read" or "write"', 400);
       perms[k] = v;
     }
+    if (Object.keys(perms).length === 0) throw new AppTokenError('permissions must not be empty', 400);
   }
   return {
     ...(typeof owner === 'string' ? { owner } : {}),

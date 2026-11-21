@@ -321,6 +321,22 @@ describe('syncLoadouts', () => {
     expect((await readRecord(target)).loadouts).toEqual([]);
   });
 
+  it('does not roll back to a commit that is not on the default branch', async () => {
+    tag('demo', '1.0.0', 1);
+    tag('demo', '2.0.0', 2, { 'loadouts/demo/skills/blocked/SKILL.md': 'x\n' });
+    gh.tags.set('evil/v6.6.6', { commit: sha(7), files: loadoutFiles('demo', '1.0.0'), onMain: false });
+    await syncLoadouts(opts('demo@1.0.0'));
+    const rec = await readRecord(target);
+    await writeRecord(target, { version: 1, loadouts: rec.loadouts.map((r) => ({ ...r, commit: sha(7) })) });
+    await writeFile(join(target, '.claude/skills/blocked'), 'a file where a directory must go\n');
+    await syncLoadouts(opts('demo@2.0.0'));
+    expect(lines).toContainEqual(
+      expect.objectContaining({ level: 'error', msg: 'loadout rollback failed', id: 'demo', version: '1.0.0', error: 'resolve: commit is not on main' })
+    );
+    expect(gh.requests.filter((r) => r.path.includes(`/tarball/${sha(7)}`))).toEqual([]);
+    expect((await readRecord(target)).loadouts).toEqual([]);
+  });
+
   it('rolls back to a version whose repo differs only in case', async () => {
     tag('demo', '1.0.0', 1);
     tag('demo', '2.0.0', 2, { 'loadouts/demo/skills/blocked/SKILL.md': 'x\n' });

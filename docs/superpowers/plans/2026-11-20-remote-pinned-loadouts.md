@@ -77,7 +77,7 @@ Every task's requirements include this section.
 
 **D164. The entry script runs the sync before the broker and never waits past the cap.**
 - `sync_loadouts` runs only when `FLEET_LOADOUTS` is non-empty or the record (`FLEET_LOADOUTS_RECORD`, default `/workspace/.claude/fleet-loadouts.json`) exists.
-- `timeout -k 5 <FLEET_LOADOUTS_TIMEOUT_S> node "$host_js" loadouts sync`. The sync's own budget is the cap minus 5 s, at least 1 s. 124/137 logs `loadout sync timed out; starting the broker`; another non-zero status logs `loadout sync exited; starting the broker`. Then `exec broker`.
+- `timeout -k 5 <FLEET_LOADOUTS_TIMEOUT_S> node "$host_js" loadouts sync`. The sync's own budget is the cap minus 5 s, at least 1 s. 124/137 logs `loadout sync timed out or was killed; starting the broker`; another non-zero status logs `loadout sync exited; starting the broker`. Then `exec broker`.
 
 **D165. Failure model.**
 - Resolve, download, extract and verify run in staging before `/workspace` is touched. A failed revert of the previous version stops that pin.
@@ -100,7 +100,7 @@ Every task's requirements include this section.
 
 **D168. Per-repo read-only clamp (controller, 2026-11-21).**
 - The loadouts repo has no branch protection, so without the clamp any session could mint a write token and push a tampered loadout that the next pod start installs.
-- Host config `github.readOnlyRepositories` (`owner/repo`, each in `github.repositories` when that is set). A token request naming one of them is clamped to read as a whole: explicit `permissions` must all be `read` (else 403 before GitHub); omitted `permissions` become the ceiling's keys at `read` (write-only `workflows` dropped). Platform-ops lists `SumerSports/claude-fleet-loadouts`.
+- Host config `github.readOnlyRepositories` (`owner/repo`, each in `github.repositories` when that is set). A token request naming one of them is clamped to read as a whole: explicit `permissions` must all be `read` (else 403 before GitHub); omitted `permissions` become the ceiling's keys at `read` (write-only `workflows` dropped). The host always adds `SumerSports/claude-fleet-loadouts` (`DEFAULT_LOADOUTS_REPO`) to `github.readOnlyRepositories`, whether or not the config lists it or `github.repositories` names it; there is no opt-out, so platform-ops needn't list it. A non-default `FLEET_LOADOUTS_REPO` must be listed explicitly. Adding a repository on reload doesn't revoke write tokens already minted; they stay valid for up to 1 h. (Final-review follow-up: originally platform-ops had to list it, which failed open.)
 
 ## File structure
 

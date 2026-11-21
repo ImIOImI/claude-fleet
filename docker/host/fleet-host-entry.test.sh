@@ -394,7 +394,7 @@ kill -TERM "$pid"; finish
 run wshang workspace FAKE_UID=1000 FLEET_HOST_CRED_ADDR=h:1 FLEET_LOADOUTS='demo@1.0.0' FLEET_LOADOUTS_TIMEOUT_S=1 FAKE_SYNC_HANG=1
 until_count broker-start 1
 assert "$(head -1 "$dir/pids")" "$pid" "workspace execs the broker after a hung sync"
-grep -q 'loadout sync timed out; starting the broker' "$dir/log"; assert "$?" "0" "sync timeout logged"
+grep -q 'loadout sync timed out or was killed; starting the broker' "$dir/log"; assert "$?" "0" "sync timeout logged"
 kill -TERM "$pid"; finish
 
 # 36. A failing sync is logged and the broker starts.

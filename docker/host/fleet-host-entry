@@ -75,7 +75,7 @@ sync_loadouts() {
   (( t >= 1 && t <= 600 )) || t=60
   timeout -k 5 "$t" node "$host_js" loadouts sync || status=$?
   if (( status == 124 || status == 137 )); then
-    log warn "loadout sync timed out; starting the broker" ",\"timeoutS\":$t"
+    log warn "loadout sync timed out or was killed; starting the broker" ",\"timeoutS\":$t"
   elif (( status != 0 )); then
     log warn "loadout sync exited; starting the broker" ",\"status\":$status"
   fi

@@ -211,6 +211,7 @@ describe('createTokenMinter', () => {
     await expect(m.mint({ repositories: ['claude-fleet'] })).rejects.toMatchObject({ status: 403 });
     await expect(m.mint({ repositories: [] })).rejects.toMatchObject({ status: 400 });
     await expect(m.mint({ repositories: ['../x'] })).rejects.toMatchObject({ status: 400 });
+    await expect(m.mint({ repositories: ['fleet-reviews'], permissions: {} })).rejects.toMatchObject({ status: 400, message: 'permissions must not be empty' });
     await expect(m.mint({ owner: 'someone-else', repositories: ['fleet-reviews'] })).rejects.toMatchObject({ status: 403 });
     expect(posts(gh)).toBe(0);
     expect((await m.mint({ owner: 'sumersports', repositories: ['fleet-reviews'] })).repositories).toEqual(['fleet-reviews']);

@@ -181,7 +181,7 @@ bctl create late | grep -q 'draining: the workspace is restarting' || fail "CREA
 docker stop -t 15 "$n-ws" >/dev/null || fail "docker stop workspace"
 test "$(docker inspect -f '{{.State.ExitCode}}' "$n-ws")" = 0 || fail "drained broker did not exit 0 on SIGTERM"
 
-# Pinned loadouts (D159–D166): a fake credential server + GitHub API; the sync runs before the broker listens.
+# Pinned loadouts (D159–D168): a fake credential server + GitHub API; the sync runs before the broker listens.
 ready_get_js="require('http').get('http://127.0.0.1:7071/ready',(s)=>{let b='';s.on('data',(d)=>b+=d);s.on('end',()=>console.log(s.statusCode+' '+b.trim()))}).on('error',(e)=>console.log(e.code))"
 docker volume create "$n-ws-data" >/dev/null
 docker run --rm -u 0 -v "$n-ws-data:/workspace" --entrypoint chown "$image" 1000:1000 /workspace || fail "chown the workspace volume"

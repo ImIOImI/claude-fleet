@@ -83,9 +83,14 @@ export async function resolveTag(src: GithubSource, tag: string, branch: string,
     throw new FetchError(`resolve: tag ${tag} does not point at a commit`, 'resolve');
   }
   const commit = obj.sha;
-  const cmp = await json(await get(src, `${repoUrl(src)}/compare/${commit}...${segments(branch)}`, 'resolve', signal), 'resolve', `compare ${tag}`);
-  if (cmp.status !== 'ahead' && cmp.status !== 'identical') throw new FetchError(`resolve: tag ${tag} is not on ${branch}`, 'resolve');
+  if (!(await onBranch(src, commit, branch, signal))) throw new FetchError(`resolve: tag ${tag} is not on ${branch}`, 'resolve');
   return commit;
+}
+
+export async function onBranch(src: GithubSource, commit: string, branch: string, signal: AbortSignal): Promise<boolean> {
+  if (!SHA.test(commit)) return false;
+  const cmp = await json(await get(src, `${repoUrl(src)}/compare/${commit}...${segments(branch)}`, 'resolve', signal), 'resolve', `compare ${commit.slice(0, 12)}`);
+  return cmp.status === 'ahead' || cmp.status === 'identical';
 }
 
 export async function readCapped(res: Response, cap: number): Promise<Buffer> {

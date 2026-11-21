@@ -110,9 +110,14 @@ describe('parseHostConfig', () => {
       app: { appId: '5612251', installationId: '178595648', keyFile: '/var/run/secrets/github-app/key.pem' },
       repositories: ['fleet-expertise', 'fleet-reviews'],
       permissions: { contents: 'write', pull_requests: 'write' },
-      readOnlyRepositories: null
+      readOnlyRepositories: ['sumersports/claude-fleet-loadouts']
     });
-    expect(parseHostConfig({ ...base, github: {} }).github).toEqual({ app: null, repositories: null, permissions: null, readOnlyRepositories: null });
+    expect(parseHostConfig({ ...base, github: {} }).github).toEqual({
+      app: null,
+      repositories: null,
+      permissions: null,
+      readOnlyRepositories: ['sumersports/claude-fleet-loadouts']
+    });
   });
 
   it('refuses a malformed github block', () => {
@@ -132,11 +137,21 @@ describe('parseHostConfig', () => {
     expect(g({ readOnlyRepositories: ['SumerSports/Claude-Fleet-Loadouts', 'sumersports/claude-fleet-loadouts'] })?.readOnlyRepositories).toEqual([
       'sumersports/claude-fleet-loadouts'
     ]);
-    expect(parseHostConfig({ ...base, github: { readOnlyRepositories: ['SumerSports/x'] } }).github?.readOnlyRepositories).toEqual(['sumersports/x']);
+    expect(parseHostConfig({ ...base, github: { readOnlyRepositories: ['SumerSports/x'] } }).github?.readOnlyRepositories).toEqual([
+      'sumersports/claude-fleet-loadouts',
+      'sumersports/x'
+    ]);
     for (const bad of [[], 'SumerSports/claude-fleet-loadouts', ['claude-fleet-loadouts'], ['a/b/c'], ['SumerSports/..'], ['bad owner!/x'], [7]]) {
       expect(() => g({ readOnlyRepositories: bad })).toThrow('github.readOnlyRepositories must list 1 to 500 owner/repo names');
     }
     expect(() => g({ readOnlyRepositories: ['SumerSports/other'] })).toThrow('github.readOnlyRepositories: other is not in github.repositories');
+  });
+
+  it('always lists the default loadouts repo as read-only, even outside github.repositories (D168)', () => {
+    expect(parseHostConfig({ ...base, github: { repositories: ['fleet-reviews'] } }).github?.readOnlyRepositories).toEqual([
+      'sumersports/claude-fleet-loadouts'
+    ]);
+    expect(() => parseHostConfig({ ...base, github: { writableLoadoutsRepo: true } })).toThrow(/unknown key writableLoadoutsRepo/);
   });
 
   it('parses an optional db block as a Postgres store config', () => {

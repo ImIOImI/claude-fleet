@@ -13,7 +13,7 @@ import {
   type LoadoutMeta
 } from '../main/loadoutCore.js';
 import { isTokenShaped } from '../main/ociCore.js';
-import { defaultBranch, downloadTarball, FetchError, resolveTag, type GithubSource } from './loadoutFetch.js';
+import { defaultBranch, downloadTarball, FetchError, onBranch, resolveTag, type GithubSource } from './loadoutFetch.js';
 import { DEFAULT_LOADOUTS_API, parseApiBase, parsePins, parseRepo, pinTag, planSync, type Pin, type RepoRef } from './loadoutPins.js';
 import { readRecord, writeRecord, type PinnedRecord, type RecordFile } from './loadoutRecord.js';
 import { extractLoadout, TarError } from './loadoutTar.js';
@@ -181,6 +181,8 @@ async function rollback(ctx: Ctx, previous: PinnedRecord): Promise<void> {
   }
   let dir: string | undefined;
   try {
+    // The record is session-writable.
+    if (!(await onBranch(ctx.src, previous.commit, ctx.branch, ctx.signal))) throw new FetchError(`resolve: commit is not on ${ctx.branch}`, 'resolve');
     dir = await mkdtemp(join(ctx.o.stagingRoot ?? tmpdir(), 'fleet-loadout-'));
     await fetchInto(ctx, previous.id, previous.commit, dir);
     const back = await applyFrom(ctx.o.target, dir, previous.id);

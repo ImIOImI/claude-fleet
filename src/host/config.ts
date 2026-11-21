@@ -7,6 +7,7 @@ import { parse } from 'yaml';
 import { ORG_RE, parseGrantConfig, type GrantConfig } from '../main/identity/grants.js';
 import { parseStoreConfig, QUERY_USER, StoreConfigError, type PostgresStoreConfig } from '../main/store/storeConfig.js';
 import { parseHostPort, parsePort, type HostPort } from './endpoint.js';
+import { DEFAULT_LOADOUTS_REPO } from './loadoutPins.js';
 import { MESH_READY_URL } from './mesh.js';
 
 export const DEFAULT_CONFIG_PATH = '/etc/fleet-host/config.yaml';
@@ -38,8 +39,8 @@ export interface HostGithubConfig {
   repositories: string[] | null;
   /** Default and ceiling for every token's `permissions`; null = DEFAULT_PERMISSIONS in appToken.ts. */
   permissions: Record<string, 'read' | 'write'> | null;
-  /** Lowercased owner/repo entries every token naming them is clamped to read for (D168); null = none. */
-  readOnlyRepositories: string[] | null;
+  /** Lowercased owner/repo entries every token naming them is clamped to read for; always includes DEFAULT_LOADOUTS_REPO (D168). */
+  readOnlyRepositories: string[];
 }
 
 export interface HostConfig {
@@ -170,7 +171,7 @@ function parseGithub(v: unknown): HostGithubConfig {
       permissions[k] = val;
     }
   }
-  let readOnlyRepositories: string[] | null = null;
+  let explicit: string[] = [];
   if (g.readOnlyRepositories !== undefined) {
     const r = g.readOnlyRepositories;
     const ok = (x: unknown): boolean => {
@@ -181,12 +182,14 @@ function parseGithub(v: unknown): HostGithubConfig {
     if (!Array.isArray(r) || r.length === 0 || r.length > 500 || !r.every(ok)) {
       throw new HostConfigError('github.readOnlyRepositories must list 1 to 500 owner/repo names');
     }
-    readOnlyRepositories = [...new Set((r as string[]).map((x) => x.toLowerCase()))].sort();
-    for (const x of readOnlyRepositories) {
+    explicit = (r as string[]).map((x) => x.toLowerCase());
+    for (const x of explicit) {
       const name = x.split('/')[1];
       if (repositories && !repositories.includes(name)) throw new HostConfigError(`github.readOnlyRepositories: ${name} is not in github.repositories`);
     }
   }
+  // Fail closed: the loadouts repo has no branch protection, and every pod start installs from it.
+  const readOnlyRepositories = [...new Set([DEFAULT_LOADOUTS_REPO.toLowerCase(), ...explicit])].sort();
   return { app, repositories, permissions, readOnlyRepositories };
 }
 
