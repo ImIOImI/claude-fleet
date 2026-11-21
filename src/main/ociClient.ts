@@ -14,10 +14,11 @@ import {
   RegistryAuthError,
   realmMayReceiveCredential,
   assertTokenShape,
+  MAX_BLOB_BYTES,
   type RegistryCredential
 } from './ociCore.js';
 
-export const MAX_BLOB_BYTES = 5_242_880; // 5 MiB/layer — loadout files are small.
+export { MAX_BLOB_BYTES };
 const MANIFEST_ACCEPT = 'application/vnd.oci.image.manifest.v1+json';
 const TIMEOUT_MS = 30_000;
 

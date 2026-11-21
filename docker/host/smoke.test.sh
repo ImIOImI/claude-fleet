@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 # Smoke-test a runner-host image: probes on 8080, auth required, uid 1000 under `single`, the no-mode refusal, the `fleet-host` user,
+# the pinned-loadout sync's no-op and usage exit,
 # `broker ready`/`broker drain` with no broker and the drain-settings refusal,
 # `fleet-host init`, the bootstrap/migrate subcommands, the MCP bridge file and /run/fleet,
 # the embedder files and embed-check, and a clean SIGTERM that reaches fleet-host.
@@ -47,6 +48,9 @@ grep -q 'MCP config file not found: /nonexistent/mcp.json$' \
 grep -q '"workspaceId"' <<<"$(docker exec "$cid" fleet-host init)" || fail "fleet-host init"
 test "$(docker exec "$cid" sh -c 'fleet-host bootstrap >/dev/null; echo rc=$?')" = rc=2 || fail "fleet-host bootstrap without args is not rc 2"
 grep -q 'has no db: block' <<<"$(docker exec "$cid" sh -c 'fleet-host migrate; true')" || fail "fleet-host migrate without db"
+# Nothing pinned and nothing recorded: the sync is a logged no-op; a bad subcommand is a usage error.
+grep -q '"msg":"loadout sync done"' <<<"$(docker exec "$cid" fleet-host loadouts sync)" || fail "fleet-host loadouts sync with nothing pinned"
+test "$(docker exec "$cid" sh -c 'fleet-host loadouts bogus >/dev/null 2>&1; echo rc=$?')" = rc=2 || fail "fleet-host loadouts bogus is not rc 2"
 grep -q 'fleet-host-cred git-credential' <<<"$(docker exec "$cid" git config --system --get-all credential.https://github.com.helper)" || fail "git credential helper"
 test "$(docker exec "$cid" sh -c 'printf "protocol=https\nhost=github.com\npath=a/b\n\n" | fleet-host-cred git-credential get 2>/dev/null; echo rc=$?')" = rc=0 || fail "git-credential get rc"
 test "$(docker exec "$cid" sh -c 'command -v gh || true')" != /usr/local/bin/gh || fail "gh shim resolves to /usr/local/bin/gh"

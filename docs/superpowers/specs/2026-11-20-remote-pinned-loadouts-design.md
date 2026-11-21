@@ -1,6 +1,6 @@
 # Pinned loadouts in remote workspaces — design
 
-Status: approved by the owner (Troy) 2026-11-20. Decisions D159–D167 are recorded in the plan (`docs/superpowers/plans/2026-11-20-remote-pinned-loadouts.md`) and summarised here.
+Status: approved by the owner (Troy) 2026-11-20. Decisions D159–D168 are recorded in the plan (`docs/superpowers/plans/2026-11-20-remote-pinned-loadouts.md`) and summarised here.
 
 ## Goal
 
@@ -104,9 +104,9 @@ A remote workspace pod starts with the loadouts platform-ops pinned for it (for 
 ## Entry script (D164)
 
 - `run_workspace` calls `sync_loadouts` just before `exec "$broker_bin"`.
-- It runs the sync only when `FLEET_LOADOUTS` is non-empty or the record exists (`FLEET_LOADOUTS_RECORD`, default `/workspace/.claude/fleet-loadouts.json`, tests only), so a workspace that has never pinned anything doesn't start Node.
+- It runs the sync only when `FLEET_LOADOUTS` is non-empty or the record exists (`FLEET_LOADOUTS_RECORD`, default `/workspace/.claude/fleet-loadouts.json`; only this check honours it, and only tests set it), so a workspace that has never pinned anything doesn't start Node.
 - `timeout -k 5 <FLEET_LOADOUTS_TIMEOUT_S> node "$host_js" loadouts sync`. The sync's own budget is the cap minus 5 s (at least 1 s), so it normally logs and exits before `timeout` fires.
-- Exit 124 or 137 logs `loadout sync timed out; starting the broker`; any other non-zero status logs `loadout sync exited; starting the broker`. **The broker starts in every case.**
+- Exit 124 or 137 (137 can also be an OOM kill) logs `loadout sync timed out or was killed; starting the broker`; any other non-zero status logs `loadout sync exited; starting the broker`. **The broker starts in every case.**
 - The workspace pod still runs no long-lived fleet-host process: the sync has exited before the broker starts.
 
 ## Failure (D165)
@@ -139,6 +139,7 @@ A remote workspace pod starts with the loadouts platform-ops pinned for it (for 
   - a tag ruleset on `*/v*` that only the publish workflow bypasses;
   - the publish workflow failing on an existing tag with a different tree.
   Appendix A lists these for platform-ops.
+- **D168, per-repo read-only clamp:** the loadouts repo has no branch protection, so without the clamp any session could mint a write token and push a tampered loadout that the next pod start installs. Every token naming the loadouts repo is clamped to read (an explicit write is refused with 403). The host always adds `SumerSports/claude-fleet-loadouts` (`DEFAULT_LOADOUTS_REPO`) to `github.readOnlyRepositories`, whether or not the config lists it or `github.repositories` names it; there is no opt-out, so platform-ops needn't list it. A non-default `FLEET_LOADOUTS_REPO` must be listed explicitly. Adding a repository on reload doesn't revoke write tokens already minted; they stay valid for up to 1 h.
 
 ## Testing (D166)
 
@@ -193,7 +194,7 @@ containers:
       # FLEET_LOADOUTS_TIMEOUT_S defaults to 60
 ```
 
-Host pod ConfigMap (`config.yaml`), only if these keys are already set:
+Host pod ConfigMap (`config.yaml`). The loadouts repo is read-only without any setting (D168); `repositories` and `permissions` only if they are already set:
 
 ```yaml
 github:

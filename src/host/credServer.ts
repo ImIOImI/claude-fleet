@@ -101,7 +101,8 @@ export async function startCredHelper(o: CredHelperOptions): Promise<CredServer>
     creds,
     apiBase: o.apiBase,
     allow: () => o.github()?.repositories ?? null,
-    permissions: () => o.github()?.permissions ?? null
+    permissions: () => o.github()?.permissions ?? null,
+    readOnly: () => o.github()?.readOnlyRepositories ?? null
   });
   minter.account().then(
     (account) => o.log.log('info', 'github app ready', { appId: o.app.appId, account }),

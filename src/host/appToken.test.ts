@@ -139,12 +139,79 @@ describe('createTokenMinter', () => {
     expect(posts(gh)).toBe(3);
   });
 
+  describe('github.readOnlyRepositories (D168)', () => {
+    const READ_ALL = { actions: 'read', checks: 'read', contents: 'read', issues: 'read', metadata: 'read', pull_requests: 'read', statuses: 'read' };
+    const ro = () => ['SumerSports/claude-fleet-loadouts'];
+
+    it('clamps the default permissions to read for a read-only repo', async () => {
+      const { gh, creds } = await rig(['claude-fleet-loadouts', 'fleet-reviews']);
+      const m = createTokenMinter({ creds, apiBase: gh.url, readOnly: ro });
+      await m.mint({ owner: 'SumerSports', repositories: ['Claude-Fleet-Loadouts'] });
+      expect(gh.requests.at(-1)!.body).toEqual({ repositories: ['claude-fleet-loadouts'], permissions: READ_ALL });
+    });
+
+    it('keeps only the read-capable ceiling keys', async () => {
+      const { gh, creds } = await rig(['claude-fleet-loadouts']);
+      const m = createTokenMinter({ creds, apiBase: gh.url, readOnly: ro, permissions: () => ({ contents: 'write', workflows: 'write', checks: 'read' }) });
+      await m.mint({ repositories: ['claude-fleet-loadouts'] });
+      expect(gh.requests.at(-1)!.body).toEqual({ repositories: ['claude-fleet-loadouts'], permissions: { checks: 'read', contents: 'read' } });
+    });
+
+    it('passes explicit read permissions and refuses any write before calling GitHub', async () => {
+      const { gh, creds } = await rig(['claude-fleet-loadouts', 'fleet-reviews']);
+      const m = createTokenMinter({ creds, apiBase: gh.url, readOnly: ro });
+      await m.mint({ repositories: ['claude-fleet-loadouts'], permissions: { contents: 'read' } });
+      expect(gh.requests.at(-1)!.body).toEqual({ repositories: ['claude-fleet-loadouts'], permissions: { contents: 'read' } });
+      for (const permissions of [{ contents: 'write' }, { contents: 'read', issues: 'write' }]) {
+        await expect(m.mint({ repositories: ['claude-fleet-loadouts'], permissions })).rejects.toMatchObject({
+          status: 403,
+          message: 'claude-fleet-loadouts is read-only (github.readOnlyRepositories)'
+        });
+      }
+      await expect(m.mint({ repositories: ['claude-fleet-loadouts'], permissions: { contents: 'admin' } })).rejects.toMatchObject({ status: 400 });
+      expect(posts(gh)).toBe(1);
+    });
+
+    it('clamps the whole request when it mixes a read-only repo with others', async () => {
+      const { gh, creds } = await rig(['claude-fleet-loadouts', 'fleet-reviews']);
+      const m = createTokenMinter({ creds, apiBase: gh.url, readOnly: ro });
+      await m.mint({ repositories: ['fleet-reviews', 'claude-fleet-loadouts'] });
+      expect(gh.requests.at(-1)!.body).toEqual({ repositories: ['claude-fleet-loadouts', 'fleet-reviews'], permissions: READ_ALL });
+      await expect(m.mint({ repositories: ['fleet-reviews', 'claude-fleet-loadouts'], permissions: { contents: 'write' } })).rejects.toMatchObject({ status: 403 });
+      expect(posts(gh)).toBe(1);
+    });
+
+    it('leaves other repositories and a cached write token alone', async () => {
+      const { gh, creds } = await rig(['claude-fleet-loadouts', 'fleet-reviews']);
+      const m = createTokenMinter({ creds, apiBase: gh.url, readOnly: ro });
+      await m.mint({ repositories: ['fleet-reviews'] });
+      expect(gh.requests.at(-1)!.body).toEqual({ repositories: ['fleet-reviews'], permissions: DEFAULT_PERMISSIONS });
+      await m.mint({ repositories: ['fleet-reviews'], permissions: { contents: 'write' } });
+      expect(gh.requests.at(-1)!.body).toEqual({ repositories: ['fleet-reviews'], permissions: { contents: 'write' } });
+      await m.mint({ repositories: ['claude-fleet-loadouts'] });
+      expect(gh.requests.at(-1)!.body).toEqual({ repositories: ['claude-fleet-loadouts'], permissions: READ_ALL });
+      expect(posts(gh)).toBe(3);
+    });
+
+    it('applies a reloaded list on the next request', async () => {
+      const { gh, creds } = await rig(['claude-fleet-loadouts']);
+      let list: string[] | null = null;
+      const m = createTokenMinter({ creds, apiBase: gh.url, readOnly: () => list });
+      await m.mint({ repositories: ['claude-fleet-loadouts'] });
+      expect(gh.requests.at(-1)!.body).toEqual({ repositories: ['claude-fleet-loadouts'], permissions: DEFAULT_PERMISSIONS });
+      list = ['SumerSports/Claude-Fleet-Loadouts'];
+      await m.mint({ repositories: ['claude-fleet-loadouts'] });
+      expect(gh.requests.at(-1)!.body).toEqual({ repositories: ['claude-fleet-loadouts'], permissions: READ_ALL });
+    });
+  });
+
   it('refuses repos outside github.repositories, unscoped requests and another owner, without minting', async () => {
     const { gh, creds } = await rig();
     const m = createTokenMinter({ creds, apiBase: gh.url, allow: () => ['fleet-reviews'] });
     await expect(m.mint({ repositories: ['claude-fleet'] })).rejects.toMatchObject({ status: 403 });
     await expect(m.mint({ repositories: [] })).rejects.toMatchObject({ status: 400 });
     await expect(m.mint({ repositories: ['../x'] })).rejects.toMatchObject({ status: 400 });
+    await expect(m.mint({ repositories: ['fleet-reviews'], permissions: {} })).rejects.toMatchObject({ status: 400, message: 'permissions must not be empty' });
     await expect(m.mint({ owner: 'someone-else', repositories: ['fleet-reviews'] })).rejects.toMatchObject({ status: 403 });
     expect(posts(gh)).toBe(0);
     expect((await m.mint({ owner: 'sumersports', repositories: ['fleet-reviews'] })).repositories).toEqual(['fleet-reviews']);

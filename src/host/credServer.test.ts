@@ -28,7 +28,7 @@ async function rig(allow: string[] | null = null) {
   srv = await startCredHelper({
     app: { appId: '1', installationId: '2', keyFile },
     listen: { path: sock },
-    github: () => (allow ? { app: null, repositories: allow, permissions: null } : null),
+    github: () => (allow ? { app: null, repositories: allow, permissions: null, readOnlyRepositories: [] } : null),
     log: createLogger((l) => logs.push(l)),
     apiBase: gh.url
   });
@@ -110,7 +110,7 @@ describe('credential server over TCP', () => {
     srv = await startCredHelper({
       app: { appId: '1', installationId: '2', keyFile },
       listen: { port: 0, host: '127.0.0.1' },
-      github: () => (allow ? { app: null, repositories: allow, permissions: null } : null),
+      github: () => (allow ? { app: null, repositories: allow, permissions: null, readOnlyRepositories: [] } : null),
       log: createLogger((l) => logs.push(l)),
       apiBase: gh.url
     });

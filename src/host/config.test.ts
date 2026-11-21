@@ -109,9 +109,15 @@ describe('parseHostConfig', () => {
     expect(c.github).toEqual({
       app: { appId: '5612251', installationId: '178595648', keyFile: '/var/run/secrets/github-app/key.pem' },
       repositories: ['fleet-expertise', 'fleet-reviews'],
-      permissions: { contents: 'write', pull_requests: 'write' }
+      permissions: { contents: 'write', pull_requests: 'write' },
+      readOnlyRepositories: ['sumersports/claude-fleet-loadouts']
     });
-    expect(parseHostConfig({ ...base, github: {} }).github).toEqual({ app: null, repositories: null, permissions: null });
+    expect(parseHostConfig({ ...base, github: {} }).github).toEqual({
+      app: null,
+      repositories: null,
+      permissions: null,
+      readOnlyRepositories: ['sumersports/claude-fleet-loadouts']
+    });
   });
 
   it('refuses a malformed github block', () => {
@@ -124,6 +130,28 @@ describe('parseHostConfig', () => {
     expect(() => parseHostConfig({ ...base, github: { ...app, appId: 'x' } })).toThrow(/github.appId must be a positive integer/);
     expect(() => parseHostConfig({ ...base, github: { ...app, installationId: 1.5 } })).toThrow(/github.installationId must be a positive integer/);
     expect(() => parseHostConfig({ ...base, github: { ...app, keyFile: 'k' } })).toThrow(/github.keyFile must be an absolute path/);
+  });
+
+  it('parses github.readOnlyRepositories as owner/repo entries inside github.repositories', () => {
+    const g = (over: Record<string, unknown>) => parseHostConfig({ ...base, github: { repositories: ['claude-fleet-loadouts', 'fleet-reviews'], ...over } }).github;
+    expect(g({ readOnlyRepositories: ['SumerSports/Claude-Fleet-Loadouts', 'sumersports/claude-fleet-loadouts'] })?.readOnlyRepositories).toEqual([
+      'sumersports/claude-fleet-loadouts'
+    ]);
+    expect(parseHostConfig({ ...base, github: { readOnlyRepositories: ['SumerSports/x'] } }).github?.readOnlyRepositories).toEqual([
+      'sumersports/claude-fleet-loadouts',
+      'sumersports/x'
+    ]);
+    for (const bad of [[], 'SumerSports/claude-fleet-loadouts', ['claude-fleet-loadouts'], ['a/b/c'], ['SumerSports/..'], ['bad owner!/x'], [7]]) {
+      expect(() => g({ readOnlyRepositories: bad })).toThrow('github.readOnlyRepositories must list 1 to 500 owner/repo names');
+    }
+    expect(() => g({ readOnlyRepositories: ['SumerSports/other'] })).toThrow('github.readOnlyRepositories: other is not in github.repositories');
+  });
+
+  it('always lists the default loadouts repo as read-only, even outside github.repositories (D168)', () => {
+    expect(parseHostConfig({ ...base, github: { repositories: ['fleet-reviews'] } }).github?.readOnlyRepositories).toEqual([
+      'sumersports/claude-fleet-loadouts'
+    ]);
+    expect(() => parseHostConfig({ ...base, github: { writableLoadoutsRepo: true } })).toThrow(/unknown key writableLoadoutsRepo/);
   });
 
   it('parses an optional db block as a Postgres store config', () => {
