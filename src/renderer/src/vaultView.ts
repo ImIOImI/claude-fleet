@@ -75,3 +75,35 @@ export function publishableWorkspaces<T extends { id: string; kind: string }>(e:
   const lined = new Set(e.lines.map((l) => l.workspaceId));
   return workspaces.filter((w) => w.kind !== 'remote' && !lined.has(w.id));
 }
+
+const KEY_NAME_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
+const TAG_RE = /^[a-z0-9-]{1,32}$/;
+
+export function isValidKeyName(k: string): boolean {
+  return KEY_NAME_RE.test(k);
+}
+
+/** Comma/space separated tag input → normalized tags plus any that fail validation. */
+export function parseTagInput(input: string): { tags: string[]; invalid: string[] } {
+  const parts = [...new Set(input.split(/[\s,]+/).map((t) => t.toLowerCase()).filter(Boolean))];
+  return { tags: parts.filter((t) => TAG_RE.test(t)), invalid: parts.filter((t) => !TAG_RE.test(t)) };
+}
+
+/** Datalist options for a multi-tag input: the full input with its last token completed. */
+export function tagSuggestions(input: string, tags: string[]): string[] {
+  const m = /^(.*[\s,])?([^\s,]*)$/.exec(input);
+  const head = m?.[1] ?? '';
+  const partial = (m?.[2] ?? '').toLowerCase();
+  const used = new Set(parseTagInput(head).tags);
+  return tags.filter((t) => !used.has(t) && t.startsWith(partial)).map((t) => head + t);
+}
+
+export function inheritCount(e: VaultEntry): number {
+  return e.lines.filter((l) => l.mode === 'inherit').length;
+}
+
+export function pendingLabel(kind: string | undefined): string | null {
+  if (kind === 'container') return 'recreate to apply';
+  if (kind === 'local') return 'restart to apply';
+  return null;
+}

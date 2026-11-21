@@ -309,6 +309,7 @@ export function App() {
     }),
     [workspaces, automationList]
   );
+  const vaultWorkspaces = useMemo(() => workspaces.map(({ id, name, kind }) => ({ id, name, kind })), [workspaces]);
   const [createOpen, setCreateOpen] = useState(false);
   const [settingsTab, setSettingsTab] = useState<null | 'settings' | 'endpoints' | 'notifications'>(null);
   const [browseOpen, setBrowseOpen] = useState(false);
@@ -1814,6 +1815,7 @@ export function App() {
         <SettingsModal
           initialTab={settingsTab}
           names={workspaceNames}
+          workspaces={vaultWorkspaces}
           onClose={() => setSettingsTab(null)}
           onSaved={(cfg) => {
             setSharedDir(cfg.sharedDir);

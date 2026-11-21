@@ -62,4 +62,30 @@ describe('vaultView', () => {
     ];
     expect(v.entriesForWorkspace(list, 'W1').map((x) => x.key)).toEqual(['A', 'B']);
   });
+  it('parses tag input: split, lowercase, dedupe, flag invalid', () => {
+    expect(v.parseTagInput(' AWS, secrets  aws,bad_tag ')).toEqual({ tags: ['aws', 'secrets'], invalid: ['bad_tag'] });
+    expect(v.parseTagInput('')).toEqual({ tags: [], invalid: [] });
+  });
+  it('suggests completions of the last tag token', () => {
+    expect(v.tagSuggestions('aws, do', ['aws', 'doppler', 'docker', 'x'])).toEqual(['aws, doppler', 'aws, docker']);
+    expect(v.tagSuggestions('', ['a', 'b'])).toEqual(['a', 'b']);
+    expect(v.tagSuggestions('a ', ['a', 'b'])).toEqual(['a b']);
+  });
+  it('validates key names', () => {
+    expect(v.isValidKeyName('AWS_REGION')).toBe(true);
+    expect(v.isValidKeyName('9X')).toBe(false);
+    expect(v.isValidKeyName('A-B')).toBe(false);
+  });
+  it('counts inherit lines and labels pending by kind', () => {
+    const x = e('A', {
+      lines: [
+        { workspaceId: 'W1', mode: 'inherit', pending: false },
+        { workspaceId: 'W2', mode: 'override', pending: true }
+      ]
+    });
+    expect(v.inheritCount(x)).toBe(1);
+    expect(v.pendingLabel('container')).toBe('recreate to apply');
+    expect(v.pendingLabel('local')).toBe('restart to apply');
+    expect(v.pendingLabel('remote')).toBeNull();
+  });
 });
