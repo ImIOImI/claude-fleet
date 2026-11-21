@@ -10,7 +10,7 @@ describe('validation', () => {
   it('keys', () => {
     expect(m.isValidKey('DOPPLER_TOKEN')).toBe(true);
     expect(m.isValidKey('_x1')).toBe(true);
-    for (const bad of ['', '1A', 'A-B', 'A B', m.MIGRATED_MARKER, 7, null]) expect(m.isValidKey(bad)).toBe(false);
+    for (const bad of ['', '1A', 'A-B', 'A B', m.MIGRATED_MARKER, '__proto__', 7, null]) expect(m.isValidKey(bad)).toBe(false);
   });
   it('tags', () => {
     expect(m.isValidTag('aws')).toBe(true);
@@ -278,8 +278,9 @@ describe('envHash', () => {
 });
 
 describe('prototype-member key names (constructor/__proto__/toString)', () => {
-  it('are valid keys', () => {
-    for (const k of ['constructor', '__proto__', 'toString']) expect(m.isValidKey(k)).toBe(true);
+  it('are valid keys, except __proto__', () => {
+    for (const k of ['constructor', 'toString']) expect(m.isValidKey(k)).toBe(true);
+    expect(m.isValidKey('__proto__')).toBe(false);
   });
 
   it('read as absent on an empty store, not as the inherited prototype member', () => {

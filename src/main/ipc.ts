@@ -1447,7 +1447,8 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
           input.terminalRenderer === 'webgl'
             ? input.terminalRenderer
             : undefined,
-        env: input.env,
+        // Never persisted: secrets live in the vault (Task 6 migration).
+        env: { plain: {}, secretKeys: [] },
         resources: input.resources,
         mounts,
         mirror: input.mirror ?? FACTORY_MIRROR,
@@ -1700,6 +1701,8 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
         launcher: incomingLauncher,
         mounts,
         publish,
+        // Never persisted: secrets live in the vault (Task 6 migration).
+        env: { plain: {}, secretKeys: [] },
         remote: undefined
       });
       for (const id of existing?.publish?.to ?? []) if (!publish?.to.includes(id)) await deletePublishCursor(spec.id, id);

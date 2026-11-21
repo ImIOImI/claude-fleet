@@ -20,7 +20,7 @@ const TAG_RE = /^[a-z0-9-]{1,32}$/;
 const MAX_TAGS = 16;
 
 export function isValidKey(k: unknown): k is string {
-  return typeof k === 'string' && KEY_RE.test(k) && k !== MIGRATED_MARKER;
+  return typeof k === 'string' && KEY_RE.test(k) && k !== MIGRATED_MARKER && k !== '__proto__';
 }
 export function isValidTag(t: unknown): t is string {
   return typeof t === 'string' && TAG_RE.test(t);
@@ -56,9 +56,7 @@ function parseMeta(raw: string | undefined): KeyMeta | null {
   }
 }
 
-/** Own-property lookup: a bag's value for `key`, bypassing the Object prototype
- *  so a key named e.g. `constructor`/`toString` reads as genuinely absent
- *  rather than resolving to the inherited method. */
+/** Own-property lookup so prototype member names (constructor, toString) read as absent. */
 export function hasOwnKey(bag: Record<string, string> | undefined, key: string): boolean {
   return bag !== undefined && Object.hasOwn(bag, key);
 }

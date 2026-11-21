@@ -58,8 +58,8 @@ export function assertRendererVaultScope(scope: unknown): asserts scope is strin
  */
 export function assertRendererWorkspaceId(id: unknown): asserts id is string {
   if (typeof id !== 'string' || !id) throw new Error('workspace id must be a non-empty string');
-  if (id.includes(':') || RESERVED_VAULT_PREFIXES.some((p) => id.startsWith(p))) {
-    throw new Error('workspace id may not contain ":" or use a reserved vault prefix');
+  if (id === '__proto__' || id.includes(':') || RESERVED_VAULT_PREFIXES.some((p) => id.startsWith(p))) {
+    throw new Error('workspace id may not be "__proto__", contain ":", or use a reserved vault prefix');
   }
 }
 

@@ -12,8 +12,8 @@
 // free — the host paths and Docker container labels don't move.
 //
 // On-disk: <userData>/state/<id>/workspace.json
-// Sensitive material (env-var secrets) is NOT persisted here — only the
-// list of secret keys; values live in keytar.
+// Env-var secrets are NOT persisted here at all — they live in the vault
+// (vault.ts), keyed by workspace id.
 
 import { sanitizePublish, type WorkspacePublish } from '../preload/publish.js';
 import { readFile, readdir, mkdir } from 'node:fs/promises';
@@ -76,9 +76,7 @@ export function sanitizeRemote(r: unknown): RemoteBookmark | undefined {
 export type AuthMode = 'oauth' | 'apikey' | 'endpoint';
 
 /**
- * Per-workspace environment variables. `plain` values live in the
- * manifest on disk; `secretKeys` lists the keys whose values are
- * stored in keytar at `<id>:<key>` (resolved at container-start time).
+ * Legacy; migrated into the vault at startup and written empty.
  */
 export interface WorkspaceEnv {
   plain: Record<string, string>;

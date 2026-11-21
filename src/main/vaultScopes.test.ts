@@ -52,7 +52,8 @@ describe('assertRendererWorkspaceId (#444 security review)', () => {
     ['an id with a colon', 'ws:1'],
     ['a non-string', ['01HZXY']],
     ['an empty string', ''],
-    ['undefined', undefined]
+    ['undefined', undefined],
+    ['__proto__', '__proto__']
   ])('refuses %s', (_label, id) => {
     expect(() => assertRendererWorkspaceId(id)).toThrow(/workspace id/);
   });
