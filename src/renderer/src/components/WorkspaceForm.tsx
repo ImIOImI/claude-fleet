@@ -24,9 +24,10 @@ import { AdvancedImageSearchModal, IconSearch } from './AdvancedImageSearchModal
 import { buildWslLauncherPayload } from './wslLauncherPayload';
 import { eligibleAcceptFromManagers, ManagerGlyph } from './committee';
 import { ModelCombobox, type EndpointEntry } from './ModelCombobox';
-import { createSecretRevealer, REVEAL_SECONDS, type RevealState } from './secretReveal';
-import { IconEye, IconEyeOff, RevealRing } from './RevealIcons';
 import type { InboxConfig } from '../../../preload';
+import type { VaultWorkspaceEdit } from '../../../preload/vaultTypes';
+import { stage, type StagedState } from '../workspaceVaultEdits';
+import { WorkspaceVaultSection } from './WorkspaceVaultSection';
 import type { CaptureSettings } from '../../../preload/captureSettings';
 import { defaultContainerPath, type ExtraMount } from '../../../preload/extraMounts';
 import { canBackfill, PUBLISH_HINT, publishSummary, publishVisibility, togglePublishTarget } from './publishTargets';
@@ -83,21 +84,10 @@ export interface WorkspaceFormSubmit {
   authMode: AuthMode;
   /** authMode 'endpoint' only — registry reference (#250). */
   endpointId?: string;
-  plainEnv: Record<string, string>;
-  /**
-   * Full list of every secret-env-var key the workspace will have after
-   * this submit lands. Lands directly in `manifest.env.secretKeys` — the
-   * parent doesn't need to derive it from `secrets`. Pre-existing secret
-   * keys the user didn't touch in edit mode are here even though they
-   * aren't in `secrets`.
-   */
-  secretKeys: string[];
-  /**
-   * Map of newly-typed secret values that need to be (re)written to the
-   * vault. Subset of `secretKeys` — keys without a new value are
-   * already in keytar and shouldn't be touched.
-   */
-  secrets: Record<string, string>;
+  /** Staged env changes; the parent applies them with vault:applyWorkspaceEdits before create/start. */
+  vaultEdits: VaultWorkspaceEdit[];
+  /** Clone of a saved workspace: copy its vault lines (vault:copyWorkspace) before applying `vaultEdits`. */
+  copyVaultFrom?: string;
   resources?: WorkspaceResources;
   /** Container kind only: extra host folders bound into the container. */
   mounts?: ExtraMount[];
@@ -148,16 +138,6 @@ function petName(): string {
   const a = ADJECTIVES[Math.floor(Math.random() * ADJECTIVES.length)];
   const n = ANIMALS[Math.floor(Math.random() * ANIMALS.length)];
   return `${a}-${n}`;
-}
-
-interface EnvRow {
-  key: string;
-  value: string;
-  secret: boolean;
-  /** Pre-existing secret keys in edit mode show as a placeholder "•••••" until the user types. */
-  preExisting?: boolean;
-  /** A typed (not yet saved) secret value is shown as plain text. */
-  shown?: boolean;
 }
 
 interface Props {
@@ -235,41 +215,8 @@ export function WorkspaceForm({
   );
   const [endpoints, setEndpoints] = useState<EndpointEntry[]>([]);
   const [endpointsLoaded, setEndpointsLoaded] = useState(false);
-  const [envRows, setEnvRows] = useState<EnvRow[]>(() => {
-    const rows: EnvRow[] = [];
-    if (initial?.plainEnv) {
-      for (const [key, value] of Object.entries(initial.plainEnv)) {
-        rows.push({ key, value, secret: false });
-      }
-    }
-    // Initial secret rows: we know the keys from the manifest but never
-    // the values. Mark them preExisting so the input renders a "•••••"
-    // placeholder until the user types a replacement.
-    const existingSecretKeys = (initial as unknown as { secretKeys?: string[] })?.secretKeys ?? [];
-    for (const key of existingSecretKeys) {
-      rows.push({ key, value: '', secret: true, preExisting: true });
-    }
-    return rows;
-  });
-  // Temporary reveal of saved secret values (vault:getSecret on click,
-  // auto-hidden after REVEAL_SECONDS). Keyed by env var name. Only possible
-  // with a workspace id — a clone carries the source's keys but not its id.
-  const [reveals, setReveals] = useState<Record<string, RevealState>>({});
-  const [revealer] = useState(() => {
-    const id = initial?.id;
-    if (!id) return null;
-    return createSecretRevealer({
-      fetch: (key) => window.api.vault.getSecret(id, key),
-      onChange: (key, state) =>
-        setReveals((prev) => {
-          const next = { ...prev };
-          if (state) next[key] = state;
-          else delete next[key];
-          return next;
-        })
-    });
-  });
-  useEffect(() => () => revealer?.hideAll(), [revealer]);
+  const [staged, setStaged] = useState<StagedState>(() => ({ edits: initial?.vaultEdits ?? [] }));
+  const [envKeys, setEnvKeys] = useState<string[]>([]);
   const [cpus, setCpus] = useState<string>(
     initial?.resources?.cpus != null ? String(initial.resources.cpus) : ''
   );
@@ -290,7 +237,6 @@ export function WorkspaceForm({
   const [cleanupDefault, setCleanupDefault] = useState<CleanupSetting>(
     initial?.mirror?.cleanup ?? 'delete'
   );
-  const [envOpen, setEnvOpen] = useState(envRows.length > 0);
   // Committee opt-in (#118) — inbound "reachable by managers". Edit-mode only.
   const [reachable, setReachable] = useState<boolean>(initial?.accessibility?.reachable ?? false);
   const [roleHint, setRoleHint] = useState<string>(initial?.accessibility?.roleHint ?? '');
@@ -398,13 +344,9 @@ export function WorkspaceForm({
     );
   }, [launcherMode, wslDistro]);
 
-  const apiKeyAvailable = useMemo(
-    () =>
-      envRows.some(
-        (r) => r.key === 'ANTHROPIC_API_KEY' && (r.value.length > 0 || r.preExisting)
-      ),
-    [envRows]
-  );
+  const apiKeyAvailable = envKeys.includes('ANTHROPIC_API_KEY');
+  const workspaceNames = useMemo(() => Object.fromEntries(workspaces.map((w) => [w.id, w.name])), [workspaces]);
+  const workspaceKinds = useMemo(() => Object.fromEntries(workspaces.map((w) => [w.id, w.kind])), [workspaces]);
 
   const allKnownLabels = useMemo(() => {
     const set = new Set<string>();
@@ -423,37 +365,6 @@ export function WorkspaceForm({
   };
 
   const removeLabel = (l: string) => setLabels((prev) => prev.filter((x) => x !== l));
-
-  const addEnvRow = () =>
-    setEnvRows((prev) => [...prev, { key: '', value: '', secret: false }]);
-  const updateEnvRow = (i: number, patch: Partial<EnvRow>) => {
-    // Any edit to a revealed row (rename, new value, untick secret) masks it.
-    const current = envRows[i];
-    if (current?.preExisting) revealer?.hide(current.key);
-    setEnvRows((prev) =>
-      prev.map((r, idx) => {
-        if (idx !== i) return r;
-        // Typing into a preExisting row replaces the secret — clear that flag.
-        const next: EnvRow = { ...r, ...patch };
-        if ('value' in patch && patch.value && next.preExisting) next.preExisting = false;
-        return next;
-      })
-    );
-  };
-  const removeEnvRow = (i: number) => {
-    const current = envRows[i];
-    if (current?.preExisting) revealer?.hide(current.key);
-    setEnvRows((prev) => prev.filter((_, idx) => idx !== i));
-  };
-  const toggleReveal = (row: EnvRow, i: number) => {
-    if (!row.preExisting) {
-      updateEnvRow(i, { shown: !row.shown });
-      return;
-    }
-    if (!revealer) return;
-    if (revealer.isActive(row.key)) revealer.hide(row.key);
-    else revealer.reveal(row.key);
-  };
 
   /**
    * Validate the form and assemble a `WorkspaceFormSubmit`. Returns null
@@ -509,43 +420,6 @@ export function WorkspaceForm({
     ) {
       setError("This workspace's model endpoint was deleted — pick another model.");
       return null;
-    }
-
-    const seen = new Set<string>();
-    const plainEnv: Record<string, string> = {};
-    const secrets: Record<string, string> = {};
-    const secretKeys: string[] = [];
-    for (const row of envRows) {
-      const k = row.key.trim();
-      if (!k) continue;
-      if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(k)) {
-        setError(`Invalid env var name "${k}" — must match [A-Z_][A-Z0-9_]+ (POSIX style).`);
-        return null;
-      }
-      if (seen.has(k)) {
-        setError(`Duplicate env var "${k}".`);
-        return null;
-      }
-      seen.add(k);
-      if (row.secret) {
-        if (vaultAvailable === false && !row.preExisting) {
-          setError(
-            `Secret env "${k}" requires the OS keychain, which isn't reachable. ` +
-              `Switch the row to plain or install libsecret.`
-          );
-          return null;
-        }
-        secretKeys.push(k);
-        // preExisting + empty value = user didn't change it; leave the
-        // keytar entry intact by *not* including it in the `secrets`
-        // map. App-side: just doesn't call setSecret. The key still
-        // appears in `secretKeys` so the manifest stays consistent.
-        if (row.value || !row.preExisting) {
-          secrets[k] = row.value;
-        }
-      } else {
-        plainEnv[k] = row.value;
-      }
     }
 
     let resources: WorkspaceResources | undefined;
@@ -614,9 +488,8 @@ export function WorkspaceForm({
       image: kind === 'container' ? image.trim() : undefined,
       authMode,
       endpointId,
-      plainEnv,
-      secretKeys,
-      secrets,
+      vaultEdits: staged.edits,
+      copyVaultFrom: initial?.copyVaultFrom,
       resources,
       mounts: kind === 'container' ? mountsFromRows(mountRows) : undefined,
       mirror: { default: mirrorDefault, cleanup: cleanupDefault },
@@ -1145,134 +1018,17 @@ export function WorkspaceForm({
         </div>
       )}
 
-      <details
-        className="form-disclosure"
-        open={envOpen}
-        onToggle={(e) => setEnvOpen((e.target as HTMLDetailsElement).open)}
-      >
-        <summary>
-          Env vars{' '}
-          <span className="form-hint">
-            {envRows.length === 0
-              ? '(none)'
-              : `${envRows.length} entr${envRows.length === 1 ? 'y' : 'ies'}`}
-          </span>
-        </summary>
-        <div className="env-editor">
-          {envRows.map((row, i) => {
-            const reveal = row.preExisting ? reveals[row.key] : undefined;
-            const revealedValue = reveal?.status === 'shown' ? reveal.value : null;
-            const visible = row.preExisting ? revealedValue !== null : !!row.shown;
-            const revealBlocked = !!row.preExisting && !revealer;
-            return (
-            <div className="env-row" key={i}>
-              <input
-                aria-label={`Env key ${i + 1}`}
-                className="env-key"
-                value={row.key}
-                onChange={(e) => updateEnvRow(i, { key: e.target.value.toUpperCase() })}
-                placeholder="NAME"
-                disabled={busy}
-              />
-              <input
-                aria-label={`Env value ${i + 1}`}
-                className={revealedValue !== null ? 'env-value revealed' : 'env-value'}
-                value={revealedValue ?? row.value}
-                // Editing a revealed value replaces the secret; the new text
-                // stays visible (typed values have no countdown).
-                onChange={(e) =>
-                  updateEnvRow(
-                    i,
-                    revealedValue !== null ? { value: e.target.value, shown: true } : { value: e.target.value }
-                  )
-                }
-                placeholder={row.preExisting ? '••••• (set; type to replace)' : row.secret ? '••••• (stored in keychain)' : 'value'}
-                type={row.secret && !visible ? 'password' : 'text'}
-                autoComplete="off"
-                spellCheck={false}
-                disabled={busy}
-              />
-              {row.secret ? (
-                <button
-                  type="button"
-                  className={visible ? 'env-reveal on' : 'env-reveal'}
-                  aria-label={`${visible ? 'Hide' : 'Show'} value of ${row.key || 'env var'}`}
-                  aria-pressed={visible}
-                  title={
-                    revealBlocked
-                      ? "This secret belongs to the workspace you cloned from, so it can't be shown here"
-                      : visible
-                        ? 'Hide value'
-                        : row.preExisting
-                          ? `Show the saved value for ${REVEAL_SECONDS}s`
-                          : 'Show value'
-                  }
-                  onClick={() => toggleReveal(row, i)}
-                  disabled={busy || revealBlocked || reveal?.status === 'loading'}
-                >
-                  {visible ? <IconEyeOff /> : <IconEye />}
-                </button>
-              ) : (
-                <span className="env-reveal-slot" aria-hidden="true" />
-              )}
-              <label
-                className="env-secret-toggle"
-                title={
-                  vaultAvailable === false
-                    ? 'OS keychain unavailable — secrets disabled'
-                    : 'Store value in the OS keychain instead of the manifest'
-                }
-              >
-                <input
-                  type="checkbox"
-                  checked={row.secret}
-                  onChange={(e) => updateEnvRow(i, { secret: e.target.checked })}
-                  disabled={busy || vaultAvailable === false || row.preExisting}
-                />
-                <span>secret</span>
-              </label>
-              <button
-                type="button"
-                className="env-row-remove"
-                aria-label="Remove env var"
-                onClick={() => removeEnvRow(i)}
-                disabled={busy}
-              >
-                ×
-              </button>
-              {reveal?.status === 'shown' && (
-                <div className="env-reveal-note warn" role="status">
-                  <RevealRing remainingS={reveal.remainingS} />
-                  Hides in {reveal.remainingS}s
-                  <span className="env-reveal-hint">· type over it to replace</span>
-                </div>
-              )}
-              {reveal?.status === 'loading' && (
-                <div className="env-reveal-note" role="status">Loading…</div>
-              )}
-              {reveal?.status === 'missing' && (
-                <div className="env-reveal-note err" role="status">
-                  Not in the vault. Type a value to set it, or remove the row.
-                </div>
-              )}
-              {reveal?.status === 'error' && (
-                <div className="env-reveal-note err" role="status">
-                  Couldn't load the value: {reveal.message}
-                </div>
-              )}
-            </div>
-            );
-          })}
-          <button
-            type="button"
-            className="btn"
-            onClick={addEnvRow}
-            disabled={busy}
-          >
-            + Add env var
-          </button>
-        </div>
-      </details>
+      <WorkspaceVaultSection
+        workspaceId={initial?.id ?? null}
+        names={workspaceNames}
+        kinds={workspaceKinds}
+        workspaces={workspaces}
+        readOnly={busy || vaultAvailable === false}
+        staged={staged}
+        onStage={(edit) => setStaged((s) => stage(s, edit))}
+        cloneFrom={initial?.id ? undefined : initial?.copyVaultFrom}
+        onKeysChange={setEnvKeys}
+      />
 
       {kind === 'container' && (
         <details

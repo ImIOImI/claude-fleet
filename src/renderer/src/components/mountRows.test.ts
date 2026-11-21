@@ -89,11 +89,21 @@ describe('containerLevelChanged (mounts)', () => {
     const after = {
       authMode: 'oauth',
       image: 'img',
-      plainEnv: {},
-      secretKeys: [],
-      secrets: {},
+      vaultEdits: [],
       mounts: [{ hostPath: '/a', containerPath: '/mnt/a', readOnly: false }]
     } as never;
     expect(containerLevelChanged(before, after)).toBe(true);
+  });
+});
+
+describe('containerLevelChanged (vault edits)', () => {
+  const before = { authMode: 'oauth', image: 'img', env: { plain: {}, secretKeys: [] } } as never;
+  it('treats any staged vault edit as container-level', () => {
+    const after = { authMode: 'oauth', image: 'img', vaultEdits: [{ key: 'A', op: 'inherit' }] } as never;
+    expect(containerLevelChanged(before, after)).toBe(true);
+  });
+  it('is unchanged with no staged edits', () => {
+    const after = { authMode: 'oauth', image: 'img', vaultEdits: [] } as never;
+    expect(containerLevelChanged(before, after)).toBe(false);
   });
 });

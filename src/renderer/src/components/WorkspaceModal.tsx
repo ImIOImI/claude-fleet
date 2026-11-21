@@ -180,8 +180,7 @@ export function WorkspaceModal({
       prev.includes(l) ? prev.filter((x) => x !== l) : [...prev, l]
     );
 
-  // Create-mode submit. App.handleCreate mints the ULID + writes secrets +
-  // calls workspace:create.
+  // Create-mode submit. App.handleCreate applies vault edits + calls workspace:create.
   const handleCreate = async (
     submit: WorkspaceFormSubmit,
     setStatus: (msg: string | null) => void
