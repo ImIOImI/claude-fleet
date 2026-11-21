@@ -6,6 +6,7 @@ set -Eeuo pipefail
 # Under -e a check without `|| fail` would exit silently; name the line instead.
 trap 'echo "FAIL: line $LINENO: $BASH_COMMAND"' ERR
 image=$1
+here=$(cd "$(dirname "$0")" && pwd)
 pg_image=pgvector/pgvector:0.8.7-pg16@sha256:0dd3149a06e4579a0d70d8fef9945636cd514005e7237deb27f9b67886f8dc4f
 n=split-$$
 tmp=$(mktemp -d)
@@ -16,6 +17,7 @@ cleanup() {
   left=$(docker ps -aq --filter "name=^$n-")
   [ -n "$left" ] && docker rm -f $left >/dev/null 2>&1
   docker network rm "$n" >/dev/null 2>&1 || true
+  docker volume rm "$n-ws-data" >/dev/null 2>&1 || true
   rm -rf "$tmp"
 }
 trap cleanup EXIT
@@ -178,6 +180,47 @@ bctl status | grep -q '"id":"drainbusy","alive":false,"ended":"drain-killed"' ||
 bctl create late | grep -q 'draining: the workspace is restarting' || fail "CREATE accepted while drained"
 docker stop -t 15 "$n-ws" >/dev/null || fail "docker stop workspace"
 test "$(docker inspect -f '{{.State.ExitCode}}' "$n-ws")" = 0 || fail "drained broker did not exit 0 on SIGTERM"
+
+# Pinned loadouts (D159–D166): a fake credential server + GitHub API; the sync runs before the broker listens.
+ready_get_js="require('http').get('http://127.0.0.1:7071/ready',(s)=>{let b='';s.on('data',(d)=>b+=d);s.on('end',()=>console.log(s.statusCode+' '+b.trim()))}).on('error',(e)=>console.log(e.code))"
+docker volume create "$n-ws-data" >/dev/null
+docker run --rm -u 0 -v "$n-ws-data:/workspace" --entrypoint chown "$image" 1000:1000 /workspace || fail "chown the workspace volume"
+ids+=("$(docker run -d --name "$n-gh" --network "$n" --network-alias gh-fake -u 1000:1000 -e FAKE_FAIL_TAGS=demo/v2.0.0 \
+  -v "$here/testdata:/fake:ro" --entrypoint node "$image" /fake/fake-github.mjs)")
+retry sh -c "docker logs '$n-gh' 2>/dev/null | grep -q '\"ready\":true'" || fail "fake GitHub never started"
+# loadouts_pod <name> <FLEET_LOADOUTS>: a workspace pod on the shared /workspace volume, pointed at the fake.
+loadouts_pod() {
+  ids+=("$(docker run -d --name "$n-$1net" --network "$n" --entrypoint node "$image" -e "$ready_js")")
+  ids+=("$(docker run -d --name "$n-$1" --network "container:$n-$1net" -u 1000:1000 -v "$n-ws-data:/workspace" \
+    -e FLEET_HOST_CRED_ADDR=gh-fake:8081 -e FLEET_LOADOUTS_API=http://gh-fake:8090 -e "FLEET_LOADOUTS=$2" -e CLAUDE_FLEET_BROKER_CLAUDE=/bin/cat \
+    "$image" fleet-host-entry workspace)")
+  until_eq "200 serving" docker exec "$n-$1" node -e "$ready_get_js" || fail "$1: broker never served"
+}
+
+loadouts_pod ld1 demo@1.0.0
+grep -q 'Demo skill 1.0.0' <<<"$(docker exec "$n-ld1" cat /workspace/.claude/skills/demo/SKILL.md)" || fail "pinned loadout not installed"
+grep -q '"version": "1.0.0"' <<<"$(docker exec "$n-ld1" cat /workspace/.claude/fleet-loadouts.json)" || fail "install not recorded"
+ld1_logs=$(docker logs "$n-ld1" 2>&1)
+sync_at=$(grep -n '"msg":"loadout sync done"' <<<"$ld1_logs" | head -1 | cut -d: -f1)
+listen_at=$(grep -n 'listening on' <<<"$ld1_logs" | head -1 | cut -d: -f1)
+[ -n "$sync_at" ] && [ -n "$listen_at" ] && (( sync_at < listen_at )) || fail "the sync did not finish before the broker listened"
+gh_logs=$(docker logs "$n-gh" 2>&1)
+grep -q '"token_request":{"owner":"SumerSports","repositories":\["claude-fleet-loadouts"\],"permissions":{"contents":"read"}}' <<<"$gh_logs" \
+  || fail "token request is not contents: read on the loadouts repo"
+grep -q '"path":"/codeload/[0-9a-f]*","auth":false' <<<"$gh_logs" || fail "codeload request carried a token"
+docker stop -t 15 "$n-ld1" >/dev/null || fail "stop ld1"
+
+# A failed download keeps the installed version and the broker still serves.
+loadouts_pod ld2 demo@2.0.0
+grep -q '"msg":"loadout sync failed".*"stage":"download"' <<<"$(docker logs "$n-ld2" 2>&1)" || fail "failed download not logged"
+grep -q 'Demo skill 1.0.0' <<<"$(docker exec "$n-ld2" cat /workspace/.claude/skills/demo/SKILL.md)" || fail "previous version not kept"
+docker stop -t 15 "$n-ld2" >/dev/null || fail "stop ld2"
+
+# Nothing pinned: the recorded loadout is reverted.
+loadouts_pod ld3 ''
+docker exec "$n-ld3" test ! -e /workspace/.claude/skills/demo/SKILL.md || fail "unpinned loadout not reverted"
+grep -q '"msg":"loadout reverted"' <<<"$(docker logs "$n-ld3" 2>&1)" || fail "revert not logged"
+docker stop -t 15 "$n-ld3" >/dev/null || fail "stop ld3"
 
 # The sidecar-less workspace pod gives up after 60 s and exits 1.
 for _ in $(seq 1 90); do [ "$(docker inspect -f '{{.State.Running}}' "$n-nomesh")" = false ] && break; sleep 1; done
