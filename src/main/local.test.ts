@@ -19,14 +19,9 @@ vi.mock('electron', () => ({
   }
 }));
 
-// Mock vault so resolveEnv doesn't hit safeStorage/disk.
-vi.mock('./vault.js', () => ({
-  resolveEnv: async (
-    _id: string,
-    plain: Record<string, string>,
-    _secretKeys: string[]
-  ): Promise<Record<string, string>> => ({ ...plain })
-}));
+// Mock vault so resolveWorkspaceEnv doesn't hit safeStorage/disk.
+const resolveWorkspaceEnvMock = vi.hoisted(() => vi.fn(async (_id: string): Promise<Record<string, string>> => ({})));
+vi.mock('./vault.js', () => ({ resolveWorkspaceEnv: resolveWorkspaceEnvMock }));
 
 // Mock endpoints so endpointEnv doesn't hit disk.
 vi.mock('./endpoints.js', () => ({
@@ -85,15 +80,10 @@ describe('buildEnv — ANTHROPIC_API_KEY inheritance', () => {
     expect(env.ANTHROPIC_API_KEY).toBe(REAL_KEY);
   });
 
-  it('endpoint workspace with explicit workspace ANTHROPIC_API_KEY keeps that value', async () => {
+  it('endpoint workspace with a vault-resolved ANTHROPIC_API_KEY keeps that value', async () => {
     const explicit = 'sk-ant-workspace-explicit';
-    const env = await buildEnv('ws1', {
-      ...fakeEnv({ ANTHROPIC_API_KEY: explicit }),
-      authMode: 'endpoint',
-      endpointId: 'ep1'
-    });
-    // resolveEnv returns plain env as-is (mocked above), so the explicit key
-    // from the workspace env spreads last and wins.
+    resolveWorkspaceEnvMock.mockResolvedValueOnce({ ANTHROPIC_API_KEY: explicit });
+    const env = await buildEnv('ws1', { ...fakeEnv(), authMode: 'endpoint', endpointId: 'ep1' });
     expect(env.ANTHROPIC_API_KEY).toBe(explicit);
   });
 });
@@ -121,12 +111,10 @@ describe('buildEnv — claude child-session markers (#285)', () => {
     expect(env.CLAUDECODE).toBeUndefined();
   });
 
-  it('an explicit workspace override of a marker is still honoured', async () => {
+  it('a vault-resolved override of a marker is still honoured', async () => {
     vi.stubEnv('CLAUDE_CODE_CHILD_SESSION', '1');
-    const env = await buildEnv('ws1', {
-      ...fakeEnv({ CLAUDE_CODE_CHILD_SESSION: 'keep-me' }),
-      authMode: 'oauth'
-    });
+    resolveWorkspaceEnvMock.mockResolvedValueOnce({ CLAUDE_CODE_CHILD_SESSION: 'keep-me' });
+    const env = await buildEnv('ws1', { ...fakeEnv(), authMode: 'oauth' });
     expect(env.CLAUDE_CODE_CHILD_SESSION).toBe('keep-me');
   });
 });

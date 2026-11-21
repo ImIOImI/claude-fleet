@@ -47,7 +47,7 @@ import { randomUUID } from 'node:crypto';
 import { recordBrokerSessionMapping, recordUsageEvent } from './db.js';
 import { logError } from './errorLog.js';
 import { learnMapping as learnMirrorMapping } from './mirrorPolicy.js';
-import { resolveEnv } from './vault.js';
+import { resolveWorkspaceEnv } from './vault.js';
 import { endpointEnv } from './endpoints.js';
 import { claudeCreateArgs } from './claudeArgs.js';
 import { injectAndSubmit } from './ptyInput.js';
@@ -584,7 +584,7 @@ async function createWorkspaceInner(spec: CreateWorkspaceInput): Promise<Workspa
   // explicit workspace env still overrides it. Resolved live — registry
   // edits/key rotation apply on next create.
   const backendVars = spec.authMode === 'endpoint' ? await endpointEnv(spec.endpointId) : {};
-  const resolvedEnv = { ...backendVars, ...(await resolveEnv(spec.id, spec.env.plain, spec.env.secretKeys)) };
+  const resolvedEnv = { ...backendVars, ...(await resolveWorkspaceEnv(spec.id)) };
   const envArr = ['HOME=/home/fleet', ...Object.entries(resolvedEnv).map(([k, v]) => `${k}=${v}`)];
   // Windows: tell the broker to listen on loopback TCP instead of a unix
   // socket. The host connects via the published 127.0.0.1:<hostPort>.

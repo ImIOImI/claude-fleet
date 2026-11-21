@@ -71,7 +71,7 @@ import {
 import { logError } from './errorLog.js';
 import { learnMapping as learnMirrorMapping } from './mirrorPolicy.js';
 import { workspaceStateDir, assertValidWorkspaceId } from './paths.js';
-import { resolveEnv } from './vault.js';
+import { resolveWorkspaceEnv } from './vault.js';
 import { getStoreConfig } from './config.js';
 import { storeSecretEnvNames, type StoreConfig } from './store/storeConfig.js';
 import { activeStoreConfig } from './store/activeStore.js';
@@ -403,7 +403,7 @@ export async function buildEnv(
   ws: { env: Workspace['env']; authMode?: Workspace['authMode']; endpointId?: string }
 ): Promise<NodeJS.ProcessEnv> {
   const backendVars = ws.authMode === 'endpoint' ? await endpointEnv(ws.endpointId) : {};
-  const resolved = await resolveEnv(id, ws.env.plain, ws.env.secretKeys);
+  const resolved = await resolveWorkspaceEnv(id);
   const base = await hostEnvForWorkspaces();
   // Endpoint workspaces must not inherit the host's real Anthropic key (dev
   // fallback mode) into a process whose base URL is a third-party endpoint.
