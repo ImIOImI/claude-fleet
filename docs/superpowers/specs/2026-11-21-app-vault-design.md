@@ -94,17 +94,18 @@ Main reads recognized root values directly from `app:env`. Root values are **nev
 
 `IdentityService.load()` prefers a root `GITHUB_TOKEN` over the device-flow token in `identity:github`:
 
-- On first use (or when the PAT changes), it verifies the PAT with the same profile probe as device-flow sign-in (`GET /user`, `/user/teams`, scopes from `X-OAuth-Scopes`) and caches the profile in `identity:github` `PROFILE` with `source: "pat"` plus a SHA-256 of the token (not the token).
+- On first use (or when the PAT changes), it verifies the PAT with the same profile probe as device-flow sign-in (`GET /user`, `/user/teams`, scopes from `X-OAuth-Scopes`) and caches the profile in `identity:github` `PAT_PROFILE` (separate from the device `PROFILE`) with `source: "pat"` plus `tokenSha`, a SHA-256 of the token (not the token).
 - `AccountStatus` gains `source: 'device' | 'pat' | null`. Settings → Account shows "Signed in with a personal access token (Vault)". Sign out is replaced by "Manage in Vault", which opens the Vault tab on `GITHUB_TOKEN`.
-- A PAT that fails verification (401) is not cleared (the user owns it); status shows `notice` and `signedIn: false`, and the device flow stays available.
+- A PAT that fails verification (401) is not cleared (the user owns it): `PAT_PROFILE` becomes a `{ "rejectedSha": … }` tombstone, so it isn't re-probed until the token changes or the user refreshes. Any other probe failure backs off 60 s (in memory). While rejected or backed off, status falls back to the device-flow token (if any) and shows the PAT `notice`.
 - Fine-grained PATs send no `X-OAuth-Scopes`; scopes resolve to `[]`, so `packagesAccess` is false and team-based grants need `read:org`. The Account notice says so.
 - `bearerToken()` and `packagesToken()` return the PAT when it is the active source.
+- `status({ refresh: true })` re-probes the PAT, including a rejected or backed-off one. Sign-out leaves a PAT alone.
 
 ## 4. IPC
 
 New `vault:*` channels (`vaultIpc.ts`), all main-side validated, failing closed on non-primitive arguments like the existing surface:
 
-- `vault:list()` → `VaultEntry[]`: `{ key, secret, tags, fleet, root: { set, value? }, lines: { workspaceId, mode: 'inherit' | 'override', value?, pending: boolean }[] }` (the renderer labels a pending line "recreate to apply" for containers, "restart to apply" for local)`. `value` is present only for **plain** keys. Secret values never appear.
+- `vault:list()` → `VaultEntry[]`: `{ key, secret, tags, fleet, root: { set, value? }, lines: { workspaceId, mode: 'inherit' | 'override', value?, pending: boolean }[] }` (the renderer labels a pending line "recreate to apply" for containers, "restart to apply" for local). `value` is present only for **plain** keys. Secret values never appear.
 - `vault:reveal(key, workspaceId | null)` → `string | null`: one value (root when `workspaceId` is null). Replaces the renderer's `vault:getSecret` use in `secretReveal.ts`.
 - `vault:putKey({ key, secret, tags, rootValue? })` → `void`: create or update a key's metadata and root value. `rootValue: null` deletes the root value; absent leaves it.
 - `vault:renameKey(key, newKey)` → `void`.
@@ -112,8 +113,7 @@ New `vault:*` channels (`vaultIpc.ts`), all main-side validated, failing closed 
 - `vault:setLine(key, workspaceId, { mode: 'inherit' } | { mode: 'override', value })` → `void`.
 - `vault:removeLine(key, workspaceId)` → `void`.
 - `vault:copyWorkspace(fromId, toId)` → `void`.
-
-- `vault:applyWorkspaceEdits(workspaceId, edits)` → `void`: the workspace form's staged edits in one locked write (accepts a not-yet-created workspace id).
+- `vault:applyWorkspaceEdits(workspaceId, edits)` → `void`: the workspace form's staged edits (`inherit` / `override` / `remove` / `create`) in one locked write. Accepts a not-yet-created workspace id; `setLine` requires a manifest. Remote workspaces are refused.
 
 Workspace ids are checked with `assertRendererWorkspaceId`; keys with the key regex. `vault:listKeys`, `vault:getSecret`, `vault:setSecret`, `vault:deleteSecret` are removed (only workspace env used them); `vault:available` and `vault:deleteAllForWorkspace` stay.
 
@@ -138,19 +138,19 @@ The env editor in `WorkspaceForm.tsx` becomes a vault view for the workspace:
 - Lists keys published to this workspace (inherit / override, same controls as the tab), with the same search and chips; the workspace's derived tag is pre-selected.
 - **Add from vault** picker publishes an existing key (inherit by default).
 - **New key** creates a key with an override value only (workspace-only); "also set as root" checkbox writes the root value and makes the line inherit.
-- In create mode (no workspace yet), edits are staged in the form and applied with `vault:setLine` / `vault:putKey` against the minted ULID before `workspace:create`, replacing `persistSecrets`.
+- Edits are staged in the form and applied with `vault:applyWorkspaceEdits` against the workspace id (in create mode, the ULID minted once per modal open) before `workspace:create` / start / recreate, replacing `persistSecrets`. Clone copies the source's lines with `vault:copyWorkspace` first. A failed create that left no manifest deletes the applied lines. Remote workspaces show no env section.
 - `WorkspaceFormSubmit` drops `plainEnv`, `secretKeys`, `secrets`; the manifest stops carrying env (see §6).
 
 ## 6. Migration
 
 One-time, at startup in `migration.ts`, guarded by `app:index` key `__migrated__` (excluded from listings):
 
-1. For each manifest with `env.plain` or `env.secretKeys`: plain values → `bag[W][K]`; secret keys already have values in `bag[W]`.
+1. For each manifest with `env.plain` or `env.secretKeys`: plain values → `bag[W][K]`; secret keys already have values in `bag[W]` (a secret key with no stored value becomes a `''` override; a secret wins over a same-named plain value). Bag keys the manifest no longer lists are dropped.
 2. Index entries created for every migrated key; `secret: true` if any workspace had it secret (so a key plain in one workspace and secret in another becomes secret).
 3. All migrated lines are **overrides**; no root values are invented.
 4. Manifests are rewritten with `env: { plain: {}, secretKeys: [] }` (field kept so older builds still parse). A downgrade after migration starts workspaces without their env; accepted.
 
-`workspaces.ts` keeps reading `env` (migration source); every manifest writer stops populating it.
+`workspaces.ts` keeps reading `env` (migration source); every manifest writer stops populating it (`workspace:create` / `workspace:writeManifest` force it empty). Manifests are swept on every start, so a crash between the vault write and the manifest write heals.
 
 ## 7. Errors
 

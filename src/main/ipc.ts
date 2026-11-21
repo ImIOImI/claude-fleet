@@ -1447,7 +1447,7 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
           input.terminalRenderer === 'webgl'
             ? input.terminalRenderer
             : undefined,
-        // Never persisted: secrets live in the vault (Task 6 migration).
+        // Never persisted: secrets live in the vault.
         env: { plain: {}, secretKeys: [] },
         resources: input.resources,
         mounts,
@@ -1647,7 +1647,7 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
    * Update a workspace's manifest in place without touching the container.
    * Used by the Saved-tab Resume flow to apply edited fields (description,
    * labels, etc.) before calling `workspace:start`. Env lives in the vault,
-   * not the manifest (Task 6 migration) — it's edited via vault:* IPC.
+   * not the manifest — it's edited via vault:* IPC.
    * Container-level edits (env values, image) won't take effect until the
    * container is restarted — see the Phase 2 *restart-to-apply* banner.
    */
@@ -1702,7 +1702,7 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
         launcher: incomingLauncher,
         mounts,
         publish,
-        // Never persisted: secrets live in the vault (Task 6 migration).
+        // Never persisted: secrets live in the vault.
         env: { plain: {}, secretKeys: [] },
         remote: undefined
       });
