@@ -2257,7 +2257,8 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
   };
   const identity = new IdentityService({
     vault,
-    clientId: async () => (await readGithubClientId(githubClientId)).value
+    clientId: async () => (await readGithubClientId(githubClientId)).value,
+    patToken: () => vault.getRootValue('GITHUB_TOKEN')
   });
   registerIdentityIpc(ipcMain, identity);
   registerGithubClientIdIpc(ipcMain, githubClientId);

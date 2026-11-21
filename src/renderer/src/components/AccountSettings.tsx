@@ -9,7 +9,10 @@ interface ActiveRun extends SignInRun {
   wake: () => void;
 }
 
-export function AccountSettings({ onStatus }: { onStatus?: (s: AccountStatus) => void } = {}) {
+export function AccountSettings({
+  onStatus,
+  onManageVault
+}: { onStatus?: (s: AccountStatus) => void; onManageVault?: (key: string) => void } = {}) {
   const [status, setStatus] = useState<AccountStatus | null>(null);
   useEffect(() => {
     if (status) onStatus?.(status);
@@ -257,10 +260,19 @@ export function AccountSettings({ onStatus }: { onStatus?: (s: AccountStatus) =>
               <div className="account-name">{who.displayName}</div>
               <div className="account-login">@{who.login}</div>
             </div>
-            <button type="button" className="btn" onClick={() => void signOut()} disabled={controls.signOutDisabled}>
-              Sign out
-            </button>
+            {status.source === 'pat' ? (
+              <button type="button" className="btn" onClick={() => onManageVault?.('GITHUB_TOKEN')} disabled={!onManageVault}>
+                Manage in Vault
+              </button>
+            ) : (
+              <button type="button" className="btn" onClick={() => void signOut()} disabled={controls.signOutDisabled}>
+                Sign out
+              </button>
+            )}
           </div>
+        )}
+        {status.signedIn && status.source === 'pat' && (
+          <p className="setting-desc">Signed in with a personal access token (Vault).</p>
         )}
         {status.signedIn && who && who.teams.length > 0 && <p className="setting-desc">Teams: {who.teams.join(', ')}</p>}
 
@@ -274,6 +286,11 @@ export function AccountSettings({ onStatus }: { onStatus?: (s: AccountStatus) =>
               read:packages (private ghcr.io loadouts).
             </p>
           </>
+        )}
+        {!status.signedIn && !flow && onManageVault && (
+          <button type="button" className="btn" onClick={() => onManageVault('GITHUB_TOKEN')}>
+            Use a personal access token instead
+          </button>
         )}
 
         {flow && (
@@ -315,7 +332,7 @@ export function AccountSettings({ onStatus }: { onStatus?: (s: AccountStatus) =>
           <p className="setting-desc">Secret storage isn't available on this system, so your sign-in lasts until the app quits.</p>
         )}
         {status.notice && <p className="setting-desc account-notice">{status.notice}</p>}
-        {status.signedIn && (
+        {status.signedIn && status.source !== 'pat' && (
           <p className="setting-desc">
             Sign out removes the token from this computer. To revoke it on GitHub too, use GitHub Settings → Applications
             → Authorized OAuth Apps.
