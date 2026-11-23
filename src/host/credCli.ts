@@ -1,6 +1,9 @@
 // fleet-host-cred: the session side of the App credential helper (git's
 // credential protocol and the gh shim) plus `serve` for a standalone server.
+import { spawn } from 'node:child_process';
+import { accessSync, constants as fsc, realpathSync, statSync } from 'node:fs';
 import { request } from 'node:http';
+import { constants as osc } from 'node:os';
 import { DEFAULT_CRED_SOCKET } from './credServer.js';
 import { parseHostPort, type HostPort } from './endpoint.js';
 
@@ -116,6 +119,51 @@ export function requestToken(endpoint: CredEndpoint, body: unknown): Promise<str
   });
 }
 
+export const GH_SHIM = '/usr/local/lib/fleet-host/bin/gh';
+
+function executableRealpath(p: string): string | null {
+  try {
+    if (!statSync(p).isFile()) return null;
+    accessSync(p, fsc.X_OK);
+    return realpathSync(p);
+  } catch {
+    return null;
+  }
+}
+
+/** FLEET_GH_REAL, else the first `gh` on PATH that isn't the shim. */
+export function findRealGh(env: NodeJS.ProcessEnv, shim = GH_SHIM): string | null {
+  if (env.FLEET_GH_REAL) return executableRealpath(env.FLEET_GH_REAL) ? env.FLEET_GH_REAL : null;
+  const self = executableRealpath(shim);
+  for (const dir of (env.PATH ?? '').split(':')) {
+    if (!dir.startsWith('/')) continue;
+    const p = `${dir}/gh`;
+    const real = executableRealpath(p);
+    if (real && real !== self) return p;
+  }
+  return null;
+}
+
+const FORWARDED = ['SIGINT', 'SIGTERM', 'SIGHUP', 'SIGQUIT'] as const;
+
+/** Runs `file` on this process's stdio, forwarding signals; resolves its exit code (128+n if signalled). */
+export function execInherit(file: string, args: string[], env: NodeJS.ProcessEnv): Promise<number> {
+  return new Promise((resolve) => {
+    const child = spawn(file, args, { env, stdio: 'inherit' });
+    const fwd = (s: NodeJS.Signals) => child.kill(s);
+    for (const s of FORWARDED) process.on(s, fwd);
+    const done = (code: number) => {
+      for (const s of FORWARDED) process.off(s, fwd);
+      resolve(code);
+    };
+    child.on('error', (e) => {
+      process.stderr.write(`fleet-host-cred: ${file}: ${e.message}\n`);
+      done(127);
+    });
+    child.on('exit', (code, signal) => done(signal ? 128 + (osc.signals[signal] ?? 0) : (code ?? 1)));
+  });
+}
+
 export interface CredIo {
   env: NodeJS.ProcessEnv;
   stdin(): Promise<string>;
@@ -125,28 +173,27 @@ export interface CredIo {
   stdoutIsTty: boolean;
   /** The cwd repo's `remote.<name>.url` entries. */
   cwdRemotes(): GitRemote[];
+  /** Runs the real gh; its env is the only place a minted token goes. */
+  exec(file: string, args: string[], env: NodeJS.ProcessEnv): Promise<number>;
 }
 
-const USAGE = 'usage: fleet-host-cred git-credential <get|store|erase> | gh-token -- <gh args> (prints a token for the gh shim) | serve';
+const USAGE = 'usage: fleet-host-cred git-credential <get|store|erase> | gh -- <gh args> (runs gh with a scoped token) | serve';
 
 export async function runCredCli(argv: string[], io: CredIo): Promise<number> {
   const addrText = io.env.FLEET_HOST_CRED_ADDR;
   const addr = addrText ? parseHostPort(addrText) : null;
-  if (addrText && !addr) {
+  const badAddr = !!addrText && !addr;
+  if (badAddr) {
     io.err(`fleet-host-cred: FLEET_HOST_CRED_ADDR ${addrText} is not host:port\n`);
-    return 1;
+    if (argv[0] !== 'gh') return 1;
   }
   const sock: CredEndpoint = addr ?? (io.env.FLEET_HOST_CRED_SOCKET || DEFAULT_CRED_SOCKET);
   // The helper is off by default, so a missing or unbound socket is not worth a line in every git call.
   const say = (e: unknown) => {
     const code = (e as NodeJS.ErrnoException).code;
     if (code === 'ENOENT' || code === 'ECONNREFUSED') return;
-    io.err(`fleet-host-cred: ${(e as Error).message}\n`);
+    io.err(`fleet-host-cred: ${(e as Error).message.split('\n')[0].slice(0, 180)}\n`);
   };
-  if (argv[0] === 'gh-token' && io.stdoutIsTty) {
-    io.err('fleet-host-cred: gh-token prints a token for the gh shim and is not meant for terminals; run gh instead\n');
-    return 2;
-  }
   if (argv[0] === 'git-credential' && argv[1] === 'get' && io.stdoutIsTty) {
     io.err('fleet-host-cred: refusing to print a token to a terminal\n');
     return 1;
@@ -165,15 +212,24 @@ export async function runCredCli(argv: string[], io: CredIo): Promise<number> {
       }
       return 0;
     }
-    case 'gh-token': {
-      const r = repoFromGhArgs(argv.slice(argv[1] === '--' ? 2 : 1), io.env, io.cwdRemotes);
-      if (!r) return 0;
-      try {
-        io.out(`${await requestToken(sock, { owner: r.owner, repositories: [r.repo] })}\n`);
-      } catch (e) {
-        say(e);
+    case 'gh': {
+      const args = argv.slice(argv[1] === '--' ? 2 : 1);
+      const real = findRealGh(io.env);
+      if (!real) {
+        io.err('fleet-host-cred: gh is not installed in this image\n');
+        return 127;
       }
-      return 0;
+      const env = { ...io.env };
+      // An explicit GH_TOKEN wins; no resolvable repo runs gh without one.
+      const r = env.GH_TOKEN || badAddr ? null : repoFromGhArgs(args, io.env, io.cwdRemotes);
+      if (r) {
+        try {
+          env.GH_TOKEN = await requestToken(sock, { owner: r.owner, repositories: [r.repo] });
+        } catch (e) {
+          say(e);
+        }
+      }
+      return io.exec(real, args, env);
     }
     default:
       io.err(`${USAGE}\n`);

@@ -1,7 +1,7 @@
 // Bundle entry for fleet-host-cred.mjs. git runs it per credential lookup, so
 // `serve`'s dependencies (config, and through it the store's AWS SDK) load lazily.
 import { execFileSync } from 'node:child_process';
-import { runCredCli } from './credCli.js';
+import { execInherit, runCredCli } from './credCli.js';
 import { createLogger, redactSecrets } from './log.js';
 
 async function main(argv: string[]): Promise<number> {
@@ -21,6 +21,7 @@ async function main(argv: string[]): Promise<number> {
     out: (s) => process.stdout.write(s),
     err: (s) => process.stderr.write(s),
     stdoutIsTty: process.stdout.isTTY === true,
+    exec: execInherit,
     cwdRemotes: () => {
       let text: string;
       try {
