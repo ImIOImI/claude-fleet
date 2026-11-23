@@ -196,6 +196,81 @@ describe('syncLoadouts', () => {
     expect(gh.requests).toEqual([]);
   });
 
+  it('retries a standby credential server (503) with backoff, then installs', async () => {
+    tag('demo', '1.0.0', 1);
+    let asked = 0;
+    const slept: number[] = [];
+    const s = await syncLoadouts(opts('demo@1.0.0', {
+      token: async () => {
+        if (++asked <= 4) throw Object.assign(new Error('503: no token'), { status: 503 });
+        return gh.token;
+      },
+      sleep: async (ms) => void slept.push(ms)
+    }));
+    expect(s.installed).toEqual(['demo@1.0.0']);
+    expect(failures()).toEqual([]);
+    expect(slept).toEqual([1_000, 2_000, 4_000, 5_000]);
+    const retries = lines.filter((l) => l.msg === 'loadout sync token retry');
+    expect(retries).toHaveLength(4);
+    expect(retries[0]).toMatchObject({ level: 'info', attempt: 1, delayMs: 1_000, error: '503: no token' });
+  });
+
+  it('retries a refused or reset connection to the credential server', async () => {
+    tag('demo', '1.0.0', 1);
+    const errs = ['ECONNREFUSED', 'ECONNRESET'].map((code) => Object.assign(new Error(`credential helper unavailable (${code})`), { code }));
+    const s = await syncLoadouts(opts('demo@1.0.0', {
+      token: async () => {
+        const e = errs.shift();
+        if (e) throw e;
+        return gh.token;
+      },
+      sleep: async () => undefined
+    }));
+    expect(s.installed).toEqual(['demo@1.0.0']);
+    expect(lines.filter((l) => l.msg === 'loadout sync token retry')).toHaveLength(2);
+  });
+
+  it('does not retry a 4xx from the credential server', async () => {
+    tag('demo', '1.0.0', 1);
+    let asked = 0;
+    const s = await syncLoadouts(opts('demo@1.0.0', {
+      token: () => (asked++, Promise.reject(Object.assign(new Error('403: not in github.repositories: x'), { status: 403 }))),
+      sleep: async () => undefined
+    }));
+    expect(asked).toBe(1);
+    expect(s.failed).toEqual(['demo@1.0.0']);
+    expect(failures()).toEqual([expect.objectContaining({ stage: 'token', error: '403: not in github.repositories: x' })]);
+  });
+
+  it('stops retrying when the next wait would pass the budget', async () => {
+    tag('demo', '1.0.0', 1);
+    const slept: number[] = [];
+    let asked = 0;
+    const s = await syncLoadouts(opts('demo@1.0.0', {
+      budgetMs: 3_500,
+      token: () => (asked++, Promise.reject(Object.assign(new Error('503: no token'), { status: 503 }))),
+      sleep: async (ms) => void slept.push(ms)
+    }));
+    expect(slept).toEqual([1_000, 2_000]);
+    expect(asked).toBe(3);
+    expect(s.failed).toEqual(['demo@1.0.0']);
+    expect(failures()).toEqual([expect.objectContaining({ stage: 'token', error: '503: no token' })]);
+  });
+
+  it('waits for real between attempts by default', async () => {
+    tag('demo', '1.0.0', 1);
+    let asked = 0;
+    const t0 = Date.now();
+    const s = await syncLoadouts(opts('demo@1.0.0', {
+      token: async () => {
+        if (++asked === 1) throw Object.assign(new Error('503: no token'), { status: 503 });
+        return gh.token;
+      }
+    }));
+    expect(Date.now() - t0).toBeGreaterThanOrEqual(950);
+    expect(s.installed).toEqual(['demo@1.0.0']);
+  });
+
   it('refuses a malformed token without sending it', async () => {
     tag('demo', '1.0.0', 1);
     await syncLoadouts(opts('demo@1.0.0', { token: async () => 'has space' }));

@@ -2,6 +2,7 @@
 import { mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { setTimeout as delay } from 'node:timers/promises';
 import {
   applyLoadoutFiles,
   applyLoadoutMerges,
@@ -35,6 +36,8 @@ export interface SyncOptions {
   runScript(command: string, cwd: string, timeoutMs: number): Promise<ScriptRun>;
   budgetMs: number;
   stagingRoot?: string;
+  /** Rejects when `signal` aborts. */
+  sleep?(ms: number, signal: AbortSignal): Promise<void>;
 }
 
 export interface SyncSummary {
@@ -252,6 +255,29 @@ function untilAborted<T>(p: Promise<T>, signal: AbortSignal): Promise<T> {
   });
 }
 
+const RETRY_BASE_MS = 1_000;
+const RETRY_MAX_MS = 5_000;
+
+/** A standby or restarting credential server; a 4xx is final. */
+function retryableCredError(e: unknown): boolean {
+  const { status, code } = (e ?? {}) as { status?: unknown; code?: unknown };
+  return status === 503 || code === 'ECONNREFUSED' || code === 'ECONNRESET';
+}
+
+async function tokenWithRetry(o: SyncOptions, repo: RepoRef, signal: AbortSignal, deadline: number): Promise<string> {
+  const sleep = o.sleep ?? ((ms: number, s: AbortSignal) => delay(ms, undefined, { signal: s }));
+  for (let attempt = 1; ; attempt++) {
+    try {
+      return await untilAborted(o.token(repo.owner, repo.repo), signal);
+    } catch (e) {
+      const wait = Math.min(RETRY_BASE_MS * 2 ** (attempt - 1), RETRY_MAX_MS);
+      if (signal.aborted || !retryableCredError(e) || wait >= deadline - Date.now()) throw e;
+      o.log.log('info', 'loadout sync token retry', { attempt, delayMs: wait, error: errText(e) });
+      await sleep(wait, signal);
+    }
+  }
+}
+
 export async function syncLoadouts(o: SyncOptions): Promise<SyncSummary> {
   const started = Date.now();
   const deadline = started + o.budgetMs;
@@ -313,7 +339,7 @@ export async function syncLoadouts(o: SyncOptions): Promise<SyncSummary> {
   let src: GithubSource;
   let branch: string;
   try {
-    const token = await untilAborted(o.token(repo.owner, repo.repo), signal);
+    const token = await tokenWithRetry(o, repo, signal, deadline);
     if (!isTokenShaped(token)) throw new Error('the credential server returned a malformed token');
     src = { api, owner: repo.owner, repo: repo.repo, token };
     branch = await defaultBranch(src, signal);

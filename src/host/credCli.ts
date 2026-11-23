@@ -107,7 +107,7 @@ export function requestToken(endpoint: CredEndpoint, body: unknown): Promise<str
           /* status says it */
         }
         if (res.statusCode === 200 && typeof j.token === 'string') resolve(j.token);
-        else reject(new Error(`${res.statusCode}: ${typeof j.error === 'string' ? j.error : 'no token'}`));
+        else reject(Object.assign(new Error(`${res.statusCode}: ${typeof j.error === 'string' ? j.error : 'no token'}`), { status: res.statusCode }));
       });
     });
     req.on('timeout', () => req.destroy(new Error('timed out')));
