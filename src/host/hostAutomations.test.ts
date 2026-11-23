@@ -141,6 +141,16 @@ describe('startHostAutomations', () => {
     expect(logs.join('\n')).toMatch(/mode: live is not available on a remote host/);
   });
 
+  it('logs which automation was skipped and which allowedTools entry failed', async () => {
+    const { logs } = await start();
+    const bot = { definition: { name: 'bot', triggers: [{ manual: {} }], steps: [{ id: 'go', prompt: { workspace: '$self', mode: 'fresh', message: 'x', allowedTools: ['Read', 'Read(/home/sumer-fleet-agent[bot]/**)'] } }] }, enabled: true };
+    await h!.reconcile([fresh('a'), bot]);
+    expect(await names()).toEqual([['a', true, 1]]);
+    const line = JSON.parse(logs.find((l) => l.includes('host-config automation skipped'))!) as { name: string; errors: string[] };
+    expect(line.name).toBe('bot');
+    expect(line.errors.join('\n')).toContain('steps[0].prompt.allowedTools[1]: "Read(/home/sumer-fleet-agent[bot]/**)"');
+  });
+
   it('adopts a same-name row with no origin, and disables every enabled row it does not own', async () => {
     const { store, logs } = await start();
     const s = new AutomationStore(store.kysely);
