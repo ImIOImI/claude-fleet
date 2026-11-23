@@ -188,9 +188,9 @@ describe('runCredCli', () => {
     const posts = () => gh!.requests.filter((r) => r.method === 'POST').length;
     const before = posts();
     const t = io(sock, '', true);
-    expect(await runCredCli(['gh-token', '--', 'pr', 'view', '-R', 'acme/b'], t.o)).toBe(1);
+    expect(await runCredCli(['gh-token', '--', 'pr', 'view', '-R', 'acme/b'], t.o)).toBe(2);
     expect(t.out).toEqual([]);
-    expect(t.err.join('')).toMatch(/terminal/);
+    expect(t.err.join('')).toMatch(/prints a token for the gh shim.*not .*terminal/);
     const g = io(sock, 'protocol=https\nhost=github.com\npath=acme/a\n', true);
     expect(await runCredCli(['git-credential', 'get'], g.o)).toBe(1);
     expect(g.out).toEqual([]);
@@ -198,6 +198,7 @@ describe('runCredCli', () => {
     expect(await runCredCli(['token', '--repo', 'acme/a'], tok.o)).toBe(2);
     expect(tok.out).toEqual([]);
     expect(tok.err.join('')).not.toMatch(/token --repo/);
+    expect(tok.err.join('')).toMatch(/gh-token -- <gh args> \(prints a token for the gh shim\)/);
     expect(posts()).toBe(before);
   });
 
