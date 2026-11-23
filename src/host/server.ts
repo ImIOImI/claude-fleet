@@ -9,7 +9,7 @@ import { MAX_FRAME_PAYLOAD } from '../main/broker.js';
 import { VERIFY_TTL_MS } from '../main/identity/verifyCache.js';
 import { PUBLISH_MAX_BODY } from '../main/publish/protocol.js';
 import { ownerKey, type AttachHub, type Principal } from './attachHub.js';
-import { authenticate, bearerToken, type AuthContext, type AuthResult } from './auth.js';
+import { AUTH_MISSING, authenticate, authReason, bearerToken, type AuthContext, type AuthResult } from './auth.js';
 import type { HostWorkspaceInfo } from './config.js';
 import type { EventHub } from './events.js';
 import type { LeaseState } from './lease.js';
@@ -163,7 +163,8 @@ type GateResult = AuthResult | { ok: false; status: 429 | 503; error: string; re
 
 function failureHeaders(r: GateResult): OutgoingHttpHeaders {
   if (r.ok) return {};
-  if (r.status === 401) return { 'WWW-Authenticate': 'Bearer' };
+  // RFC 6750: no error code when no credentials came; invalid_token when GitHub refused them.
+  if (r.status === 401) return { 'WWW-Authenticate': r.error === AUTH_MISSING ? 'Bearer' : 'Bearer error="invalid_token"' };
   if ('retryAfterSec' in r && r.retryAfterSec !== undefined) return { 'Retry-After': String(r.retryAfterSec) };
   return {};
 }
@@ -223,7 +224,7 @@ export function createHostServer(deps: HostServerDeps): HostServer {
     if (deps.lease() !== 'holder') return { ok: false, status: 503, error: 'standby' };
     const header = req.headers.authorization;
     const token = bearerToken(header);
-    if (!token) return { ok: false, status: 401, error: 'missing or malformed bearer token' };
+    if (!token) return { ok: false, status: 401, error: AUTH_MISSING };
     if (ctx.peek(token) !== 'miss') return authenticate(header, ctx, deps.log);
     const key = tokenKey(token);
     const trusted = isKnownGood(key);
@@ -294,8 +295,10 @@ export function createHostServer(deps: HostServerDeps): HostServer {
   }, deps.pingMs ?? PING_MS);
   pinger.unref();
 
-  /** Returns the caller's login once authenticated, for the request log. */
-  async function handle(req: IncomingMessage, res: ServerResponse, path: string): Promise<string | null> {
+  const ANON = { login: null };
+
+  /** The caller's login once authenticated, else the refusal's class; for the request log. */
+  async function handle(req: IncomingMessage, res: ServerResponse, path: string): Promise<{ login: string | null; reason?: string }> {
     if (path === '/healthz' || path === '/leader') {
       if (req.method !== 'GET') sendJson(res, 405, { error: 'method not allowed' });
       else if (path === '/healthz') {
@@ -304,23 +307,23 @@ export function createHostServer(deps: HostServerDeps): HostServer {
         sendJson(res, status === 'ok' ? 200 : 503, { status, lease: deps.lease(), db: deps.db?.() ?? 'none', ...(mesh ? { mesh } : {}) });
       }
       else sendJson(res, deps.lease() === 'holder' ? 200 : 503, { lease: deps.lease() });
-      return null;
+      return ANON;
     }
     const isRpc = path.startsWith('/rpc/');
     const isPublish = !!deps.publish && (path === '/publish' || path.startsWith('/publish/'));
     if (path !== '/whoami' && !isRpc && !isPublish && path !== '/attach' && path !== '/events') {
       sendJson(res, 404, { error: 'not found' });
-      return null;
+      return ANON;
     }
     const method = isRpc || path === '/publish' ? 'POST' : isPublish ? 'DELETE' : 'GET';
     if (req.method !== method) {
       sendJson(res, 405, { error: 'method not allowed' });
-      return null;
+      return ANON;
     }
     const auth = await gate(req, deps.auth());
     if (!auth.ok) {
       sendJson(res, auth.status, { error: auth.error }, failureHeaders(auth));
-      return null;
+      return { login: null, reason: authReason(auth.error) };
     }
     const login = auth.identity.login;
     if (path === '/attach' || path === '/events') {
@@ -340,7 +343,7 @@ export function createHostServer(deps: HostServerDeps): HostServer {
       const n = rpcByIdentity.get(key) ?? 0;
       if (n >= (deps.maxRpcPerIdentity ?? MAX_RPC_PER_IDENTITY)) {
         sendJson(res, 429, { ok: false, error: 'too many concurrent requests' }, { 'Retry-After': '1' });
-        return login;
+        return { login };
       }
       rpcByIdentity.set(key, n + 1);
       try {
@@ -351,7 +354,7 @@ export function createHostServer(deps: HostServerDeps): HostServer {
         else rpcByIdentity.delete(key);
       }
     }
-    return login;
+    return { login };
   }
 
   async function handleRpc(req: IncomingMessage, res: ServerResponse, path: string, caller: Principal): Promise<void> {
@@ -433,9 +436,9 @@ export function createHostServer(deps: HostServerDeps): HostServer {
       return sendJson(res, 400, { error: 'bad request target' });
     }
     handle(req, res, path)
-      .then((login) => {
+      .then(({ login, reason }) => {
         if (path !== '/healthz') {
-          deps.log.log('info', 'request', { method: req.method, path, status: res.statusCode, login, ms: Date.now() - started });
+          deps.log.log('info', 'request', { method: req.method, path, status: res.statusCode, login, reason: reason ?? null, ms: Date.now() - started });
         }
       })
       .catch((err: Error) => {
@@ -537,7 +540,12 @@ export function createHostServer(deps: HostServerDeps): HostServer {
     if (path !== '/attach' && path !== '/events') return rejectUpgrade(socket, 404, 'not found');
     void gate(req, deps.auth())
       .then((auth) => {
-        deps.log.log('info', 'upgrade', { path, status: auth.ok ? 101 : auth.status, login: auth.ok ? auth.identity.login : null });
+        deps.log.log('info', 'upgrade', {
+          path,
+          status: auth.ok ? 101 : auth.status,
+          login: auth.ok ? auth.identity.login : null,
+          reason: auth.ok ? null : authReason(auth.error)
+        });
         // The client may have gone while GitHub answered; its 'close' has then already fired.
         if (socket.destroyed) return;
         if (!auth.ok) return rejectUpgrade(socket, auth.status, auth.error, failureHeaders(auth));

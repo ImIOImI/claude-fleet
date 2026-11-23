@@ -15,12 +15,18 @@ export { CONTROL_RE, oneLine, safeLogin } from './remoteUrl.js';
 
 export type RemoteErrorKind = 'not-signed-in' | 'unreachable' | 'unauthorized' | 'forbidden' | 'standby' | 'protocol' | 'disabled' | 'model';
 
+/** After recovery: GitHub refused the token (`expired`), or only the host did (`host-refused`). */
+export type RemoteAuthFailure = 'expired' | 'host-refused';
+export type RecoverVerdict = 'retry' | RemoteAuthFailure;
+
 export class RemoteError extends Error {
   constructor(
     readonly kind: RemoteErrorKind,
     message: string,
     readonly status?: number,
-    readonly retryAfterMs?: number
+    readonly retryAfterMs?: number,
+    /** `unauthorized` only, set after recovery. */
+    readonly auth?: RemoteAuthFailure
   ) {
     super(message);
     this.name = 'RemoteError';
@@ -43,12 +49,15 @@ export interface RemoteDisconnect {
   kind: RemoteErrorKind | 'dropped';
   code?: number;
   status?: number;
+  auth?: RemoteAuthFailure;
   retryInMs: number | null;
 }
 
 export interface RemoteClientOptions {
   url: string;
   token(): Promise<string | null>;
+  /** After a 401: the identity service's verdict on the token that was sent. `retry` retries once. */
+  recover?(sentToken: string): Promise<RecoverVerdict>;
   timeoutMs?: number;
   /** Close a socket the host has not pinged for this long. */
   idleTimeoutMs?: number;
@@ -150,8 +159,39 @@ async function readCapped(res: Response, cap: number, abort: () => void): Promis
   return Buffer.concat(chunks).toString('utf8');
 }
 
+/** Host 401 bodies (src/host/auth.ts). */
+const HOST_NO_TOKEN = 'missing or malformed bearer token';
+const HOST_REJECTED = /^token (recently )?rejected/;
+/** Enough of a refusal body to read its reason. */
+const MAX_REFUSAL_BODY = 4096;
+
+/** 401s whose host said it received no usable bearer. */
+const noTokenSent = new WeakSet<RemoteError>();
+
+function noTokenText(url: string): string {
+  return `${url} received no GitHub sign-in from this app; a proxy in front of the host may be dropping the Authorization header`;
+}
+
+function unauthorized(url: string, text: string): RemoteError {
+  if (text === HOST_NO_TOKEN) {
+    const e = new RemoteError('unauthorized', `${noTokenText(url)}, so signing in again won't help`, 401);
+    noTokenSent.add(e);
+    return e;
+  }
+  if (HOST_REJECTED.test(text)) return new RemoteError('unauthorized', 'GitHub rejected your sign-in (expired or revoked); sign in again (Settings → Account)', 401);
+  return new RemoteError('unauthorized', `${url} refused your GitHub sign-in (HTTP 401)`, 401);
+}
+
+function authFailure(url: string, why: RemoteAuthFailure, cause: unknown): RemoteError {
+  if (why === 'expired') return new RemoteError('unauthorized', 'Your GitHub sign-in expired or was revoked; sign in again', 401, undefined, 'expired');
+  const text = cause instanceof RemoteError && noTokenSent.has(cause) ? noTokenText(url) : `${url} didn't accept your GitHub sign-in, which GitHub still accepts`;
+  return new RemoteError('unauthorized', `${text}; retrying`, 401, undefined, 'host-refused');
+}
+
+const isUnauthorized = (e: unknown): boolean => e instanceof RemoteError && e.kind === 'unauthorized';
+
 function statusError(url: string, status: number, text: string, retryAfterMs?: number): RemoteError {
-  if (status === 401) return new RemoteError('unauthorized', 'GitHub sign-in was rejected by the host; sign in again', 401);
+  if (status === 401) return unauthorized(url, text);
   if (status === 403) return new RemoteError('forbidden', text || 'You have no grant on this host', 403);
   if (status === 503 && text === 'standby') return new RemoteError('standby', 'The host is starting up (standby); try again shortly', 503, retryAfterMs);
   if (status === 503 && text === SEARCH_UNAVAILABLE) return new RemoteError('disabled', `${url} has transcript search turned off`, 503);
@@ -183,6 +223,9 @@ export function reconnectDelay(attempt: number, why: { kind: RemoteDisconnect['k
 export class RemoteClient {
   readonly url: string;
   private readonly token: () => Promise<string | null>;
+  private readonly recover?: (sentToken: string) => Promise<RecoverVerdict>;
+  /** Live subscriptions' reconnect hooks, for resetAuth. */
+  private readonly subs = new Set<() => void>();
   private readonly timeoutMs: number;
   private readonly idleTimeoutMs: number;
   private readonly schedule: (fn: () => void, ms: number) => () => void;
@@ -190,6 +233,7 @@ export class RemoteClient {
   constructor(opts: RemoteClientOptions) {
     this.url = normalizeHostUrl(opts.url);
     this.token = opts.token;
+    this.recover = opts.recover;
     this.timeoutMs = opts.timeoutMs ?? REMOTE_TIMEOUT_MS;
     this.idleTimeoutMs = opts.idleTimeoutMs ?? REMOTE_IDLE_MS;
     this.schedule =
@@ -212,9 +256,33 @@ export class RemoteClient {
     return scrub(text, await this.token().catch(() => null));
   }
 
-  private async request(path: string, init: { method: string; body?: string; auth: boolean; timeoutMs?: number; maxBody: number }): Promise<unknown> {
+  /** Runs `once` with the current token; on a 401, asks `recover` and retries once. */
+  private async withRecovery<T>(once: (token: string) => Promise<T>): Promise<T> {
+    const token = await this.bearer();
+    try {
+      return await once(token);
+    } catch (err) {
+      if (!isUnauthorized(err) || !this.recover) throw err;
+      const why = await this.recover(token).catch((): RecoverVerdict => 'host-refused');
+      if (why !== 'retry') throw authFailure(this.url, why, err);
+      try {
+        return await once(await this.bearer());
+      } catch (again) {
+        throw isUnauthorized(again) ? authFailure(this.url, 'host-refused', again) : again;
+      }
+    }
+  }
+
+  private request(path: string, init: { method: string; body?: string; auth: boolean; timeoutMs?: number; maxBody: number }): Promise<unknown> {
+    return init.auth ? this.withRecovery((t) => this.requestWith(path, init, t)) : this.requestWith(path, init, null);
+  }
+
+  private async requestWith(
+    path: string,
+    init: { method: string; body?: string; timeoutMs?: number; maxBody: number },
+    token: string | null
+  ): Promise<unknown> {
     const headers: Record<string, string> = { Accept: 'application/json' };
-    const token = init.auth ? await this.bearer() : null;
     if (token) headers.Authorization = `Bearer ${token}`;
     if (init.body !== undefined) headers['Content-Type'] = 'application/json';
     const ctrl = new AbortController();
@@ -304,8 +372,11 @@ export class RemoteClient {
   }
 
   /** An authenticated WebSocket to `path`, resolved once open. */
-  async openSocket(path: '/attach' | '/events'): Promise<WebSocket> {
-    const token = await this.bearer();
+  openSocket(path: '/attach' | '/events'): Promise<WebSocket> {
+    return this.withRecovery((t) => this.openSocketWith(path, t));
+  }
+
+  private openSocketWith(path: '/attach' | '/events', token: string): Promise<WebSocket> {
     return new Promise((resolve, reject) => {
       let settled = false;
       const fail = (e: RemoteError): void => {
@@ -325,10 +396,41 @@ export class RemoteClient {
       ws.once('unexpected-response', (_req, res) => {
         const status = res.statusCode ?? 0;
         const retryAfterMs = parseRetryAfter(res.headers['retry-after']);
-        res.resume();
-        ws.terminate();
-        const e = statusError(this.url, status, '', retryAfterMs);
-        fail(status >= 300 && status < 400 ? new RemoteError('unreachable', `${this.url}${path} redirected; not following`, status) : e);
+        const done = (text: string): void => {
+          ws.terminate();
+          const e = statusError(this.url, status, text, retryAfterMs);
+          fail(status >= 300 && status < 400 ? new RemoteError('unreachable', `${this.url}${path} redirected; not following`, status) : e);
+        };
+        if (status !== 401) {
+          res.resume();
+          return done('');
+        }
+        // The 401 body says whether the host got a token at all.
+        const chunks: Buffer[] = [];
+        let n = 0;
+        let read = false;
+        const finish = (): void => {
+          if (read) return;
+          read = true;
+          clearTimeout(timer);
+          let text = '';
+          try {
+            const b = JSON.parse(Buffer.concat(chunks).toString('utf8')) as { error?: unknown } | null;
+            if (typeof b?.error === 'string') text = scrub(b.error, token);
+          } catch {
+            /* not JSON */
+          }
+          done(text);
+        };
+        const timer = setTimeout(finish, this.timeoutMs);
+        res.on('data', (c: Buffer) => {
+          n += c.length;
+          if (n > MAX_REFUSAL_BODY) return finish();
+          chunks.push(c);
+        });
+        res.once('end', finish);
+        res.once('error', finish);
+        res.once('close', finish);
       });
       ws.once('open', () => {
         settled = true;
@@ -351,12 +453,19 @@ export class RemoteClient {
     ws.once('close', () => clearTimeout(timer));
   }
 
+  /** Reconnect every /events subscription now, so it carries the current token. */
+  resetAuth(): void {
+    for (const reset of [...this.subs]) reset();
+  }
+
   /** Subscribe to /events, reconnecting with backoff. Returns unsubscribe. */
   subscribe(onEvent: (e: RemoteEvent) => void, onState?: (connected: boolean, why?: RemoteDisconnect) => void): () => void {
     let stopped = false;
     let attempt = 0;
     let ws: WebSocket | null = null;
     let cancel: (() => void) | null = null;
+    // Bumped per connect: a superseded attempt's socket or failure is dropped.
+    let gen = 0;
     const down = (why: Omit<RemoteDisconnect, 'retryInMs'>, retryAfterMs?: number): void => {
       if (stopped) return;
       const ms = reconnectDelay(attempt++, { kind: why.kind, retryAfterMs });
@@ -365,9 +474,10 @@ export class RemoteClient {
     };
     const connect = (): void => {
       cancel = null;
+      const my = ++gen;
       this.openSocket('/events').then(
         (sock) => {
-          if (stopped) return sock.close(1000);
+          if (stopped || my !== gen) return sock.close(1000);
           ws = sock;
           const openedAt = Date.now();
           onState?.(true);
@@ -380,20 +490,34 @@ export class RemoteClient {
             }
           });
           sock.once('close', (code) => {
+            if (ws !== sock) return;
             ws = null;
             if (Date.now() - openedAt >= STABLE_MS) attempt = 0;
             down({ kind: closeKind(code), code });
           });
         },
         (err: unknown) => {
+          if (stopped || my !== gen) return;
           const e = err instanceof RemoteError ? err : new RemoteError('unreachable', 'connect failed');
-          down({ kind: e.kind, status: e.status }, e.retryAfterMs);
+          down({ kind: e.kind, status: e.status, auth: e.auth }, e.retryAfterMs);
         }
       );
     };
+    const reset = (): void => {
+      if (stopped) return;
+      attempt = 0;
+      cancel?.();
+      cancel = null;
+      const old = ws;
+      ws = null;
+      old?.close(1000);
+      connect();
+    };
+    this.subs.add(reset);
     connect();
     return () => {
       stopped = true;
+      this.subs.delete(reset);
       cancel?.();
       ws?.close(1000);
     };

@@ -1084,3 +1084,45 @@ describe('POST /publish', () => {
     expect((await post(r, '{}', `${TOKEN}x`)).status).toBe(503);
   });
 });
+
+describe('401 reason on the request and upgrade log lines', () => {
+  const entries = (r: Rig, msg: string) => r.logs.map((l) => JSON.parse(l) as Record<string, unknown>).filter((e) => e.msg === msg);
+
+  it('names missing, rejected and recently rejected, with no token material', async () => {
+    const r = await start();
+    await fetch(`${r.url}/whoami`);
+    await fetch(`${r.url}/whoami`, { headers: bearer('ghu_dead1') });
+    await fetch(`${r.url}/whoami`, { headers: bearer('ghu_dead1') });
+    await openWs(r, '/events').catch(() => undefined);
+    await openWs(r, '/events', 'ghu_dead2').catch(() => undefined);
+    await openWs(r, '/events', 'ghu_dead2').catch(() => undefined);
+    expect(entries(r, 'request').map((e) => [e.status, e.reason])).toEqual([
+      [401, 'missing or malformed bearer token'],
+      [401, 'token rejected by GitHub'],
+      [401, 'token recently rejected']
+    ]);
+    expect(entries(r, 'upgrade').map((e) => [e.status, e.reason])).toEqual([
+      [401, 'missing or malformed bearer token'],
+      [401, 'token rejected by GitHub'],
+      [401, 'token recently rejected']
+    ]);
+    for (const l of r.logs) expect(l).not.toContain('ghu_dead');
+  });
+
+  it('answers a token GitHub refused with WWW-Authenticate error="invalid_token"', async () => {
+    const r = await start();
+    expect((await fetch(`${r.url}/whoami`)).headers.get('www-authenticate')).toBe('Bearer');
+    expect((await fetch(`${r.url}/whoami`, { headers: bearer('ghu_dead3') })).headers.get('www-authenticate')).toBe('Bearer error="invalid_token"');
+    expect((await fetch(`${r.url}/whoami`, { headers: bearer('ghu_dead3') })).headers.get('www-authenticate')).toBe('Bearer error="invalid_token"');
+  });
+
+  it('logs reason null on success, and a 403 without the login', async () => {
+    const r = await start();
+    await fetch(`${r.url}/whoami`, { headers: bearer(`${TOKEN}r`) });
+    await fetch(`${r.url}/whoami`, { headers: bearer(`${TOKEN}n`) });
+    expect(entries(r, 'request').map((e) => [e.status, e.reason])).toEqual([
+      [200, null],
+      [403, 'no grant']
+    ]);
+  });
+});

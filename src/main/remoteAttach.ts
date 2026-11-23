@@ -45,7 +45,7 @@ export async function fetchDrained(client: Pick<RemoteClient, 'rpc'>): Promise<D
 
 /** Fixed text per host close code; the host's reason string is untrusted. */
 function closeNotice(code: number): string | null {
-  if (code === 4401) return 'The host signed you out: sign in with GitHub again (Settings → Account), then reopen this tab.';
+  if (code === 4401) return 'The host stopped accepting the GitHub sign-in this tab opened with (expired or revoked). Reopen this tab; if that fails, sign in again (Settings → Account).';
   if (code === 4403) return 'Your access to this host was removed.';
   if (code === 1013) return 'Disconnected: this tab fell too far behind the host. Reopen it.';
   if (code === 1008) return 'Disconnected by the host (a limit was reached). Reopen this tab.';

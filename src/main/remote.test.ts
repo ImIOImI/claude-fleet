@@ -142,6 +142,18 @@ describe('remote backend', () => {
     expect(r.whoamiCalls()).toBe(3);
   });
 
+  it('a token change (same login) re-asks /whoami, re-probes and resets every client', async () => {
+    const r = await rig('read');
+    await r.backend.refresh(ID);
+    expect(r.whoamiCalls()).toBe(1);
+    const reset = vi.spyOn(RemoteClient.prototype, 'resetAuth');
+    r.backend.reconnect();
+    await r.backend.refresh();
+    expect(r.whoamiCalls()).toBe(2);
+    expect(reset).toHaveBeenCalled();
+    expect(reset.mock.contexts).toContain(r.backend.clientFor(r.url));
+  });
+
   it.each([
     [60_000, 60_000],
     [1_000, HEALTH_POLL_MS]

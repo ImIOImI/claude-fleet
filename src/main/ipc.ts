@@ -96,6 +96,7 @@ import { BUILTIN_GITHUB_CLIENT_ID, GITHUB_CLIENT_ID_ENV } from './identity/clien
 import { readGithubClientId, registerGithubClientIdIpc, type GithubClientIdDeps } from './githubClientIdIpc.js';
 import { registerIdentityIpc } from './identityIpc.js';
 import { createRemoteBackend } from './remote.js';
+import type { RecoverVerdict } from './remoteClient.js';
 import { createFederatedReader, type FederatedReader } from './federation/federatedReader.js';
 import { createSummaryRelay } from './federation/summaryRelay.js';
 import { createDrainRelay } from './remoteDrain.js';
@@ -394,9 +395,11 @@ const dockerBackend: Backend = MOCK_MODE ? mockDocker : realDocker;
 const localBackend: Backend = MOCK_MODE ? mockDocker : realLocal;
 // Bound to the signed-in GitHub token once registerIpc builds the identity service.
 let remoteToken: () => Promise<string | null> = async () => null;
+let remoteRecover: (sentToken: string) => Promise<RecoverVerdict> = async () => 'host-refused';
 let remoteLogin: () => Promise<string | null> = async () => null;
 const remoteBackend = createRemoteBackend({
   token: () => remoteToken(),
+  recover: (t) => remoteRecover(t),
   login: () => remoteLogin(),
   listManifests: () => listWorkspaceManifests(),
   writeManifest: (spec) => writeWorkspaceManifest(spec),
@@ -2236,7 +2239,16 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
   registerIdentityIpc(ipcMain, identity);
   registerGithubClientIdIpc(ipcMain, githubClientId);
   remoteToken = () => identity.bearerToken();
+  remoteRecover = (t) => identity.recover(t);
   remoteLogin = () => identity.currentLogin();
+  void identity.startRefresh();
+  identity.onChange(({ cause, signedIn }) => {
+    if (cause === 'sign-in' || cause === 'token-refreshed') remoteBackend.reconnect();
+    for (const w of BrowserWindow.getAllWindows()) {
+      if (w.isDestroyed() || w.webContents.isDestroyed()) continue;
+      try { w.webContents.send('identity:changed', { cause, signedIn }); } catch { /* mid-teardown */ }
+    }
+  });
   registerRemoteIpc(ipcMain, {
     backend: remoteBackend,
     accountStatus: () => identity.status(),

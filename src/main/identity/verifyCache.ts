@@ -1,6 +1,7 @@
 // Per-token verify cache (remote-workspaces §5): fleet-host verifies every
 // request, so successes are cached for 5 minutes — revoking a token or removing
-// someone from a team takes effect within that window. Keys are SHA-256 of the
+// someone from a team takes effect within that window — and never past the
+// token's own expiry when GitHub reports one. Keys are SHA-256 of the
 // token (the raw token is never a map key). Failures are not cached; concurrent
 // verifications of one token share one upstream call.
 
@@ -50,11 +51,13 @@ export function withVerifyCache(
         .verify(token)
         .then((verified) => {
           const identity = frozenCopy(verified);
+          const expiresAt = Math.min(now() + ttl, verified.tokenExpiresAt ?? Infinity);
+          if (expiresAt <= now()) return identity;
           if (hits.size >= max) {
             const oldest = hits.keys().next().value;
             if (oldest !== undefined) hits.delete(oldest);
           }
-          hits.set(key, { identity, expiresAt: now() + ttl });
+          hits.set(key, { identity, expiresAt });
           return identity;
         })
         .finally(() => inflight.delete(key));

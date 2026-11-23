@@ -11,7 +11,7 @@ export type {
   Automation, AutomationDef, ParamDef, ParamType, ParamValue, RunRow, RunStatus, StepRunRow, TriggerDef, StepDef,
   Proposal, ProposalItem, ProposalKind, ProposalStatus, ItemDecision, LoadoutAutomationPreview, ScriptStepDef, PromptStepDef, HostShell, ScriptShell
 } from './inboxTypes';
-import type { AccountStatus, SignInStart, SignInPoll } from './identityTypes';
+import type { AccountStatus, IdentityChange, SignInStart, SignInPoll } from './identityTypes';
 import type { GithubClientIdSetting } from './githubClientId';
 export type { GithubClientIdSetting, GithubClientIdSource } from './githubClientId';
 export type { AccountStatus, AccountIdentity, AccountSso, SignInStart, SignInPoll } from './identityTypes';
@@ -770,7 +770,13 @@ const api = {
     signInPoll: (): Promise<SignInPoll> => ipcRenderer.invoke('identity:signInPoll'),
     signInCancel: (): Promise<void> => ipcRenderer.invoke('identity:signInCancel'),
     /** Delete the token from this computer's vault. */
-    signOut: (): Promise<void> => ipcRenderer.invoke('identity:signOut')
+    signOut: (): Promise<void> => ipcRenderer.invoke('identity:signOut'),
+    /** The stored GitHub token changed. Never carries the token. */
+    onChanged: (cb: (c: IdentityChange) => void): (() => void) => {
+      const h = (_e: unknown, c: IdentityChange): void => cb(c);
+      ipcRenderer.on('identity:changed', h);
+      return () => ipcRenderer.removeListener('identity:changed', h);
+    }
   },
   store: {
     getSettings: (): Promise<StoreSettings> => ipcRenderer.invoke('store:getSettings'),

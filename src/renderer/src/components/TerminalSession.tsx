@@ -180,6 +180,8 @@ export function TerminalSession({
   const restartingRef = useRef(restarting);
   restartingRef.current = restarting;
   const endedInDrainRef = useRef(false);
+  // The last attach failed (never reached a session), so retrying it is safe.
+  const attachFailedRef = useRef(false);
   const visibleRef = useRef(visible);
   visibleRef.current = visible;
   // Bumped when the user clicks "Start new session" / "Retry" after a
@@ -213,6 +215,7 @@ export function TerminalSession({
     if (!hostRef.current) return;
     const host = hostRef.current;
     setEndedReason(null);
+    attachFailedRef.current = false;
     onLifecycleChange?.(sessionId, 'live');
 
     // Declared up front so the safeFit helper can read it. The cleanup
@@ -701,6 +704,7 @@ export function TerminalSession({
         const msg = err instanceof Error ? err.message : String(err);
         if (!disposed) {
           setEndedReason({ kind: 'attach-error', message: msg });
+          attachFailedRef.current = true;
           // Mirror to error.log so post-mortem debugging has a record
           // even though this isn't an uncaught exception (the catch
           // here is clean — but the user still loses their terminal).
@@ -843,6 +847,14 @@ export function TerminalSession({
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [reloadToken, sessionId, workspaceId, onRefreshUnresolved]);
+
+  // A remote tab that failed to attach (signed out, token refused) retries once the sign-in changes.
+  useEffect(() => {
+    if (!remote) return;
+    return window.api.identity.onChanged?.(({ signedIn }) => {
+      if (signedIn && attachFailedRef.current) setSessionEpoch((e) => e + 1);
+    });
+  }, [remote]);
 
   useEffect(() => {
     if (!resumesAfterDrain(resumeToken, endedInDrainRef.current)) return;

@@ -3,17 +3,25 @@
 // ipc.ts injects the real vault + client-id resolver; tests inject fakes.
 
 import { GITHUB_IDENTITY_SCOPE } from '../vaultScopes.js';
-import { DeviceFlowError, SLOW_DOWN_STEP_MS, pollDeviceToken, requestDeviceCode, type DeviceCode, type PollResult } from './deviceFlow.js';
+import { DeviceFlowError, SLOW_DOWN_STEP_MS, pollDeviceToken, refreshDeviceToken, requestDeviceCode, type DeviceCode, type PollResult, type TokenGrant } from './deviceFlow.js';
 import { createGithubProvider, type GithubProbe } from './githubProvider.js';
 import { hasPackagesRead, type SsoHint } from './githubHeaders.js';
 import { IdentityError, displayName, type UserIdentity } from './types.js';
 import { CLIENT_ID_MISSING } from './clientId.js';
-import type { AccountSso, AccountStatus, SignInPoll, SignInStart } from '../../preload/identityTypes.js';
+import type { AccountSso, AccountStatus, IdentityChange, SignInPoll, SignInStart } from '../../preload/identityTypes.js';
 
 export const TOKEN_KEY = 'TOKEN';
 export const PROFILE_KEY = 'PROFILE';
+/** Refresh token and expiries of an expiring (GitHub App user) token; '' for a token that never expires. */
+export const REFRESH_KEY = 'REFRESH';
+/** Refresh this long before the access token expires. */
+export const REFRESH_LEAD_MS = 10 * 60_000;
+/** After a failed refresh, wait this long before trying again. */
+export const REFRESH_RETRY_MS = 60_000;
+const MAX_TIMER_MS = 2 ** 31 - 1;
 
 const REVOKED_NOTICE = 'GitHub no longer accepts the saved sign-in (revoked or expired). Sign in again.';
+const EXPIRED_NOTICE = 'Your GitHub sign-in expired and could not be renewed. Sign in again.';
 const NO_FLOW = 'No sign-in in progress.';
 const CANCELLED = 'Sign-in was cancelled.';
 /** The renderer re-asks at least this often; main still gates real polls. */
@@ -30,6 +38,8 @@ export interface GithubSignInApi {
   requestDeviceCode(clientId: string): Promise<DeviceCode>;
   pollDeviceToken(clientId: string, deviceCode: string, intervalMs: number): Promise<PollResult>;
   probe(token: string): Promise<GithubProbe>;
+  /** Absent: tokens are never refreshed. */
+  refresh?(clientId: string, refreshToken: string): Promise<TokenGrant>;
 }
 
 export interface IdentityServiceDeps {
@@ -37,7 +47,15 @@ export interface IdentityServiceDeps {
   clientId(): Promise<string | null>;
   github?: GithubSignInApi;
   now?: () => number;
+  /** Refresh timer; returns a cancel. Default: an unref'd setTimeout. */
+  schedule?: (fn: () => void, ms: number) => () => void;
 }
+
+/** Fired after the vault write settles, only when the stored token changed. Never carries the token. */
+export type { IdentityChange };
+export type IdentityChangeCause = IdentityChange['cause'];
+/** After a host 401: `retry` with the stored token; `expired` (GitHub refused it, now cleared); or `host-refused` (GitHub still accepts it). */
+export type RecoverResult = 'retry' | 'expired' | 'host-refused';
 
 interface Profile {
   identity: UserIdentity;
@@ -45,9 +63,11 @@ interface Profile {
   sso: SsoHint | null;
   verifiedAt: number;
 }
+type Grant = Omit<TokenGrant, 'token' | 'scopes'>;
 interface Saved {
   token: string;
   profile: Profile;
+  grant: Grant;
 }
 interface Pending {
   clientId: string;
@@ -95,6 +115,30 @@ export function toAccountSso(sso: SsoHint, clientId: string | null): AccountSso 
 }
 
 const isStr = (v: unknown): v is string => typeof v === 'string';
+const isTime = (v: unknown): v is number => typeof v === 'number' && Number.isFinite(v);
+
+function parseGrant(raw: string | null): Grant {
+  let o: Record<string, unknown> | null = null;
+  try {
+    o = raw ? (JSON.parse(raw) as Record<string, unknown>) : null;
+  } catch {
+    o = null;
+  }
+  if (!o || typeof o !== 'object') return {};
+  const g: Grant = {};
+  if (isTime(o.expiresAt)) g.expiresAt = o.expiresAt;
+  if (isStr(o.refreshToken) && o.refreshToken) g.refreshToken = o.refreshToken;
+  if (isTime(o.refreshExpiresAt)) g.refreshExpiresAt = o.refreshExpiresAt;
+  return g;
+}
+
+function grantOf(t: TokenGrant): Grant {
+  const g: Grant = {};
+  if (t.expiresAt !== undefined) g.expiresAt = t.expiresAt;
+  if (t.refreshToken !== undefined) g.refreshToken = t.refreshToken;
+  if (t.refreshExpiresAt !== undefined) g.refreshExpiresAt = t.refreshExpiresAt;
+  return g;
+}
 const isStrOrNull = (v: unknown): boolean => v === null || typeof v === 'string';
 const isStrArray = (v: unknown): v is string[] => Array.isArray(v) && v.every(isStr);
 
@@ -134,8 +178,9 @@ function defaultGithub(): GithubSignInApi {
   const provider = createGithubProvider();
   return {
     requestDeviceCode: (clientId) => requestDeviceCode(clientId),
-    pollDeviceToken,
-    probe: (token) => provider.probe(token)
+    pollDeviceToken: (clientId, deviceCode, intervalMs) => pollDeviceToken(clientId, deviceCode, intervalMs),
+    probe: (token) => provider.probe(token),
+    refresh: (clientId, refreshToken) => refreshDeviceToken(clientId, refreshToken)
   };
 }
 
@@ -153,12 +198,26 @@ export class IdentityService {
   private epoch = 0;
   /** Serialises vault writes so a sign-out can't interleave with a save. */
   private chain: Promise<unknown> = Promise.resolve();
+  private readonly schedule: (fn: () => void, ms: number) => () => void;
+  private refreshing: Promise<string | null> | null = null;
+  private refreshFailedAt = -Infinity;
+  private cancelRefresh: (() => void) | null = null;
+  private readonly listeners = new Set<(c: IdentityChange) => void>();
+  /** One recovery per rejected token; concurrent 401s share it. */
+  private readonly recovering = new Map<string, Promise<RecoverResult>>();
 
   constructor(deps: IdentityServiceDeps) {
     this.vault = deps.vault;
     this.clientId = deps.clientId;
     this.github = deps.github ?? defaultGithub();
     this.now = deps.now ?? Date.now;
+    this.schedule =
+      deps.schedule ??
+      ((fn, ms) => {
+        const t = setTimeout(fn, ms);
+        t.unref?.();
+        return () => clearTimeout(t);
+      });
   }
 
   private persisted(): Promise<boolean> {
@@ -176,7 +235,23 @@ export class IdentityService {
     } catch {
       profile = null;
     }
-    return isProfile(profile) ? { token, profile } : null;
+    if (!isProfile(profile)) return null;
+    return { token, profile, grant: parseGrant(await this.vault.getSecret(GITHUB_IDENTITY_SCOPE, REFRESH_KEY)) };
+  }
+
+  onChange(fn: (c: IdentityChange) => void): () => void {
+    this.listeners.add(fn);
+    return () => void this.listeners.delete(fn);
+  }
+
+  private emit(c: IdentityChange): void {
+    for (const fn of [...this.listeners]) {
+      try {
+        fn(c);
+      } catch {
+        // A listener's bug must not fail the sign-in or sign-out that fired it.
+      }
+    }
   }
 
   private serial<T>(fn: () => Promise<T>): Promise<T> {
@@ -192,13 +267,27 @@ export class IdentityService {
     return this.serial(async () => {
       if (epoch !== this.epoch) return false;
       if (sameToken && (await this.load())?.token !== s.token) return false;
-      if (!(await this.persisted())) {
-        this.memory = s;
-        return true;
-      }
-      // PROFILE first: a TOKEN is never visible without its profile.
-      await this.vault.setSecret(GITHUB_IDENTITY_SCOPE, PROFILE_KEY, JSON.stringify(s.profile));
-      await this.vault.setSecret(GITHUB_IDENTITY_SCOPE, TOKEN_KEY, s.token);
+      await this.write(s);
+      return true;
+    });
+  }
+
+  private async write(s: Saved): Promise<void> {
+    if (!(await this.persisted())) {
+      this.memory = s;
+      return;
+    }
+    // TOKEN last: a TOKEN is never visible without its profile and grant.
+    await this.vault.setSecret(GITHUB_IDENTITY_SCOPE, PROFILE_KEY, JSON.stringify(s.profile));
+    await this.vault.setSecret(GITHUB_IDENTITY_SCOPE, REFRESH_KEY, Object.keys(s.grant).length ? JSON.stringify(s.grant) : '');
+    await this.vault.setSecret(GITHUB_IDENTITY_SCOPE, TOKEN_KEY, s.token);
+  }
+
+  /** Replaces the stored pair only if `old` is still the stored token, so a refresh can't undo a newer sign-in or a sign-out. */
+  private replace(old: string, next: Saved): Promise<boolean> {
+    return this.serial(async () => {
+      if ((await this.load())?.token !== old) return false;
+      await this.write(next);
       return true;
     });
   }
@@ -209,6 +298,8 @@ export class IdentityService {
   }
 
   private async clearNow(): Promise<void> {
+    this.cancelRefresh?.();
+    this.cancelRefresh = null;
     this.memory = null;
     if (await this.persisted()) await this.vault.deleteAllForWorkspace(GITHUB_IDENTITY_SCOPE);
   }
@@ -219,12 +310,75 @@ export class IdentityService {
 
   /** Clears only if `token` is still the stored one, so revoking an old token
    *  can't undo a newer sign-in. */
-  private revoke(token: string): Promise<boolean> {
-    return this.serial(async () => {
+  private async revoke(token: string): Promise<boolean> {
+    const done = await this.serial(async () => {
       if ((await this.load())?.token !== token) return false;
       await this.clearNow();
       return true;
     });
+    if (done) this.emit({ cause: 'revoked', signedIn: false });
+    return done;
+  }
+
+  private dueForRefresh(s: Saved): boolean {
+    return s.grant.expiresAt !== undefined && this.now() >= s.grant.expiresAt - REFRESH_LEAD_MS;
+  }
+
+  /** App start: schedule the saved token's refresh, if it expires. */
+  async startRefresh(): Promise<void> {
+    const s = await this.settled();
+    if (s) this.scheduleRefresh(s);
+  }
+
+  private scheduleRefresh(s: Saved): void {
+    this.cancelRefresh?.();
+    this.cancelRefresh = null;
+    if (s.grant.expiresAt === undefined || !s.grant.refreshToken) return;
+    const ms = Math.min(MAX_TIMER_MS, Math.max(0, s.grant.expiresAt - REFRESH_LEAD_MS - this.now()));
+    this.cancelRefresh = this.schedule(() => void this.current().catch(() => undefined), ms);
+  }
+
+  /** One refresh at a time. Resolves to the token to use now, or null once an expired token is cleared. */
+  private refresh(s: Saved): Promise<string | null> {
+    this.refreshing ??= this.refreshNow(s).finally(() => (this.refreshing = null));
+    return this.refreshing;
+  }
+
+  private async refreshNow(s: Saved): Promise<string | null> {
+    const expired = s.grant.expiresAt !== undefined && this.now() >= s.grant.expiresAt;
+    const giveUp = async (): Promise<string | null> => {
+      if (!expired) return s.token;
+      if (await this.revoke(s.token)) this.notice = EXPIRED_NOTICE;
+      return (await this.settled())?.token ?? null;
+    };
+    const rt = s.grant.refreshToken;
+    if (!rt || !this.github.refresh || (s.grant.refreshExpiresAt !== undefined && this.now() >= s.grant.refreshExpiresAt)) return giveUp();
+    if (this.now() - this.refreshFailedAt < REFRESH_RETRY_MS) return expired ? giveUp() : s.token;
+    const clientId = await this.clientId();
+    if (!clientId) return giveUp();
+    let g: TokenGrant;
+    try {
+      g = await this.github.refresh(clientId, rt);
+    } catch (err) {
+      this.refreshFailedAt = this.now();
+      // An outage is not a rejection: keep the token and let the host decide.
+      if (err instanceof DeviceFlowError && err.kind === 'network') return s.token;
+      return giveUp();
+    }
+    const next: Saved = { token: g.token, profile: s.profile, grant: grantOf(g) };
+    if (!(await this.replace(s.token, next))) return (await this.settled())?.token ?? null;
+    this.refreshFailedAt = -Infinity;
+    this.scheduleRefresh(next);
+    this.emit({ cause: 'token-refreshed', signedIn: true });
+    return g.token;
+  }
+
+  /** The stored pair, refreshed first when its access token is about to expire. */
+  private async current(): Promise<Saved | null> {
+    const s = await this.settled();
+    if (!s || !this.dueForRefresh(s)) return s;
+    await this.refresh(s);
+    return this.settled();
   }
 
   private async toStatus(saved: Saved | null): Promise<AccountStatus> {
@@ -256,7 +410,7 @@ export class IdentityService {
    *  notice); any other failure keeps the cached profile (with a notice). */
   async status(opts: { refresh?: boolean } = {}): Promise<AccountStatus> {
     const epoch = this.epoch;
-    let saved = await this.settled();
+    let saved = opts.refresh ? await this.current() : await this.settled();
     if (saved && opts.refresh) {
       try {
         const probe = await this.github.probe(saved.token);
@@ -266,7 +420,8 @@ export class IdentityService {
         const scopes = probe.scopes.length > 0 ? probe.scopes : saved.profile.scopes;
         const next: Saved = {
           token: saved.token,
-          profile: { identity: probe.identity, scopes, sso: probe.sso, verifiedAt: this.now() }
+          profile: { identity: probe.identity, scopes, sso: probe.sso, verifiedAt: this.now() },
+          grant: saved.grant
         };
         if (!(await this.save(next, epoch, true)) || epoch !== this.epoch) return this.toStatus(await this.settled());
         saved = next;
@@ -338,13 +493,14 @@ export class IdentityService {
 
     p.finishing = true;
     try {
-      return await this.finishSignIn(r.token, r.scopes);
+      return await this.finishSignIn(r);
     } finally {
       if (this.pending === p) this.pending = null;
     }
   }
 
-  private async finishSignIn(token: string, tokenScopes: string[]): Promise<SignInPoll> {
+  private async finishSignIn(grant: TokenGrant): Promise<SignInPoll> {
+    const { token, scopes: tokenScopes } = grant;
     const epoch = this.epoch;
     let probe: GithubProbe;
     try {
@@ -355,13 +511,16 @@ export class IdentityService {
     }
     if (epoch !== this.epoch) return { state: 'error', message: CANCELLED };
     const scopes = probe.scopes.length > 0 ? probe.scopes : tokenScopes;
-    const saved: Saved = { token, profile: { identity: probe.identity, scopes, sso: probe.sso, verifiedAt: this.now() } };
+    const saved: Saved = { token, profile: { identity: probe.identity, scopes, sso: probe.sso, verifiedAt: this.now() }, grant: grantOf(grant) };
     const saveEpoch = ++this.epoch;
     if (!(await this.save(saved, saveEpoch))) return { state: 'error', message: CANCELLED };
     if (saveEpoch !== this.epoch) {
       const now = await this.settled();
       if (now?.token !== token) return { state: 'error', message: CANCELLED };
     }
+    this.refreshFailedAt = -Infinity;
+    this.scheduleRefresh(saved);
+    this.emit({ cause: 'sign-in', signedIn: true });
     return { state: 'done', status: await this.toStatus(saved) };
   }
 
@@ -376,12 +535,46 @@ export class IdentityService {
     this.pending = null;
     this.notice = null;
     this.epoch++;
-    await this.clear();
+    const had = await this.serial(async () => {
+      const was = (await this.load()) !== null;
+      await this.clearNow();
+      return was;
+    });
+    if (had) this.emit({ cause: 'sign-out', signedIn: false });
   }
 
   /** For RemoteClient: the signed-in token, attached to fleet-host requests. Main process only. */
   async bearerToken(): Promise<string | null> {
-    return (await this.settled())?.token ?? null;
+    return (await this.current())?.token ?? null;
+  }
+
+  /** For RemoteClient after a host 401 on `sentToken`. */
+  recover(sentToken: string): Promise<RecoverResult> {
+    let p = this.recovering.get(sentToken);
+    if (!p) {
+      p = this.recoverOnce(sentToken).finally(() => this.recovering.delete(sentToken));
+      this.recovering.set(sentToken, p);
+    }
+    return p;
+  }
+
+  private async recoverOnce(sent: string): Promise<RecoverResult> {
+    const saved = await this.settled();
+    if (!saved) return 'expired';
+    if (saved.token !== sent) return 'retry';
+    if (saved.grant.refreshToken) {
+      const t = await this.refresh(saved);
+      if (t && t !== sent) return 'retry';
+      if (!t) return 'expired';
+    }
+    try {
+      await this.github.probe(sent);
+      return 'host-refused';
+    } catch (err) {
+      if (!(err instanceof IdentityError) || err.kind !== 'unauthorized') return 'host-refused';
+      if (await this.revoke(sent)) this.notice = REVOKED_NOTICE;
+      return 'expired';
+    }
   }
 
   /** The signed-in login; remote.ts keys its /whoami throttle by it. */
@@ -392,7 +585,7 @@ export class IdentityService {
   /** For loadoutSources.setGithubTokenProvider: the token, only if it can pull
    *  from GHCR. Main process only. */
   async packagesToken(): Promise<string | null> {
-    const s = await this.settled();
+    const s = await this.current();
     return s && hasPackagesRead(s.profile.scopes) ? s.token : null;
   }
 }

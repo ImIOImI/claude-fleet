@@ -1,7 +1,7 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import type { Duplex } from 'node:stream';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { WebSocketServer } from 'ws';
 import { person, TOKEN } from '../host/testFakes.js';
 import { startTestHost, TEST_WORKSPACE_ID } from '../host/testHost.js';
@@ -468,5 +468,97 @@ describe('RemoteClient.publish', () => {
     await expect(bad.client.publish({ sourceWorkspaceId: SRC, sessionId: SID, events: [line] })).rejects.toMatchObject({ kind: 'protocol', status: 400 });
     const odd = await publishHost({ post: async () => ({ status: 200, body: { ok: true } }) });
     await expect(odd.client.publish({ sourceWorkspaceId: SRC, sessionId: SID, events: [line] })).rejects.toMatchObject({ kind: 'protocol' });
+  });
+});
+
+describe('RemoteClient sign-in recovery', () => {
+  const STALE = 'ghu_' + 's'.repeat(36);
+
+  it('retries a rejected request and socket once after recover says retry', async () => {
+    const r = await rig();
+    let current = STALE;
+    const recover = vi.fn(async () => ((current = TOKEN), 'retry' as const));
+    const c = new RemoteClient({ url: r.url, token: async () => current, recover });
+    expect(await c.whoami()).toMatchObject({ user: { login: 'alice' } });
+    current = STALE;
+    const ws = await c.openSocket('/events');
+    ws.close();
+    expect(recover.mock.calls).toEqual([[STALE], [STALE]]);
+  });
+
+  it('a second 401 after a retry is host-refused, and recover runs once', async () => {
+    const r = await rig();
+    const recover = vi.fn(async () => 'retry' as const);
+    const c = new RemoteClient({ url: r.url, token: async () => STALE, recover });
+    const err = (await c.whoami().catch((e: unknown) => e)) as RemoteError;
+    expect([err.kind, err.auth, err.status]).toEqual(['unauthorized', 'host-refused', 401]);
+    expect(recover).toHaveBeenCalledTimes(1);
+  });
+
+  it('expired says sign in again, over HTTP and on a socket', async () => {
+    const r = await rig();
+    const c = new RemoteClient({ url: r.url, token: async () => STALE, recover: async () => 'expired' });
+    for (const p of [c.whoami(), c.openSocket('/events')]) {
+      const err = (await p.catch((e: unknown) => e)) as RemoteError;
+      expect([err.kind, err.auth]).toEqual(['unauthorized', 'expired']);
+      expect(err.message).toMatch(/sign in again/);
+      expect(err.message).not.toContain(STALE);
+    }
+  });
+
+  it('without recover, the host body picks the message', async () => {
+    const r = await rig();
+    const err = (await new RemoteClient({ url: r.url, token: async () => STALE }).whoami().catch((e: unknown) => e)) as RemoteError;
+    expect([err.kind, err.auth]).toEqual(['unauthorized', undefined]);
+    expect(err.message).toMatch(/GitHub rejected your sign-in/);
+  });
+
+  it('says the host got no token, not "sign in again", when the bearer was lost on the way', async () => {
+    const body = JSON.stringify({ error: 'missing or malformed bearer token' });
+    const { url } = await rawServer(
+      (_req, res) => {
+        res.writeHead(401, { 'Content-Type': 'application/json', 'WWW-Authenticate': 'Bearer' });
+        res.end(body);
+      },
+      (_req, socket) =>
+        socket.end(`HTTP/1.1 401 Unauthorized\r\nContent-Type: application/json\r\nContent-Length: ${body.length}\r\nConnection: close\r\n\r\n${body}`)
+    );
+    for (const recover of [undefined, async () => 'host-refused' as const]) {
+      const c = new RemoteClient({ url, token: async () => TOKEN, recover });
+      for (const p of [c.whoami(), c.openSocket('/events')]) {
+        const err = (await p.catch((e: unknown) => e)) as RemoteError;
+        expect(err).toMatchObject({ kind: 'unauthorized', status: 401 });
+        expect(err.message).toMatch(/received no GitHub sign-in/);
+        expect(err.message).not.toMatch(/sign in again/i);
+      }
+    }
+  });
+
+  it('resetAuth reconnects a subscription at once instead of waiting out the backoff', async () => {
+    const r = await rig();
+    let current = STALE;
+    const s = manualSchedule();
+    const states: boolean[] = [];
+    const c = new RemoteClient({ url: r.url, token: async () => current, schedule: s.schedule });
+    const off = c.subscribe(() => undefined, (up) => states.push(up));
+    cleanups.push(off);
+    await expect.poll(() => s.delays).toEqual([30_000]);
+    current = TOKEN;
+    c.resetAuth();
+    await expect.poll(() => states).toEqual([false, true]);
+    expect(s.delays).toEqual([30_000]);
+  });
+
+  it('resetAuth replaces an open subscription socket so it carries the current token', async () => {
+    const r = await rig();
+    const s = manualSchedule();
+    const states: boolean[] = [];
+    const c = new RemoteClient({ url: r.url, token: async () => TOKEN, schedule: s.schedule });
+    const off = c.subscribe(() => undefined, (up) => states.push(up));
+    cleanups.push(off);
+    await expect.poll(() => states).toEqual([true]);
+    c.resetAuth();
+    await expect.poll(() => states).toEqual([true, true]);
+    expect(s.delays).toEqual([]);
   });
 });

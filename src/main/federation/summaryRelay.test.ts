@@ -226,4 +226,29 @@ describe('SummaryRelay', () => {
     relay.stop();
     expect(dropped).toEqual(['W1', 'W1', 'W1']);
   });
+
+  it('reset drops every subscription and resubscribes at once', () => {
+    const r = rig();
+    r.relay.sync();
+    r.relay.reset();
+    expect(r.subs.map((s) => s.stopped)).toEqual([true, false]);
+  });
+
+  it('reports a disconnect kind to onDisconnected', () => {
+    const seen: unknown[] = [];
+    let state: ((c: boolean, why?: { retryInMs: number | null; kind?: 'unauthorized'; auth?: 'expired' }) => void) | null = null;
+    const relay = createSummaryRelay({
+      sources: () => [{ id: A, url: 'http://a', name: 'a', hue: null, tier: 'read', state: 'running' }],
+      subscribe: (_u, _on, s) => {
+        state = s;
+        return () => undefined;
+      },
+      fetchSummary: async () => null,
+      broadcast: () => undefined,
+      onDisconnected: (o, why) => void seen.push([o, why])
+    });
+    relay.sync();
+    state!(false, { retryInMs: 30_000, kind: 'unauthorized', auth: 'expired' });
+    expect(seen).toEqual([[A, { kind: 'unauthorized', auth: 'expired', status: undefined }]]);
+  });
 });
