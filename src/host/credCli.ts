@@ -107,7 +107,7 @@ export function requestToken(endpoint: CredEndpoint, body: unknown): Promise<str
           /* status says it */
         }
         if (res.statusCode === 200 && typeof j.token === 'string') resolve(j.token);
-        else reject(new Error(`${res.statusCode}: ${typeof j.error === 'string' ? j.error : 'no token'}`));
+        else reject(Object.assign(new Error(`${res.statusCode}: ${typeof j.error === 'string' ? j.error : 'no token'}`), { status: res.statusCode }));
       });
     });
     req.on('timeout', () => req.destroy(new Error('timed out')));
@@ -127,7 +127,7 @@ export interface CredIo {
   cwdRemotes(): GitRemote[];
 }
 
-const USAGE = 'usage: fleet-host-cred git-credential <get|store|erase> | gh-token -- <gh args> | serve';
+const USAGE = 'usage: fleet-host-cred git-credential <get|store|erase> | gh-token -- <gh args> (prints a token for the gh shim) | serve';
 
 export async function runCredCli(argv: string[], io: CredIo): Promise<number> {
   const addrText = io.env.FLEET_HOST_CRED_ADDR;
@@ -143,8 +143,11 @@ export async function runCredCli(argv: string[], io: CredIo): Promise<number> {
     if (code === 'ENOENT' || code === 'ECONNREFUSED') return;
     io.err(`fleet-host-cred: ${(e as Error).message}\n`);
   };
-  const isGet = argv[0] === 'gh-token' || (argv[0] === 'git-credential' && argv[1] === 'get');
-  if (isGet && io.stdoutIsTty) {
+  if (argv[0] === 'gh-token' && io.stdoutIsTty) {
+    io.err('fleet-host-cred: gh-token prints a token for the gh shim and is not meant for terminals; run gh instead\n');
+    return 2;
+  }
+  if (argv[0] === 'git-credential' && argv[1] === 'get' && io.stdoutIsTty) {
     io.err('fleet-host-cred: refusing to print a token to a terminal\n');
     return 1;
   }

@@ -50,6 +50,7 @@ describe('credential socket', () => {
     const token = await requestToken(sock, { repositories: ['a'] });
     await expect(requestToken(sock, { repositories: ['b'] })).rejects.toThrow(/403.*not in github.repositories/);
     await expect(requestToken(sock, { repositories: [] })).rejects.toThrow(/400/);
+    await expect(requestToken(sock, { repositories: [] })).rejects.toMatchObject({ status: 400 });
     const all = logs.join('\n');
     expect(all).toContain('app token issued');
     expect(all).not.toContain(token);
