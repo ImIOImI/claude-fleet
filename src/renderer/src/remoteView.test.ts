@@ -196,7 +196,7 @@ describe('remotePane', () => {
     expect(remotePane({ kind: 'remote', state: 'unreachable', name: 'r', remote: { url } })).toEqual({
       tone: 'error',
       title: 'Host unreachable',
-      body: "r (https://h) isn't answering. Its sessions reappear when it's back."
+      body: "r (https://h) isn't answering. Check your network, or that your VPN (Twingate) is connected. Its sessions reappear when it's back."
     });
   });
 });
@@ -334,5 +334,19 @@ describe('reattachAfterAuthEnd', () => {
   it('at most once per AUTO_REATTACH_GAP_MS, so a host that keeps closing it cannot loop', () => {
     expect(reattachAfterAuthEnd({ ...base, lastAutoAt: base.now - AUTO_REATTACH_GAP_MS + 1 })).toBe(false);
     expect(reattachAfterAuthEnd({ ...base, lastAutoAt: base.now - AUTO_REATTACH_GAP_MS })).toBe(true);
+  });
+});
+describe('remote chip sign-in phases', () => {
+  const w = { kind: 'remote', state: 'running' };
+  it('signed-out beats restarting; no-access sits under restarting', () => {
+    expect(remoteChip(w, { phase: 'draining', softAt: null, hardAt: null, instance: null }, 'expired')).toEqual({ phase: 'signed-out', sub: 'signed out' });
+    expect(remoteChip(w, null, 'forbidden')).toEqual({ phase: 'no-access', sub: 'no access' });
+    expect(remoteChip(w, { phase: 'draining', softAt: null, hardAt: null, instance: null }, 'forbidden')?.phase).toBe('restarting');
+    expect(remoteChip(w, null, 'host-refused')).toEqual({ phase: 'live', sub: null });
+  });
+  it('the unreachable pane carries the VPN hint', () => {
+    expect(remotePane({ kind: 'remote', state: 'unreachable', name: 'rb', remote: { url: 'https://h' } })?.body).toBe(
+      "rb (https://h) isn't answering. Check your network, or that your VPN (Twingate) is connected. Its sessions reappear when it's back."
+    );
   });
 });

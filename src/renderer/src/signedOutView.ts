@@ -1,0 +1,94 @@
+// Pure rules for the signed-out banner, remote tab cards and their reattach (D169–D176).
+import { parseRemoteAttachTag, type RemoteAuthState, type RemoteBlockKind } from '../../preload/remoteAuth';
+import { ipcErrorText } from './remoteView';
+
+export const SIGNED_OUT_BANNER = 'Signed out of GitHub — remote workspaces are paused. Your sessions are still running on the host.';
+
+export function signedOutBanner(s: RemoteAuthState | null, remoteCount: number): string | null {
+  return s?.signedOut && remoteCount > 0 ? SIGNED_OUT_BANNER : null;
+}
+
+/** The app-wide sign-out wins over any per-bookmark kind (D170). */
+export function blockFor(s: RemoteAuthState | null, workspaceId: string): RemoteBlockKind | null {
+  if (s?.signedOut) return s.signedOut.reason;
+  const k = s?.conns[workspaceId]?.kind;
+  return k && k !== 'ok' ? k : null;
+}
+
+export const isSignInBlock = (b: RemoteBlockKind | null): boolean => b === 'not-signed-in' || b === 'expired';
+
+export interface RemoteCard {
+  tone: 'wait' | 'warn' | 'danger';
+  title: string;
+  body: string;
+  action: 'sign-in' | 'retry' | null;
+  linkUrl: string | null;
+}
+
+const SIGN_IN_BODY = 'Sign in to reconnect. Your sessions are still running on the host.';
+
+export function remoteCard(kind: RemoteBlockKind, name: string, ssoUrl: string | null = null): RemoteCard {
+  switch (kind) {
+    case 'not-signed-in':
+      return { tone: 'wait', title: 'Not signed in', body: SIGN_IN_BODY, action: 'sign-in', linkUrl: null };
+    case 'expired':
+      return { tone: 'wait', title: 'Sign-in expired', body: SIGN_IN_BODY, action: 'sign-in', linkUrl: null };
+    case 'host-refused':
+      return { tone: 'warn', title: `${name} didn't accept your sign-in; retrying`, body: 'Your GitHub sign-in is valid. This tab reconnects by itself.', action: 'retry', linkUrl: null };
+    case 'unreachable':
+      return {
+        tone: 'warn',
+        title: `Can't reach ${name}; retrying`,
+        body: 'Check your network, or that your VPN (Twingate) is connected. This tab reconnects by itself.',
+        action: 'retry',
+        linkUrl: null
+      };
+    case 'forbidden':
+      return {
+        tone: 'danger',
+        title: `You don't have access to ${name}`,
+        body: ssoUrl
+          ? 'Authorise claude-fleet for your organisation on GitHub (a one-time step); this tab reconnects by itself.'
+          : "Ask the host's admins to add you to a team with access.",
+        action: null,
+        linkUrl: ssoUrl
+      };
+  }
+}
+
+export function attachErrorBlock(err: unknown): RemoteBlockKind | null {
+  return parseRemoteAttachTag(ipcErrorText(err));
+}
+
+export type TabEnd = { kind: 'natural' } | { kind: 'restarting' } | { kind: 'remote'; block: RemoteBlockKind } | { kind: 'attach-error'; message: string };
+
+export function remoteEndKind(restarting: boolean, block: RemoteBlockKind | null): TabEnd {
+  if (block && isSignInBlock(block)) return { kind: 'remote', block };
+  if (restarting) return { kind: 'restarting' };
+  if (block) return { kind: 'remote', block };
+  return { kind: 'natural' };
+}
+
+/** A host close (4401/4403) can beat the state push, so a natural end upgrades to a block that arrives after it; unreachable never does. */
+const UPGRADES: ReadonlySet<RemoteBlockKind> = new Set(['not-signed-in', 'expired', 'host-refused', 'forbidden']);
+
+export function shownRemoteBlock(remote: boolean, ended: TabEnd | null, block: RemoteBlockKind | null): RemoteBlockKind | null {
+  if (!remote || !ended) return null;
+  if (ended.kind === 'remote') return block ?? ended.block;
+  if (ended.kind === 'natural' && block && UPGRADES.has(block)) return block;
+  return null;
+}
+
+export interface AuthView {
+  epoch: number;
+  block: RemoteBlockKind | null;
+}
+
+export function shouldReattach(showing: RemoteBlockKind | null, prev: AuthView, next: AuthView): boolean {
+  if (showing === null || isSignInBlock(next.block)) return false;
+  return next.epoch !== prev.epoch || (prev.block !== null && next.block === null);
+}
+
+export function skipAttach(remote: boolean, block: RemoteBlockKind | null): boolean {
+  return remote && isSignInBlock(block);
+}

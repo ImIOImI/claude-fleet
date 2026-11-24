@@ -1,5 +1,6 @@
 // Pure copy and tier rules for remote workspaces. Display only: the host enforces every tier.
 import type { RemoteDrain, RemoteLiveSession, RemoteProbe, RemoteProbeErr, RemoteProbeOk, RemoteTier } from '../../preload/remoteTypes';
+import type { RemoteBlockKind } from '../../preload/remoteAuth';
 
 export type MaybeTier = RemoteTier | null | undefined;
 
@@ -92,18 +93,20 @@ export function raceTimeout<T>(p: Promise<T>, ms: number): Promise<T | null> {
 export const CHECKING_STATUS = 'checking host';
 
 export interface RemoteChip {
-  phase: 'live' | 'checking' | 'unreachable' | 'restarting';
+  phase: 'live' | 'checking' | 'unreachable' | 'restarting' | 'signed-out' | 'no-access';
   /** Replaces the chip's sub-line, or null to keep the normal activity text. */
   sub: string | null;
 }
 
 const restarting = (d: RemoteDrain | null | undefined): boolean => d?.phase === 'draining' || d?.phase === 'unknown';
 
-export function remoteChip(w: { kind: string; state: string; status?: string }, drain?: RemoteDrain | null): RemoteChip | null {
+export function remoteChip(w: { kind: string; state: string; status?: string }, drain?: RemoteDrain | null, block?: RemoteBlockKind | null): RemoteChip | null {
   if (w.kind !== 'remote') return null;
   if (w.state !== 'unreachable') {
+    if (block === 'not-signed-in' || block === 'expired') return { phase: 'signed-out', sub: 'signed out' };
     if (drain?.phase === 'draining') return { phase: 'restarting', sub: 'restarting · input paused' };
     if (drain?.phase === 'unknown') return { phase: 'restarting', sub: 'waiting for the workspace pod' };
+    if (block === 'forbidden') return { phase: 'no-access', sub: 'no access' };
     return { phase: 'live', sub: null };
   }
   if (w.status === CHECKING_STATUS) return { phase: 'checking', sub: 'checking host…' };
@@ -182,7 +185,7 @@ export function remotePane(w: RemoteRow): { tone: 'neutral' | 'error'; title: st
   const phase = remoteChip(w)?.phase;
   const where = `${w.name} (${w.remote?.url ?? 'unknown URL'})`;
   if (phase === 'checking') return { tone: 'neutral', title: 'Checking host…', body: `Contacting ${where}.` };
-  if (phase === 'unreachable') return { tone: 'error', title: 'Host unreachable', body: `${where} isn't answering. Its sessions reappear when it's back.` };
+  if (phase === 'unreachable') return { tone: 'error', title: 'Host unreachable', body: `${where} isn't answering. Check your network, or that your VPN (Twingate) is connected. Its sessions reappear when it's back.` };
   return null;
 }
 
