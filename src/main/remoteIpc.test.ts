@@ -446,3 +446,24 @@ describe('remote:* token consent (main-process confirm)', () => {
     expect(r.workspace.description).not.toMatch(/[\x00-\x1f\x7f]/);
   });
 });
+
+describe('remote:authState', () => {
+  it('returns the monitor snapshot and ignores arguments', async () => {
+    const handlers = new Map<string, (...a: unknown[]) => unknown>();
+    const ipc = { handle: (c: string, h: (...a: unknown[]) => unknown) => void handlers.set(c, h) };
+    const snap = { signedOut: null, epoch: 3, conns: {} };
+    registerRemoteIpc(ipc as never, {
+      backend: {} as never,
+      accountStatus: async () => ({}) as never,
+      readManifest: async () => null,
+      listManifests: async () => [],
+      confirm: async () => false,
+      writeManifest: async () => undefined,
+      findByName: async () => null,
+      invalidate: () => undefined,
+      authState: () => snap
+    });
+    expect(REMOTE_CHANNELS).toContain('remote:authState');
+    expect(await handlers.get('remote:authState')!({}, 'ignored')).toEqual(snap);
+  });
+});

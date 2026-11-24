@@ -98,7 +98,8 @@ import { BUILTIN_GITHUB_CLIENT_ID, GITHUB_CLIENT_ID_ENV } from './identity/clien
 import { readGithubClientId, registerGithubClientIdIpc, type GithubClientIdDeps } from './githubClientIdIpc.js';
 import { registerIdentityIpc } from './identityIpc.js';
 import { createRemoteBackend } from './remote.js';
-import type { RecoverVerdict } from './remoteClient.js';
+import { RemoteError, type RecoverVerdict } from './remoteClient.js';
+import { createRemoteAuthMonitor } from './remoteAuth.js';
 import { createFederatedReader, type FederatedReader } from './federation/federatedReader.js';
 import { createSummaryRelay } from './federation/summaryRelay.js';
 import { createDrainRelay } from './remoteDrain.js';
@@ -403,6 +404,7 @@ const remoteBackend = createRemoteBackend({
   token: () => remoteToken(),
   recover: (t) => remoteRecover(t),
   login: () => remoteLogin(),
+  observe: (id, err) => void remoteAuth.observe(id, err),
   listManifests: () => listWorkspaceManifests(),
   writeManifest: (spec) => writeWorkspaceManifest(spec),
   deleteState: (id) => rm(workspaceStateDir(id), { recursive: true, force: true }),
@@ -446,7 +448,32 @@ const summaryRelay = createSummaryRelay({
   onConnected: (origin) => {
     remoteChanges.connected(origin);
     remoteNoticeSink?.hint(origin);
+  },
+  onDisconnected: (origin, why) => {
+    if (why.kind === 'unauthorized' || why.kind === 'forbidden' || why.kind === 'not-signed-in') {
+      void remoteAuth.observe(origin, new RemoteError(why.kind, 'events closed', why.status, undefined, why.auth));
+    }
   }
+});
+let signedOutNotifier: ((n: { title: string; body: string }) => void) | null = null;
+/** Set by the inbox services while they run; one notification per involuntary sign-out (D172). */
+export function setSignedOutNotifier(fn: ((n: { title: string; body: string }) => void) | null): void {
+  signedOutNotifier = fn;
+}
+let remoteSso: () => Promise<string | null> = async () => null;
+const remoteAuth = createRemoteAuthMonitor({
+  signedIn: async () => (await remoteToken()) !== null,
+  bookmarkCount: async () => (MOCK_MODE ? 0 : (await listWorkspaceManifests()).filter((m) => m.kind === 'remote').length),
+  send: (s) => {
+    for (const w of BrowserWindow.getAllWindows()) {
+      if (w.isDestroyed() || w.webContents.isDestroyed()) continue;
+      try { w.webContents.send('remote:auth', s); } catch { /* mid-teardown */ }
+    }
+  },
+  notify: (n) => signedOutNotifier?.(n),
+  reconnect: () => remoteBackend.reconnect(),
+  ssoUrl: () => remoteSso(),
+  log: (e) => logError({ source: 'main', type: 'remote-auth', level: e.level, message: e.message, extra: e.extra })
 });
 /** The remote notifier (D132), set by the inbox services while they run. */
 let remoteNoticeSink: Pick<RemoteNotifier, 'hint' | 'sync'> | null = null;
@@ -2273,13 +2300,19 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
   remoteRecover = (t) => identity.recover(t);
   remoteLogin = () => identity.currentLogin();
   identity.startRefresh().catch((err: unknown) => logError({ source: 'main', level: 'warn', type: 'identity-start-refresh', message: String(err) }));
+  remoteSso = async () => {
+    const sso = (await identity.status().catch(() => null))?.sso;
+    return sso ? (sso.url ?? sso.appSettingsUrl) : null;
+  };
   identity.onChange(({ cause, signedIn }) => {
-    if (cause === 'sign-in' || cause === 'token-refreshed') remoteBackend.reconnect();
+    // Reconnects on sign-in and token refresh (D174).
+    void remoteAuth.identityChanged({ cause, signedIn });
     for (const w of BrowserWindow.getAllWindows()) {
       if (w.isDestroyed() || w.webContents.isDestroyed()) continue;
       try { w.webContents.send('identity:changed', { cause, signedIn }); } catch { /* mid-teardown */ }
     }
   });
+  void remoteAuth.start();
   registerRemoteIpc(ipcMain, {
     backend: remoteBackend,
     accountStatus: () => identity.status(),
@@ -2289,7 +2322,8 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
     writeManifest: writeWorkspaceManifest,
     findByName: findWorkspaceByName,
     invalidate: invalidateWorkspaceList,
-    drainStates: () => drainRelay.snapshot()
+    drainStates: () => drainRelay.snapshot(),
+    authState: () => remoteAuth.snapshot()
   });
   registerFederationIpc(ipcMain, federated, localSearch);
   registerRemoteAutomationsIpc(ipcMain, federated);

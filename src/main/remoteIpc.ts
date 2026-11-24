@@ -4,6 +4,7 @@
 import type { IpcHandleLike } from './vaultIpc.js';
 import type { AccountStatus } from '../preload/identityTypes.js';
 import type { RemoteAddOptions, RemoteDrain, RemoteLiveSession, RemoteProbe, RemoteProbeErr, RemoteProbeOk } from '../preload/remoteTypes.js';
+import { EMPTY_REMOTE_AUTH, type RemoteAuthState } from '../preload/remoteAuth.js';
 import type { RemoteBackend } from './remote.js';
 import { oneLine, RemoteError } from './remoteClient.js';
 import { normalizeHostUrl, plainHttpWarning, RemoteUrlError } from './remoteUrl.js';
@@ -11,7 +12,7 @@ import { assertValidWorkspaceName } from './paths.js';
 import { assertRendererWorkspaceId } from './vaultScopes.js';
 import { FACTORY_MIRROR, type WorkspaceSpec } from './workspaces.js';
 
-export const REMOTE_CHANNELS = ['remote:probe', 'remote:add', 'remote:rename', 'remote:liveSessions', 'remote:drainStates'] as const;
+export const REMOTE_CHANNELS = ['remote:probe', 'remote:add', 'remote:rename', 'remote:liveSessions', 'remote:drainStates', 'remote:authState'] as const;
 
 const MAX_URL_LEN = 2048;
 const MAX_LIVE_SESSIONS = 1000;
@@ -54,6 +55,8 @@ export interface RemoteIpcDeps {
   now?: () => number;
   /** Last broker:drain per remote workspace (D152). */
   drainStates?(): Record<string, RemoteDrain>;
+  /** App-wide sign-in and per-bookmark connection state (D169). */
+  authState?(): RemoteAuthState;
 }
 
 function parseAddOptions(raw: unknown): RemoteAddOptions {
@@ -209,6 +212,7 @@ export function registerRemoteIpc(ipc: IpcHandleLike, deps: RemoteIpcDeps): void
 
   ipc.handle('remote:probe', (_e, url: unknown) => probe(url));
   ipc.handle('remote:drainStates', async () => deps.drainStates?.() ?? {});
+  ipc.handle('remote:authState', async () => deps.authState?.() ?? EMPTY_REMOTE_AUTH);
 
   ipc.handle('remote:add', async (_e, url: unknown, rawOpts: unknown): Promise<RemoteProbe> => {
     const opts = parseAddOptions(rawOpts);

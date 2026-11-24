@@ -114,7 +114,7 @@ export interface InboxConfig {
 
 /** Rule / default level: all · high and up · urgent only · off. */
 export type NotifyLevel = 'all' | 'high' | 'urgent' | 'off';
-export type NotificationKind = 'post' | 'todo' | 'input-wait' | 'post-rejected' | 'digest' | 'test' | 'run-failed' | 'proposal' | 'capture-settings';
+export type NotificationKind = 'post' | 'todo' | 'input-wait' | 'post-rejected' | 'digest' | 'test' | 'run-failed' | 'proposal' | 'capture-settings' | 'signed-out';
 export type RuleScopeKind = 'key' | 'source' | 'tag' | 'global';
 export type DowntimeBypass = 'none' | 'urgent' | 'urgent+input';
 

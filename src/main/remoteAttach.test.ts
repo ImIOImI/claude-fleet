@@ -100,6 +100,23 @@ describe('attachRemotePty', () => {
     expect(out.text()).toMatch(notice);
   });
 
+  it('reports a host-initiated close code, and not our own detach', async () => {
+    const codes: number[] = [];
+    const onHostClose = (c: number) => void codes.push(c);
+    const { host, client } = await rig(['s1', 's2']);
+    const mine = await attachRemotePty({ client: client(READER), sessionId: 's2', cols: 80, rows: 24, canCreate: false, onHostClose });
+    const outMine = collect(mine);
+    mine.detach();
+    await expect.poll(() => outMine.ended()).toBe(true);
+    expect(codes).toEqual([]);
+
+    const h = await attachRemotePty({ client: client(READER), sessionId: 's1', cols: 80, rows: 24, canCreate: false, onHostClose });
+    const out = collect(h);
+    host.halt(4401, 'x');
+    await expect.poll(() => out.ended()).toBe(true);
+    expect(codes).toEqual([4401]);
+  });
+
   it('reports a 4401 close as an unauthorized end, and a detach as none', async () => {
     const { host, client } = await rig(['s1']);
     const d = await attachRemotePty({ client: client(READER), sessionId: 's1', cols: 80, rows: 24, canCreate: false });
