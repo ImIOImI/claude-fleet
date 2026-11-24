@@ -2,6 +2,11 @@
 
 export type RemoteTier = 'read' | 'steer' | 'session';
 
+/** Payload of `pty:end:<id>`. `unauthorized`: the host closed a remote attach with 4401. */
+export interface PtyEndInfo {
+  reason?: 'unauthorized';
+}
+
 export interface RemoteProbeOk {
   ok: true;
   /** Canonical URL the bookmark will store. */

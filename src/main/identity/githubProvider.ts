@@ -158,7 +158,15 @@ async function assertInstallationInOrg(token: string, org: string, slug: string)
   if (count === 0) throw refuse('it reaches no repositories');
 }
 
-type UserResult = { kind: 'user'; probe: GithubProbe } | { kind: 'integration' };
+type UserResult = { kind: 'user'; probe: GithubProbe; expiresAt: number | null } | { kind: 'integration' };
+
+/** GitHub's `GitHub-Authentication-Token-Expiration` ("2026-11-23 22:02:00 UTC"), sent for expiring tokens. */
+export function parseTokenExpiration(v: string | null): number | null {
+  const m = v ? /^(\d{4}-\d{2}-\d{2}) (\d{2}:\d{2}:\d{2}) (UTC|[+-]\d{4})$/.exec(v.trim()) : null;
+  if (!m) return null;
+  const ms = Date.parse(`${m[1]}T${m[2]}${m[3] === 'UTC' ? 'Z' : m[3]}`);
+  return Number.isFinite(ms) ? ms : null;
+}
 
 async function fetchUser(token: string): Promise<UserResult> {
   const res = await ghFetch(`${GITHUB_API}/user`, { headers: headers(token) });
@@ -177,6 +185,7 @@ async function fetchUser(token: string): Promise<UserResult> {
   const name = typeof u.name === 'string' && u.name.trim() ? u.name : null;
   return {
     kind: 'user',
+    expiresAt: parseTokenExpiration(res.headers.get('github-authentication-token-expiration')),
     probe: {
       identity: {
         provider: 'github',
@@ -235,7 +244,8 @@ export function createGithubProvider(opts: { machines?: readonly MachineRule[] }
     },
     async verify(token) {
       const r = await fetchUser(token);
-      return r.kind === 'user' ? r.probe.identity : verifyMachine(token, machines);
+      if (r.kind !== 'user') return verifyMachine(token, machines);
+      return r.expiresAt === null ? r.probe.identity : { ...r.probe.identity, tokenExpiresAt: r.expiresAt };
     }
   };
 }

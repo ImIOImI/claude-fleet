@@ -100,3 +100,27 @@ describe('withVerifyCache', () => {
     expect(verify).toHaveBeenCalledTimes(1);
   });
 });
+
+describe('withVerifyCache and token expiry', () => {
+  it('never vouches for a token past the expiry its provider reported', async () => {
+    let t = 0;
+    const { p, verify } = inner(async (tok) => ({ ...who(tok), tokenExpiresAt: 60_000 }));
+    const cached = withVerifyCache(p, { now: () => t });
+    await cached.verify('a');
+    t = 59_999;
+    expect(cached.peek('a')).toBe(true);
+    t = 60_000;
+    expect(cached.peek('a')).toBe(false);
+    await cached.verify('a');
+    expect(verify).toHaveBeenCalledTimes(2);
+  });
+
+  it('does not cache a token that has already expired', async () => {
+    const t = 100_000;
+    const { p, verify } = inner(async (tok) => ({ ...who(tok), tokenExpiresAt: 50_000 }));
+    const cached = withVerifyCache(p, { now: () => t });
+    await cached.verify('a');
+    await cached.verify('a');
+    expect(verify).toHaveBeenCalledTimes(2);
+  });
+});

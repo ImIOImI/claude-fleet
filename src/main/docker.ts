@@ -863,6 +863,8 @@ export interface PtyHandle {
    * conversation back up with the freshly-installed config. (#16)
    */
   close: () => Promise<void>;
+  /** Why the stream ended, when the backend knows; read after `end`. */
+  endReason?: () => 'unauthorized' | undefined;
 }
 
 const HOST_CHANNEL = 1;

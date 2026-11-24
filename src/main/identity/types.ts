@@ -16,6 +16,8 @@ interface IdentityBase {
   avatarUrl: string | null;
   /** 'org/team-slug', lower-cased and sorted. Always empty for machines. */
   teams: string[];
+  /** Epoch ms the verified token stops working, when GitHub says. Only verify() sets it. */
+  tokenExpiresAt?: number;
 }
 
 export interface UserIdentity extends IdentityBase {

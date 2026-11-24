@@ -1,12 +1,13 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import type { Duplex } from 'node:stream';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { WebSocketServer } from 'ws';
 import { person, TOKEN } from '../host/testFakes.js';
 import { startTestHost, TEST_WORKSPACE_ID } from '../host/testHost.js';
 import { makeScrubber } from './publish/scrub.js';
 import type { PublishRoute } from '../host/publishRoute.js';
+import { IdentityService } from './identity/identityService.js';
 import { MAX_RPC_BODY, MAX_SMALL_BODY, oneLine, reconnectDelay, RemoteClient, RemoteError, type RemoteDisconnect, type RemoteEvent } from './remoteClient.js';
 
 const cleanups: Array<() => Promise<void> | void> = [];
@@ -468,5 +469,151 @@ describe('RemoteClient.publish', () => {
     await expect(bad.client.publish({ sourceWorkspaceId: SRC, sessionId: SID, events: [line] })).rejects.toMatchObject({ kind: 'protocol', status: 400 });
     const odd = await publishHost({ post: async () => ({ status: 200, body: { ok: true } }) });
     await expect(odd.client.publish({ sourceWorkspaceId: SRC, sessionId: SID, events: [line] })).rejects.toMatchObject({ kind: 'protocol' });
+  });
+});
+
+describe('RemoteClient sign-in recovery', () => {
+  const STALE = 'ghu_' + 's'.repeat(36);
+
+  it('retries a rejected request and socket once after recover says retry', async () => {
+    const r = await rig();
+    let current = STALE;
+    const recover = vi.fn(async () => ((current = TOKEN), 'retry' as const));
+    const c = new RemoteClient({ url: r.url, token: async () => current, recover });
+    expect(await c.whoami()).toMatchObject({ user: { login: 'alice' } });
+    current = STALE;
+    const ws = await c.openSocket('/events');
+    ws.close();
+    expect(recover.mock.calls).toEqual([[STALE], [STALE]]);
+  });
+
+  it('a second 401 after a retry is host-refused, and recover runs once', async () => {
+    const r = await rig();
+    const recover = vi.fn(async () => 'retry' as const);
+    const c = new RemoteClient({ url: r.url, token: async () => STALE, recover });
+    const err = (await c.whoami().catch((e: unknown) => e)) as RemoteError;
+    expect([err.kind, err.auth, err.status]).toEqual(['unauthorized', 'host-refused', 401]);
+    expect(recover).toHaveBeenCalledTimes(1);
+  });
+
+  it('expired says sign in again, over HTTP and on a socket', async () => {
+    const r = await rig();
+    const c = new RemoteClient({ url: r.url, token: async () => STALE, recover: async () => 'expired' });
+    for (const p of [c.whoami(), c.openSocket('/events')]) {
+      const err = (await p.catch((e: unknown) => e)) as RemoteError;
+      expect([err.kind, err.auth]).toEqual(['unauthorized', 'expired']);
+      expect(err.message).toMatch(/sign in again/);
+      expect(err.message).not.toContain(STALE);
+    }
+  });
+
+  it('without recover, the host body picks the message', async () => {
+    const r = await rig();
+    const err = (await new RemoteClient({ url: r.url, token: async () => STALE }).whoami().catch((e: unknown) => e)) as RemoteError;
+    expect([err.kind, err.auth]).toEqual(['unauthorized', undefined]);
+    expect(err.message).toMatch(/GitHub rejected your sign-in/);
+  });
+
+  it('says the host got no token, not "sign in again", when the bearer was lost on the way', async () => {
+    const body = JSON.stringify({ error: 'missing or malformed bearer token' });
+    const { url } = await rawServer(
+      (_req, res) => {
+        res.writeHead(401, { 'Content-Type': 'application/json', 'WWW-Authenticate': 'Bearer' });
+        res.end(body);
+      },
+      (_req, socket) =>
+        socket.end(`HTTP/1.1 401 Unauthorized\r\nContent-Type: application/json\r\nContent-Length: ${body.length}\r\nConnection: close\r\n\r\n${body}`)
+    );
+    for (const recover of [undefined, async () => 'host-refused' as const]) {
+      const c = new RemoteClient({ url, token: async () => TOKEN, recover });
+      for (const p of [c.whoami(), c.openSocket('/events')]) {
+        const err = (await p.catch((e: unknown) => e)) as RemoteError;
+        expect(err).toMatchObject({ kind: 'unauthorized', status: 401 });
+        expect(err.message).toMatch(/received no GitHub sign-in/);
+        expect(err.message).not.toMatch(/sign in again/i);
+      }
+    }
+  });
+
+  it('a host that refuses a token GitHub accepts does not set off a refresh and reconnect loop', async () => {
+    const H = 3_600_000;
+    const body = JSON.stringify({ error: 'token rejected by GitHub' });
+    let attempts = 0;
+    const { url } = await rawServer(
+      (_req, res) => {
+        attempts++;
+        res.writeHead(401, { 'Content-Type': 'application/json' });
+        res.end(body);
+      },
+      (_req, socket) => {
+        attempts++;
+        socket.end(`HTTP/1.1 401 Unauthorized\r\nContent-Type: application/json\r\nContent-Length: ${body.length}\r\nConnection: close\r\n\r\n${body}`);
+      }
+    );
+    const store = new Map<string, string>();
+    let n = 0;
+    const grant = (t: string) => ({ token: `ghu_${t}`.padEnd(40, 'x'), scopes: [], expiresAt: Date.now() + 8 * H, refreshToken: `ghr_${t}`, refreshExpiresAt: Date.now() + 1000 * H });
+    const identity = new IdentityService({
+      vault: {
+        isVaultAvailable: async () => true,
+        getSecret: async (sc, k) => store.get(`${sc}|${k}`) ?? null,
+        setSecret: async (sc, k, v) => void store.set(`${sc}|${k}`, v),
+        deleteAllForWorkspace: async () => store.clear()
+      },
+      clientId: async () => 'Iv1.testclient',
+      github: {
+        requestDeviceCode: async () => ({ deviceCode: 'dc', userCode: 'U', verificationUri: 'https://github.com/login/device', expiresAt: Date.now() + H, intervalMs: 0 }),
+        pollDeviceToken: async () => ({ status: 'done', ...grant('first') }),
+        probe: async () => ({ identity: { provider: 'github' as const, kind: 'user' as const, login: 'alice', id: 1, name: null, avatarUrl: null, teams: [] }, scopes: [], sso: null }),
+        refresh: async () => grant(String(++n))
+      },
+      schedule: () => () => undefined
+    });
+    await identity.signInStart();
+    expect((await identity.signInPoll()).state).toBe('done');
+    const s = manualSchedule();
+    const c = new RemoteClient({ url, token: () => identity.bearerToken(), recover: (t) => identity.recover(t), schedule: s.schedule });
+    let resets = 0;
+    identity.onChange((e) => {
+      if (e.cause === 'token-refreshed') resets++, c.resetAuth();
+    });
+    const off = c.subscribe(() => undefined);
+    cleanups.push(off);
+    await expect.poll(() => s.delays.length).toBe(1);
+    s.fire();
+    await expect.poll(() => s.delays.length).toBe(2);
+    await new Promise((r) => setTimeout(r, 100));
+    expect(n).toBe(0);
+    expect(resets).toBe(0);
+    expect(attempts).toBe(2);
+    expect(s.delays).toHaveLength(2);
+  });
+
+  it('resetAuth reconnects a subscription at once instead of waiting out the backoff', async () => {
+    const r = await rig();
+    let current = STALE;
+    const s = manualSchedule();
+    const states: boolean[] = [];
+    const c = new RemoteClient({ url: r.url, token: async () => current, schedule: s.schedule });
+    const off = c.subscribe(() => undefined, (up) => states.push(up));
+    cleanups.push(off);
+    await expect.poll(() => s.delays).toEqual([30_000]);
+    current = TOKEN;
+    c.resetAuth();
+    await expect.poll(() => states).toEqual([false, true]);
+    expect(s.delays).toEqual([30_000]);
+  });
+
+  it('resetAuth replaces an open subscription socket so it carries the current token', async () => {
+    const r = await rig();
+    const s = manualSchedule();
+    const states: boolean[] = [];
+    const c = new RemoteClient({ url: r.url, token: async () => TOKEN, schedule: s.schedule });
+    const off = c.subscribe(() => undefined, (up) => states.push(up));
+    cleanups.push(off);
+    await expect.poll(() => states).toEqual([true]);
+    c.resetAuth();
+    await expect.poll(() => states).toEqual([true, true]);
+    expect(s.delays).toEqual([]);
   });
 });

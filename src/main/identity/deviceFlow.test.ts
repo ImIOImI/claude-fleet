@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { DeviceFlowError, GITHUB_SCOPES, pollDeviceToken, requestDeviceCode } from './deviceFlow.js';
+import { DeviceFlowError, GITHUB_SCOPES, pollDeviceToken, refreshDeviceToken, requestDeviceCode } from './deviceFlow.js';
 
 type Init = { method?: string; headers?: Record<string, string>; body?: string };
 const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } });
@@ -168,5 +168,43 @@ describe('throttling', () => {
   it('still honours a recognised error on a 429', async () => {
     stub(() => json({ error: 'access_denied' }, 429));
     await expect(pollDeviceToken(CLIENT, 'dc', 5000)).rejects.toMatchObject({ kind: 'denied' });
+  });
+});
+
+describe('expiring user tokens', () => {
+  it('keeps the refresh token and both expiries from the device grant', async () => {
+    stub(() => json({ access_token: 'ghu_x', scope: '', expires_in: 28800, refresh_token: 'ghr_y', refresh_token_expires_in: 15897600 }));
+    expect(await pollDeviceToken(CLIENT, 'dc', 5000, () => 1000)).toEqual({
+      status: 'done',
+      token: 'ghu_x',
+      scopes: [],
+      expiresAt: 1000 + 28_800_000,
+      refreshToken: 'ghr_y',
+      refreshExpiresAt: 1000 + 15_897_600_000
+    });
+  });
+
+  it('refreshes with the refresh-token grant and no client secret', async () => {
+    const f = stub((url, params) => {
+      expect(url).toBe('https://github.com/login/oauth/access_token');
+      expect(params.get('client_id')).toBe(CLIENT);
+      expect(params.get('grant_type')).toBe('refresh_token');
+      expect(params.get('refresh_token')).toBe('ghr_y');
+      expect(params.has('client_secret')).toBe(false);
+      return json({ access_token: 'ghu_z', scope: '', expires_in: 28800, refresh_token: 'ghr_w', refresh_token_expires_in: 100 });
+    });
+    expect(await refreshDeviceToken(CLIENT, 'ghr_y', () => 0)).toEqual({
+      token: 'ghu_z',
+      scopes: [],
+      expiresAt: 28_800_000,
+      refreshToken: 'ghr_w',
+      refreshExpiresAt: 100_000
+    });
+    expect((f.mock.calls[0][1] as { redirect?: string }).redirect).toBe('error');
+  });
+
+  it('maps a dead refresh token to expired', async () => {
+    stub(() => json({ error: 'bad_refresh_token' }));
+    await expect(refreshDeviceToken(CLIENT, 'ghr_y')).rejects.toMatchObject({ kind: 'expired' });
   });
 });

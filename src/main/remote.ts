@@ -5,7 +5,7 @@
 import type { Backend } from './backend.js';
 import type { Workspace, WorkspaceSpec } from './workspaces.js';
 import { attachRemotePty, fetchDrained } from './remoteAttach.js';
-import { RemoteClient, RemoteError, type WhoAmI } from './remoteClient.js';
+import { RemoteClient, RemoteError, type RecoverVerdict, type WhoAmI } from './remoteClient.js';
 
 export const MANAGED_MSG = 'This remote workspace is managed by its deployment';
 export const TIER_REFRESH_MS = 60_000;
@@ -17,6 +17,8 @@ type RemoteSpec = WorkspaceSpec & { kind: 'remote'; remote: NonNullable<Workspac
 
 export interface RemoteBackendDeps {
   token(): Promise<string | null>;
+  /** After a host 401: the identity service's verdict on the token that was sent. */
+  recover?: (sentToken: string) => Promise<RecoverVerdict>;
   /** The signed-in login; a change voids the /whoami throttle. */
   login?: () => Promise<string | null>;
   listManifests(): Promise<WorkspaceSpec[]>;
@@ -45,6 +47,8 @@ export interface RemoteBackend extends Backend {
   refreshTier(spec: WorkspaceSpec): Promise<WhoAmI>;
   /** Probe now (one bookmark or all known) and wait for the result. */
   refresh(id?: string): Promise<void>;
+  /** After a sign-in or token refresh: drop the /whoami throttle, reconnect every /events socket, re-probe every bookmark. */
+  reconnect(): void;
   /** Stop every background probe (app quit). */
   stop(): void;
   /** Bookmarks the probe loop knows, with cached liveness; no I/O. */
@@ -92,7 +96,7 @@ export function createRemoteBackend(deps: RemoteBackendDeps): RemoteBackend {
   function clientFor(url: string): RemoteClient {
     let c = clients.get(url);
     if (!c) {
-      c = new RemoteClient({ url, token: deps.token });
+      c = new RemoteClient({ url, token: deps.token, recover: deps.recover });
       clients.set(url, c);
     }
     return c;
@@ -182,6 +186,12 @@ export function createRemoteBackend(deps: RemoteBackendDeps): RemoteBackend {
     return { ...spec, state: state ?? 'unreachable', containerId: spec.id, ...(state === null ? { status: CHECKING_STATUS } : {}) };
   }
 
+  async function refresh(id?: string): Promise<void> {
+    if (stopped) return;
+    sync((await deps.listManifests()).filter(isRemote));
+    await Promise.all([...watches.values()].filter((w) => id === undefined || w.spec.id === id).map(probe));
+  }
+
   return {
     clientFor,
     refreshTier,
@@ -192,10 +202,12 @@ export function createRemoteBackend(deps: RemoteBackendDeps): RemoteBackend {
       sync(remotes);
       return remotes.map(row);
     },
-    async refresh(id) {
+    refresh,
+    reconnect() {
       if (stopped) return;
-      sync((await deps.listManifests()).filter(isRemote));
-      await Promise.all([...watches.values()].filter((w) => id === undefined || w.spec.id === id).map(probe));
+      lastWhoami.clear();
+      for (const c of clients.values()) c.resetAuth();
+      for (const w of watches.values()) void probe(w);
     },
     stop() {
       stopped = true;
