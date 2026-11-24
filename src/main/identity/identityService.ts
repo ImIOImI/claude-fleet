@@ -769,15 +769,14 @@ export class IdentityService {
     const saved = await this.settled();
     if (!saved) return 'expired';
     if (saved.token !== sent) return 'retry';
-    if (saved.source === 'pat') return this.recoverPat(sent);
+    if (saved.source === 'pat') return this.hostRefusedFresh(sent) ? 'host-refused' : this.recoverPat(sent);
     if (saved.grant.refreshToken && this.dueForRefresh(saved)) {
       const t = await this.refresh(saved);
       if (!t) return 'expired';
       // Same token: the refresh failed transiently and the sign-in stays.
       return t !== sent ? 'retry' : 'host-refused';
     }
-    const hr = this.hostRefused;
-    if (hr && hr.token === sent && this.now() - hr.at < HOST_REFUSED_TTL_MS) return 'host-refused';
+    if (this.hostRefusedFresh(sent)) return 'host-refused';
     // Only a token GitHub rejects is renewed; otherwise a host that refuses valid tokens would rotate it on every 401.
     try {
       await this.github.probe(sent);
@@ -794,6 +793,11 @@ export class IdentityService {
     return 'expired';
   }
 
+  private hostRefusedFresh(token: string): boolean {
+    const hr = this.hostRefused;
+    return !!hr && hr.token === token && this.now() - hr.at < HOST_REFUSED_TTL_MS;
+  }
+
   /** A PAT GitHub rejects is tombstoned, never removed from the Vault; the device token, if any, takes over. */
   private async recoverPat(pat: string): Promise<RecoverResult> {
     const sha = sha256(pat);
@@ -805,7 +809,10 @@ export class IdentityService {
       return 'host-refused';
     }
     await this.serial(() => this.recordProbe(sha, p, r, false));
-    if (r.ok) return 'host-refused';
+    if (r.ok) {
+      this.hostRefused = { token: pat, at: this.now() };
+      return 'host-refused';
+    }
     const next = await this.settled();
     if (this.patRejected === sha) this.emit({ cause: 'revoked', signedIn: next !== null });
     return next && next.token !== pat ? 'retry' : 'expired';

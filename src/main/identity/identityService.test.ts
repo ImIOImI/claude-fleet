@@ -1181,6 +1181,15 @@ describe('IdentityService vault PAT', () => {
     expect(await s.svc.bearerToken()).toBe(PAT);
   });
 
+  it('recover: a host-refused PAT GitHub accepts is reused for a minute', async () => {
+    const s = await deviceThenPat();
+    expect(await s.svc.bearerToken()).toBe(PAT);
+    s.github.probe.mockClear();
+    expect(await s.svc.recover(PAT)).toBe('host-refused');
+    expect(await s.svc.recover(PAT)).toBe('host-refused');
+    expect(s.github.probe).toHaveBeenCalledOnce();
+  });
+
   it('recover: GitHub unreachable keeps the PAT without a backoff', async () => {
     const s = await deviceThenPat();
     expect(await s.svc.bearerToken()).toBe(PAT);
