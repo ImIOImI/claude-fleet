@@ -840,12 +840,132 @@ describe('IdentityService expiring tokens', () => {
     expect(await s.svc.bearerToken()).toBe('ghu_first');
   });
 
-  it('recover refreshes a rejected expiring token and says retry, once', async () => {
+  it('recover refreshes an expiring token only when GitHub rejects it, and says retry, once', async () => {
     const s = setup({ polls: [EXPIRING], refreshes: [grant(2, HOUR)] });
     await signIn(s);
     s.advance(HOUR);
+    s.setProbe(new IdentityError('unauthorized', 'bad credentials', 401));
     expect(await Promise.all([s.svc.recover('ghu_first'), s.svc.recover('ghu_first')])).toEqual(['retry', 'retry']);
     expect(await s.svc.bearerToken()).toBe('ghu_2');
+    expect(s.github.refresh).toHaveBeenCalledTimes(1);
+  });
+
+  it('recover on a fresh token GitHub accepts is host-refused every time, with no refresh', async () => {
+    const s = setup({ polls: [EXPIRING], refreshes: [grant(2, HOUR), grant(3, HOUR), grant(4, HOUR)] });
+    await signIn(s);
+    const verdicts: string[] = [];
+    for (let i = 0; i < 5; i++) {
+      verdicts.push(await s.svc.recover((await s.svc.bearerToken())!));
+      s.advance(1000);
+    }
+    expect(verdicts).toEqual(Array(5).fill('host-refused'));
+    expect(s.github.refresh).not.toHaveBeenCalled();
+    expect(await s.svc.bearerToken()).toBe('ghu_first');
+  });
+
+  it('recover on a token due for refresh refreshes without asking GitHub first', async () => {
+    const s = setup({ polls: [EXPIRING], refreshes: [grant(2, 8 * HOUR)] });
+    await signIn(s);
+    s.advance(8 * HOUR - 5 * 60_000);
+    s.github.probe.mockClear();
+    s.github.refresh.mockClear();
+    // bearerToken would refresh first; recover must cope with a caller holding the old one.
+    expect(await s.svc.recover('ghu_first')).toBe('retry');
+    expect(s.github.probe).not.toHaveBeenCalled();
+    expect(s.github.refresh).toHaveBeenCalledTimes(1);
+  });
+
+  it('recover: GitHub rejects the token and the refresh fails, so it is cleared with a notice', async () => {
+    const s = setup({ polls: [EXPIRING], refreshes: [new DeviceFlowError('expired', 'gone')] });
+    await signIn(s);
+    s.advance(HOUR);
+    s.setProbe(new IdentityError('unauthorized', 'bad credentials', 401));
+    const seen: unknown[] = [];
+    s.svc.onChange((c) => seen.push(c));
+    expect(await s.svc.recover('ghu_first')).toBe('expired');
+    expect(seen).toEqual([{ cause: 'revoked', signedIn: false }]);
+    const st = await s.svc.status();
+    expect(st.signedIn).toBe(false);
+    expect(st.notice).toMatch(/Sign in again/);
+  });
+
+  it('does not refresh again within MIN_REFRESH_INTERVAL_MS of a refresh, unless the token has expired', async () => {
+    const short = (n: number, at: number): TokenGrant => ({ ...grant(n, at), expiresAt: at + 12 * 60_000 });
+    const s = setup({ polls: [{ ...EXPIRING, expiresAt: 5000 + 12 * 60_000 }], refreshes: [short(2, 5000 + 2 * 60_000), short(3, 5000 + 14 * 60_000)] });
+    await signIn(s);
+    s.advance(2 * 60_000);
+    expect(await s.svc.bearerToken()).toBe('ghu_2');
+    s.advance(3 * 60_000);
+    expect(await s.svc.bearerToken()).toBe('ghu_2');
+    expect(s.github.refresh).toHaveBeenCalledTimes(1);
+    s.advance(7 * 60_000);
+    expect(await s.svc.bearerToken()).toBe('ghu_3');
+    expect(s.github.refresh).toHaveBeenCalledTimes(2);
+  });
+
+  it('a network failure after expiry keeps the sign-in and the refresh token through the retry window', async () => {
+    for (const err of [new DeviceFlowError('network', 'offline'), new DeviceFlowError('unexpected', 'GitHub answered HTTP 200 without JSON')]) {
+      const s = setup({ polls: [EXPIRING], refreshes: [err] });
+      await signIn(s);
+      s.advance(9 * HOUR);
+      expect(await s.svc.bearerToken()).toBe('ghu_first');
+      s.advance(1000);
+      expect(await s.svc.bearerToken()).toBe('ghu_first');
+      expect(s.github.refresh).toHaveBeenCalledTimes(1);
+      const st = await s.svc.status();
+      expect(st.signedIn).toBe(true);
+      expect(st.notice).toBeNull();
+      expect(s.vault.store.get('identity:github|REFRESH')).toContain('ghr_first');
+    }
+  });
+
+  it('retries a network-failed refresh after REFRESH_RETRY_MS', async () => {
+    const s = setup({ polls: [EXPIRING], refreshes: [new DeviceFlowError('network', 'offline'), grant(2, 9 * HOUR)] });
+    await signIn(s);
+    s.advance(9 * HOUR);
+    expect(await s.svc.bearerToken()).toBe('ghu_first');
+    s.advance(60_000);
+    expect(await s.svc.bearerToken()).toBe('ghu_2');
+  });
+
+  it('a refused refresh token is dropped, not retried, and the token signs out at expiry', async () => {
+    const timers: Array<{ fn: () => void; ms: number }> = [];
+    const s = setup({ polls: [EXPIRING], refreshes: [new DeviceFlowError('expired', 'gone')], schedule: (fn, ms) => (timers.push({ fn, ms }), () => undefined) });
+    await signIn(s);
+    s.advance(8 * HOUR - 5 * 60_000);
+    expect(await s.svc.bearerToken()).toBe('ghu_first');
+    expect(s.vault.store.get('identity:github|REFRESH')).not.toContain('ghr_first');
+    s.advance(2 * 60_000);
+    expect(await s.svc.bearerToken()).toBe('ghu_first');
+    expect(s.github.refresh).toHaveBeenCalledTimes(1);
+    expect(timers.at(-1)!.ms).toBe(5 * 60_000);
+    s.advance(3 * 60_000);
+    timers.at(-1)!.fn();
+    await expect.poll(async () => (await s.svc.status()).signedIn).toBe(false);
+  });
+
+  it('an expiring token without a refresh token signs out on time', async () => {
+    const timers: Array<{ fn: () => void; ms: number }> = [];
+    const s = setup({ polls: [{ ...EXPIRING, refreshToken: undefined, refreshExpiresAt: undefined }], schedule: (fn, ms) => (timers.push({ fn, ms }), () => undefined) });
+    await signIn(s);
+    expect(timers.at(-1)!.ms).toBe(8 * HOUR);
+    s.advance(8 * HOUR);
+    timers.at(-1)!.fn();
+    await expect.poll(async () => (await s.svc.status()).signedIn).toBe(false);
+  });
+
+  it('a caller holding a rotated token does not send the spent refresh token', async () => {
+    const s = setup({ polls: [EXPIRING], refreshes: [grant(2, 8 * HOUR), grant(3, 8 * HOUR)] });
+    await signIn(s);
+    s.advance(8 * HOUR);
+    // Both callers read the stored pair before either refresh starts.
+    const a = s.svc.bearerToken();
+    const b = s.svc.bearerToken();
+    expect(await a).toBe('ghu_2');
+    expect(await b).toBe('ghu_2');
+    expect(s.github.refresh.mock.calls.map((c) => c[1])).toEqual(['ghr_first']);
+    // A recover for the old token after the refresh landed is a plain retry.
+    expect(await s.svc.recover('ghu_first')).toBe('retry');
     expect(s.github.refresh).toHaveBeenCalledTimes(1);
   });
 

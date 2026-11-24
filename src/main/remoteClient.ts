@@ -6,6 +6,7 @@ import WebSocket from 'ws';
 import { MAX_FRAME_PAYLOAD } from './broker.js';
 import type { Tier } from './identity/grants.js';
 import { redactSecrets } from './identity/redact.js';
+import { AUTH_MISSING, AUTH_RECENTLY_REJECTED, AUTH_REJECTED } from './identity/hostAuthErrors.js';
 import { normalizeHostUrl, oneLine, safeLogin, wsUrl } from './remoteUrl.js';
 import { SEARCH_UNAVAILABLE } from '../preload/federation.js';
 import { PUBLISH_MAX_BODY, SESSION_UUID_RE, type PublishAck, type PublishBatch } from './publish/protocol.js';
@@ -159,9 +160,6 @@ async function readCapped(res: Response, cap: number, abort: () => void): Promis
   return Buffer.concat(chunks).toString('utf8');
 }
 
-/** Host 401 bodies (src/host/auth.ts). */
-const HOST_NO_TOKEN = 'missing or malformed bearer token';
-const HOST_REJECTED = /^token (recently )?rejected/;
 /** Enough of a refusal body to read its reason. */
 const MAX_REFUSAL_BODY = 4096;
 
@@ -173,12 +171,12 @@ function noTokenText(url: string): string {
 }
 
 function unauthorized(url: string, text: string): RemoteError {
-  if (text === HOST_NO_TOKEN) {
+  if (text === AUTH_MISSING) {
     const e = new RemoteError('unauthorized', `${noTokenText(url)}, so signing in again won't help`, 401);
     noTokenSent.add(e);
     return e;
   }
-  if (HOST_REJECTED.test(text)) return new RemoteError('unauthorized', 'GitHub rejected your sign-in (expired or revoked); sign in again (Settings → Account)', 401);
+  if (text === AUTH_REJECTED || text === AUTH_RECENTLY_REJECTED) return new RemoteError('unauthorized', 'GitHub rejected your sign-in (expired or revoked); sign in again (Settings → Account)', 401);
   return new RemoteError('unauthorized', `${url} refused your GitHub sign-in (HTTP 401)`, 401);
 }
 

@@ -9,13 +9,14 @@ import { MAX_FRAME_PAYLOAD } from '../main/broker.js';
 import { VERIFY_TTL_MS } from '../main/identity/verifyCache.js';
 import { PUBLISH_MAX_BODY } from '../main/publish/protocol.js';
 import { ownerKey, type AttachHub, type Principal } from './attachHub.js';
-import { AUTH_MISSING, authenticate, authReason, bearerToken, type AuthContext, type AuthResult } from './auth.js';
+import { authenticate, authReason, bearerToken, type AuthContext, type AuthResult } from './auth.js';
 import type { HostWorkspaceInfo } from './config.js';
 import type { EventHub } from './events.js';
 import type { LeaseState } from './lease.js';
 import type { Logger } from './log.js';
 import type { MeshState } from './mesh.js';
 import type { PublishRoute, RouteReply } from './publishRoute.js';
+import { AUTH_MISSING } from '../main/identity/hostAuthErrors.js';
 import { clientAddress, RejectionBudget, UNAUTH_LIMIT, UnauthLimiter, type UnauthLimitOptions } from './rateLimit.js';
 import { dispatchRpc, type RpcRegistry } from './rpc.js';
 

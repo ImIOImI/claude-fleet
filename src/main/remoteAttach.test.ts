@@ -100,6 +100,21 @@ describe('attachRemotePty', () => {
     expect(out.text()).toMatch(notice);
   });
 
+  it('reports a 4401 close as an unauthorized end, and a detach as none', async () => {
+    const { host, client } = await rig(['s1']);
+    const d = await attachRemotePty({ client: client(READER), sessionId: 's1', cols: 80, rows: 24, canCreate: false });
+    const dOut = collect(d);
+    d.detach();
+    await expect.poll(() => dOut.ended()).toBe(true);
+    expect(d.endReason?.()).toBeUndefined();
+    const h = await attachRemotePty({ client: client(READER), sessionId: 's1', cols: 80, rows: 24, canCreate: false });
+    const out = collect(h);
+    host.halt(4401, 'x');
+    await expect.poll(() => out.ended()).toBe(true);
+    expect(h.endReason?.()).toBe('unauthorized');
+    expect(out.text()).toMatch(/reconnect/i);
+  });
+
   it('a detach adds no notice', async () => {
     const { client } = await rig(['s1']);
     const h = await attachRemotePty({ client: client(READER), sessionId: 's1', cols: 80, rows: 24, canCreate: false });

@@ -7,6 +7,7 @@ import { person, TOKEN } from '../host/testFakes.js';
 import { startTestHost, TEST_WORKSPACE_ID } from '../host/testHost.js';
 import { makeScrubber } from './publish/scrub.js';
 import type { PublishRoute } from '../host/publishRoute.js';
+import { IdentityService } from './identity/identityService.js';
 import { MAX_RPC_BODY, MAX_SMALL_BODY, oneLine, reconnectDelay, RemoteClient, RemoteError, type RemoteDisconnect, type RemoteEvent } from './remoteClient.js';
 
 const cleanups: Array<() => Promise<void> | void> = [];
@@ -532,6 +533,60 @@ describe('RemoteClient sign-in recovery', () => {
         expect(err.message).not.toMatch(/sign in again/i);
       }
     }
+  });
+
+  it('a host that refuses a token GitHub accepts does not set off a refresh and reconnect loop', async () => {
+    const H = 3_600_000;
+    const body = JSON.stringify({ error: 'token rejected by GitHub' });
+    let attempts = 0;
+    const { url } = await rawServer(
+      (_req, res) => {
+        attempts++;
+        res.writeHead(401, { 'Content-Type': 'application/json' });
+        res.end(body);
+      },
+      (_req, socket) => {
+        attempts++;
+        socket.end(`HTTP/1.1 401 Unauthorized\r\nContent-Type: application/json\r\nContent-Length: ${body.length}\r\nConnection: close\r\n\r\n${body}`);
+      }
+    );
+    const store = new Map<string, string>();
+    let n = 0;
+    const grant = (t: string) => ({ token: `ghu_${t}`.padEnd(40, 'x'), scopes: [], expiresAt: Date.now() + 8 * H, refreshToken: `ghr_${t}`, refreshExpiresAt: Date.now() + 1000 * H });
+    const identity = new IdentityService({
+      vault: {
+        isVaultAvailable: async () => true,
+        getSecret: async (sc, k) => store.get(`${sc}|${k}`) ?? null,
+        setSecret: async (sc, k, v) => void store.set(`${sc}|${k}`, v),
+        deleteAllForWorkspace: async () => store.clear()
+      },
+      clientId: async () => 'Iv1.testclient',
+      github: {
+        requestDeviceCode: async () => ({ deviceCode: 'dc', userCode: 'U', verificationUri: 'https://github.com/login/device', expiresAt: Date.now() + H, intervalMs: 0 }),
+        pollDeviceToken: async () => ({ status: 'done', ...grant('first') }),
+        probe: async () => ({ identity: { provider: 'github' as const, kind: 'user' as const, login: 'alice', id: 1, name: null, avatarUrl: null, teams: [] }, scopes: [], sso: null }),
+        refresh: async () => grant(String(++n))
+      },
+      schedule: () => () => undefined
+    });
+    await identity.signInStart();
+    expect((await identity.signInPoll()).state).toBe('done');
+    const s = manualSchedule();
+    const c = new RemoteClient({ url, token: () => identity.bearerToken(), recover: (t) => identity.recover(t), schedule: s.schedule });
+    let resets = 0;
+    identity.onChange((e) => {
+      if (e.cause === 'token-refreshed') resets++, c.resetAuth();
+    });
+    const off = c.subscribe(() => undefined);
+    cleanups.push(off);
+    await expect.poll(() => s.delays.length).toBe(1);
+    s.fire();
+    await expect.poll(() => s.delays.length).toBe(2);
+    await new Promise((r) => setTimeout(r, 100));
+    expect(n).toBe(0);
+    expect(resets).toBe(0);
+    expect(attempts).toBe(2);
+    expect(s.delays).toHaveLength(2);
   });
 
   it('resetAuth reconnects a subscription at once instead of waiting out the backoff', async () => {

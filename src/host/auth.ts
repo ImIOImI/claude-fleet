@@ -7,6 +7,7 @@ import { createGithubProvider } from '../main/identity/githubProvider.js';
 import { resolveTier, type GrantConfig, type MachineRule, type Tier } from '../main/identity/grants.js';
 import { IdentityError, type Identity, type IdentityProvider } from '../main/identity/types.js';
 import { withVerifyCache } from '../main/identity/verifyCache.js';
+import { AUTH_MISSING, AUTH_RECENTLY_REJECTED, AUTH_REJECTED } from '../main/identity/hostAuthErrors.js';
 import type { HostConfig } from './config.js';
 import type { Logger } from './log.js';
 
@@ -25,10 +26,6 @@ export const githubProviderFactory: ProviderFactory = (machines) => createGithub
 
 export const NEGATIVE_TTL_MS = 30_000;
 
-/** The three 401 reasons. Logged and sent as the error body; the desktop branches on them. */
-export const AUTH_MISSING = 'missing or malformed bearer token';
-export const AUTH_REJECTED = 'token rejected by GitHub';
-export const AUTH_RECENTLY_REJECTED = 'token recently rejected';
 
 /** A refusal's fixed class for the request log: never a token, and no login. */
 export function authReason(error: string): string {

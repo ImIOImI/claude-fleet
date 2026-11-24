@@ -2241,7 +2241,7 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
   remoteToken = () => identity.bearerToken();
   remoteRecover = (t) => identity.recover(t);
   remoteLogin = () => identity.currentLogin();
-  void identity.startRefresh();
+  identity.startRefresh().catch((err: unknown) => logError({ source: 'main', level: 'warn', type: 'identity-start-refresh', message: String(err) }));
   identity.onChange(({ cause, signedIn }) => {
     if (cause === 'sign-in' || cause === 'token-refreshed') remoteBackend.reconnect();
     for (const w of BrowserWindow.getAllWindows()) {
@@ -2422,7 +2422,7 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
         }
       });
       handle.stream.on('end', () => {
-        win?.webContents.send(`pty:end:${ptyHandleId}`);
+        win?.webContents.send(`pty:end:${ptyHandleId}`, { reason: handle.endReason?.() });
         ptySessions.delete(ptyHandleId);
         handleWantedSize.delete(ptyHandleId);
         widthMonitor.forget(ptyHandleId);

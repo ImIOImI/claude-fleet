@@ -17,7 +17,7 @@ export type { GithubClientIdSetting, GithubClientIdSource } from './githubClient
 export type { AccountStatus, AccountIdentity, AccountSso, SignInStart, SignInPoll } from './identityTypes';
 import type { OwnerCostRow, SessionOwner } from './sessionOwner';
 export type { OwnerCostRow, SessionOwner } from './sessionOwner';
-import type { RemoteAddOptions, RemoteDrain, RemoteLiveSession, RemoteProbe } from './remoteTypes';
+import type { PtyEndInfo, RemoteAddOptions, RemoteDrain, RemoteLiveSession, RemoteProbe } from './remoteTypes';
 import type { StoreChoice, StoreSettings, StoreStatus } from './storeTypes';
 import type { FederatedSearchResult, RemoteSessionsResult, SessionCursor } from './federation';
 import type { BackfillCount, BackfillResult, UnpublishResult } from './publish';
@@ -30,7 +30,7 @@ export type {
 } from './remoteAutomations';
 export type { BackfillCount, BackfillResult, UnpublishResult, WorkspacePublish } from './publish';
 export type { ImportProgress, StoreChoice, StorePhase, StoreSettings, StoreStatus } from './storeTypes';
-export type { RemoteAddOptions, RemoteDrain, RemoteLiveSession, RemoteProbe, RemoteProbeOk, RemoteProbeErr, RemoteProbeErrorKind, RemoteTier } from './remoteTypes';
+export type { PtyEndInfo, RemoteAddOptions, RemoteDrain, RemoteLiveSession, RemoteProbe, RemoteProbeOk, RemoteProbeErr, RemoteProbeErrorKind, RemoteTier } from './remoteTypes';
 export type { ExtraMount } from './extraMounts';
 
 /** Outcome of a `pty:resize`. Lives here because preload is the IPC contract
@@ -894,9 +894,9 @@ const api = {
       ipcRenderer.on(channel, handler);
       return () => ipcRenderer.removeListener(channel, handler);
     },
-    onEnd: (sessionId: string, cb: () => void) => {
+    onEnd: (sessionId: string, cb: (info: PtyEndInfo) => void) => {
       const channel = `pty:end:${sessionId}`;
-      const handler = () => cb();
+      const handler = (_e: IpcRendererEvent, info?: PtyEndInfo) => cb(info ?? {});
       ipcRenderer.on(channel, handler);
       return () => ipcRenderer.removeListener(channel, handler);
     }

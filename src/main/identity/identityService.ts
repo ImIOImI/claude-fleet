@@ -18,6 +18,8 @@ export const REFRESH_KEY = 'REFRESH';
 export const REFRESH_LEAD_MS = 10 * 60_000;
 /** After a failed refresh, wait this long before trying again. */
 export const REFRESH_RETRY_MS = 60_000;
+/** Minimum gap between successful refreshes, except once the token has expired. */
+export const MIN_REFRESH_INTERVAL_MS = 5 * 60_000;
 const MAX_TIMER_MS = 2 ** 31 - 1;
 
 const REVOKED_NOTICE = 'GitHub no longer accepts the saved sign-in (revoked or expired). Sign in again.';
@@ -54,7 +56,7 @@ export interface IdentityServiceDeps {
 /** Fired after the vault write settles, only when the stored token changed. Never carries the token. */
 export type { IdentityChange };
 export type IdentityChangeCause = IdentityChange['cause'];
-/** After a host 401: `retry` with the stored token; `expired` (GitHub refused it, now cleared); or `host-refused` (GitHub still accepts it). */
+/** After a host 401: `retry` with the stored token; `expired` (GitHub refused it and it couldn't be renewed, now cleared); or `host-refused` (GitHub still accepts it, or couldn't be asked). */
 export type RecoverResult = 'retry' | 'expired' | 'host-refused';
 
 interface Profile {
@@ -200,7 +202,9 @@ export class IdentityService {
   private chain: Promise<unknown> = Promise.resolve();
   private readonly schedule: (fn: () => void, ms: number) => () => void;
   private refreshing: Promise<string | null> | null = null;
-  private refreshFailedAt = -Infinity;
+  /** The last failed refresh; `definitive` when GitHub refused the refresh token. */
+  private refreshFailed: { at: number; definitive: boolean } | null = null;
+  private lastRefreshAt = -Infinity;
   private cancelRefresh: (() => void) | null = null;
   private readonly listeners = new Set<(c: IdentityChange) => void>();
   /** One recovery per rejected token; concurrent 401s share it. */
@@ -333,18 +337,24 @@ export class IdentityService {
   private scheduleRefresh(s: Saved): void {
     this.cancelRefresh?.();
     this.cancelRefresh = null;
-    if (s.grant.expiresAt === undefined || !s.grant.refreshToken) return;
-    const ms = Math.min(MAX_TIMER_MS, Math.max(0, s.grant.expiresAt - REFRESH_LEAD_MS - this.now()));
+    if (s.grant.expiresAt === undefined) return;
+    // Without a refresh token the timer fires at expiry, so the sign-out shows on time.
+    const at = s.grant.refreshToken ? s.grant.expiresAt - REFRESH_LEAD_MS : s.grant.expiresAt;
+    const ms = Math.min(MAX_TIMER_MS, Math.max(0, at - this.now()));
     this.cancelRefresh = this.schedule(() => void this.current().catch(() => undefined), ms);
   }
 
-  /** One refresh at a time. Resolves to the token to use now, or null once an expired token is cleared. */
-  private refresh(s: Saved): Promise<string | null> {
-    this.refreshing ??= this.refreshNow(s).finally(() => (this.refreshing = null));
+  /** One refresh at a time. Resolves to the token to use now, or null once an expired token is cleared.
+   *  `force` (GitHub rejected the token) skips the minimum interval. */
+  private refresh(s: Saved, force = false): Promise<string | null> {
+    this.refreshing ??= this.refreshNow(s, force).finally(() => (this.refreshing = null));
     return this.refreshing;
   }
 
-  private async refreshNow(s: Saved): Promise<string | null> {
+  private async refreshNow(stale: Saved, force: boolean): Promise<string | null> {
+    // A caller holding an older pair must not send a refresh token that was already spent.
+    const s = await this.settled();
+    if (s?.token !== stale.token) return s?.token ?? null;
     const expired = s.grant.expiresAt !== undefined && this.now() >= s.grant.expiresAt;
     const giveUp = async (): Promise<string | null> => {
       if (!expired) return s.token;
@@ -353,24 +363,38 @@ export class IdentityService {
     };
     const rt = s.grant.refreshToken;
     if (!rt || !this.github.refresh || (s.grant.refreshExpiresAt !== undefined && this.now() >= s.grant.refreshExpiresAt)) return giveUp();
-    if (this.now() - this.refreshFailedAt < REFRESH_RETRY_MS) return expired ? giveUp() : s.token;
+    const failed = this.refreshFailed;
+    if (failed && this.now() - failed.at < REFRESH_RETRY_MS) return failed.definitive ? giveUp() : s.token;
+    if (!expired && !force && this.now() - this.lastRefreshAt < MIN_REFRESH_INTERVAL_MS) return s.token;
     const clientId = await this.clientId();
     if (!clientId) return giveUp();
     let g: TokenGrant;
     try {
       g = await this.github.refresh(clientId, rt);
     } catch (err) {
-      this.refreshFailedAt = this.now();
-      // An outage is not a rejection: keep the token and let the host decide.
-      if (err instanceof DeviceFlowError && err.kind === 'network') return s.token;
+      // An outage (or a captive portal's non-JSON page) is not a rejection: keep the sign-in.
+      const transient = err instanceof DeviceFlowError && (err.kind === 'network' || err.kind === 'unexpected');
+      this.refreshFailed = { at: this.now(), definitive: !transient };
+      if (transient) return s.token;
+      if (!expired) await this.dropRefreshToken(s);
       return giveUp();
     }
     const next: Saved = { token: g.token, profile: s.profile, grant: grantOf(g) };
     if (!(await this.replace(s.token, next))) return (await this.settled())?.token ?? null;
-    this.refreshFailedAt = -Infinity;
+    this.refreshFailed = null;
+    this.lastRefreshAt = this.now();
     this.scheduleRefresh(next);
     this.emit({ cause: 'token-refreshed', signedIn: true });
     return g.token;
+  }
+
+  /** GitHub refused the refresh token: forget it and sign out when the access token expires. */
+  private async dropRefreshToken(s: Saved): Promise<void> {
+    const grant: Grant = { ...s.grant };
+    delete grant.refreshToken;
+    delete grant.refreshExpiresAt;
+    const next: Saved = { ...s, grant };
+    if (await this.replace(s.token, next)) this.scheduleRefresh(next);
   }
 
   /** The stored pair, refreshed first when its access token is about to expire. */
@@ -518,7 +542,7 @@ export class IdentityService {
       const now = await this.settled();
       if (now?.token !== token) return { state: 'error', message: CANCELLED };
     }
-    this.refreshFailedAt = -Infinity;
+    this.refreshFailed = null;
     this.scheduleRefresh(saved);
     this.emit({ cause: 'sign-in', signedIn: true });
     return { state: 'done', status: await this.toStatus(saved) };
@@ -562,19 +586,25 @@ export class IdentityService {
     const saved = await this.settled();
     if (!saved) return 'expired';
     if (saved.token !== sent) return 'retry';
-    if (saved.grant.refreshToken) {
+    if (saved.grant.refreshToken && this.dueForRefresh(saved)) {
       const t = await this.refresh(saved);
-      if (t && t !== sent) return 'retry';
       if (!t) return 'expired';
+      // Same token: the refresh failed transiently and the sign-in stays.
+      return t !== sent ? 'retry' : 'host-refused';
     }
+    // Only a token GitHub rejects is renewed; otherwise a host that refuses valid tokens would rotate it on every 401.
     try {
       await this.github.probe(sent);
       return 'host-refused';
     } catch (err) {
       if (!(err instanceof IdentityError) || err.kind !== 'unauthorized') return 'host-refused';
-      if (await this.revoke(sent)) this.notice = REVOKED_NOTICE;
-      return 'expired';
     }
+    if (saved.grant.refreshToken) {
+      const t = await this.refresh(saved, true);
+      if (t && t !== sent) return 'retry';
+    }
+    if (await this.revoke(sent)) this.notice = REVOKED_NOTICE;
+    return 'expired';
   }
 
   /** The signed-in login; remote.ts keys its /whoami throttle by it. */

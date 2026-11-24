@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import type { RemoteProbeErr, RemoteProbeOk } from '../../preload/remoteTypes';
 import { readFileSync } from 'node:fs';
-import { applyProbe, canEndSession, drainBanner, drainEnded, resumesAfterDrain, sessionEndKind, ipcFailure, raceTimeout, canStartSessions, defaultTabOnTierChange, forgetText, mineIds, CHECKING_STATUS, joinableSessions, paneRules, remoteChip, remotePane, unreachableRemoteNames, canType, ipcErrorText, probeErrorText, remoteFormView, tierTitle, unreachableBanner, type RemoteFormState } from './remoteView';
+import { AUTO_REATTACH_GAP_MS, reattachAfterAuthEnd, applyProbe, canEndSession, drainBanner, drainEnded, resumesAfterDrain, sessionEndKind, ipcFailure, raceTimeout, canStartSessions, defaultTabOnTierChange, forgetText, mineIds, CHECKING_STATUS, joinableSessions, paneRules, remoteChip, remotePane, unreachableRemoteNames, canType, ipcErrorText, probeErrorText, remoteFormView, tierTitle, unreachableBanner, type RemoteFormState } from './remoteView';
 
 const OK: RemoteProbeOk = {
   ok: true,
@@ -318,5 +318,21 @@ describe('tab resume after a drain', () => {
     expect(resumesAfterDrain(1, false)).toBe(false);
     expect(resumesAfterDrain(null, true)).toBe(false);
     expect(resumesAfterDrain(undefined, true)).toBe(false);
+  });
+});
+
+describe('reattachAfterAuthEnd', () => {
+  const base = { remote: true, reason: 'unauthorized' as const, signedIn: true, lastAutoAt: null, now: 1_000_000 };
+  it('re-attaches a remote tab the host closed with 4401 while signed in', () => {
+    expect(reattachAfterAuthEnd(base)).toBe(true);
+  });
+  it('not for a local tab, another end reason, or when signed out', () => {
+    expect(reattachAfterAuthEnd({ ...base, remote: false })).toBe(false);
+    expect(reattachAfterAuthEnd({ ...base, reason: undefined })).toBe(false);
+    expect(reattachAfterAuthEnd({ ...base, signedIn: false })).toBe(false);
+  });
+  it('at most once per AUTO_REATTACH_GAP_MS, so a host that keeps closing it cannot loop', () => {
+    expect(reattachAfterAuthEnd({ ...base, lastAutoAt: base.now - AUTO_REATTACH_GAP_MS + 1 })).toBe(false);
+    expect(reattachAfterAuthEnd({ ...base, lastAutoAt: base.now - AUTO_REATTACH_GAP_MS })).toBe(true);
   });
 });
