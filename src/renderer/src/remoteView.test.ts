@@ -322,7 +322,7 @@ describe('tab resume after a drain', () => {
 });
 
 describe('reattachAfterAuthEnd', () => {
-  const base = { remote: true, reason: 'unauthorized' as const, signedIn: true, lastAutoAt: null, now: 1_000_000 };
+  const base = { remote: true, reason: 'unauthorized' as const, signedIn: true, lastAutoAt: null, now: 1_000_000, attaching: false, ended: true };
   it('re-attaches a remote tab the host closed with 4401 while signed in', () => {
     expect(reattachAfterAuthEnd(base)).toBe(true);
   });
@@ -330,6 +330,10 @@ describe('reattachAfterAuthEnd', () => {
     expect(reattachAfterAuthEnd({ ...base, remote: false })).toBe(false);
     expect(reattachAfterAuthEnd({ ...base, reason: undefined })).toBe(false);
     expect(reattachAfterAuthEnd({ ...base, signedIn: false })).toBe(false);
+  });
+  it('not while another attach is in flight, or once the tab is no longer ended (M5)', () => {
+    expect(reattachAfterAuthEnd({ ...base, attaching: true })).toBe(false);
+    expect(reattachAfterAuthEnd({ ...base, ended: false })).toBe(false);
   });
   it('at most once per AUTO_REATTACH_GAP_MS, so a host that keeps closing it cannot loop', () => {
     expect(reattachAfterAuthEnd({ ...base, lastAutoAt: base.now - AUTO_REATTACH_GAP_MS + 1 })).toBe(false);

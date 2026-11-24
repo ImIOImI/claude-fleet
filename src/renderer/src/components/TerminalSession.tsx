@@ -32,6 +32,7 @@ import {
   reattachOnAuthChange,
   remoteCard,
   remoteEndKind,
+  retryStaleSignInAttach,
   shownRemoteBlock,
   skipAttach,
   type TabEnd
@@ -204,6 +205,8 @@ export function TerminalSession({
   restartingRef.current = restarting;
   const remoteBlockRef = useRef(remoteBlock);
   remoteBlockRef.current = remoteBlock;
+  const authEpochRef = useRef(authEpoch);
+  authEpochRef.current = authEpoch;
   // From the attach effect's start until pty:attach settles; auth changes don't reattach meanwhile.
   const attachingRef = useRef(false);
   const endedInDrainRef = useRef(false);
@@ -224,6 +227,9 @@ export function TerminalSession({
   // surfaces the error text for the latter so users can act on it
   // instead of staring at a generic "session ended" card.
   const [endedReason, setEndedReason] = useState<TabEnd | null>(null);
+  // Also set by pty:end itself, so an IPC reply that beats the re-render reads it.
+  const endedRef = useRef(endedReason);
+  endedRef.current = endedReason;
 
   // The live pty handle id for the current attach, mirrored out of the effect
   // closure so the loadout-reload handler can close it. Null between attaches.
@@ -240,7 +246,9 @@ export function TerminalSession({
     if (!hostRef.current) return;
     const host = hostRef.current;
     setEndedReason(null);
+    endedRef.current = null;
     attachingRef.current = true;
+    const attachEpoch = authEpochRef.current;
     onLifecycleChange?.(sessionId, 'live');
 
     // Declared up front so the safeFit helper can read it. The cleanup
@@ -689,7 +697,8 @@ export function TerminalSession({
               .status()
               .then(({ signedIn }) => {
                 const now = Date.now();
-                if (disposed || !reattachAfterAuthEnd({ remote: true, reason, signedIn, lastAutoAt: lastAutoReattachRef.current, now })) return;
+                const ok = reattachAfterAuthEnd({ remote: true, reason, signedIn, lastAutoAt: lastAutoReattachRef.current, now, attaching: attachingRef.current, ended: endedRef.current !== null });
+                if (disposed || !ok) return;
                 lastAutoReattachRef.current = now;
                 setSessionEpoch((e) => e + 1);
               })
@@ -700,6 +709,7 @@ export function TerminalSession({
             setBusy(false);
             const end = remoteEndKind(restartingRef.current, remoteRef.current ? remoteBlockRef.current : null, reason);
             endedInDrainRef.current = end.kind === 'restarting';
+            endedRef.current = end;
             setEndedReason(end);
             onLifecycleChange?.(sessionId, 'ended');
             // Diagnostic: distinguish "claude /exit" from "broker
@@ -754,7 +764,9 @@ export function TerminalSession({
         if (!disposed) {
           // A remote block is fixed card copy; main already logged the transition.
           const block = remoteRef.current ? attachErrorBlock(err) : null;
-          if (block) {
+          if (retryStaleSignInAttach(block, attachEpoch, authEpochRef.current)) {
+            setSessionEpoch((e) => e + 1);
+          } else if (block) {
             setEndedReason({ kind: 'remote', block });
           } else {
             setEndedReason({ kind: 'attach-error', message: msg });
@@ -903,8 +915,6 @@ export function TerminalSession({
   }, [reloadToken, sessionId, workspaceId, onRefreshUnresolved]);
 
   const shown = shownRemoteBlock(remote, endedReason, remoteBlock);
-  const endedRef = useRef(endedReason);
-  endedRef.current = endedReason;
   const prevAuthRef = useRef({ epoch: authEpoch, block: remoteBlock });
   useEffect(() => {
     const prev = prevAuthRef.current;
@@ -1008,10 +1018,12 @@ export function TerminalSession({
         {shown && (() => {
           const c = remoteCard(shown, remoteName ?? 'the host', ssoUrl);
           return (
-            <div className="session-ended-overlay" role="status" aria-label={c.title}>
+            <div className="session-ended-overlay">
               <div className={`session-ended-card remote ${c.tone}`}>
-                <div className="session-ended-title">{c.title}</div>
-                <div className="session-ended-help">{c.body}</div>
+                <div role="status">
+                  <div className="session-ended-title">{c.title}</div>
+                  <div className="session-ended-help">{c.body}</div>
+                </div>
                 {c.action === 'sign-in' && <DeviceCodePanel />}
                 {c.action === 'retry' && (
                   <button className="btn" onClick={() => setSessionEpoch((e) => e + 1)}>

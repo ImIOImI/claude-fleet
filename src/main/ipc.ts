@@ -91,7 +91,7 @@ import {
 import * as vault from './vault.js';
 import { manifestEnvOnWrite } from './migration.js';
 import { assertRendererWorkspaceId } from './vaultScopes.js';
-import { registerVaultIpc, resolveVaultWorkspaceKind, type VaultIpcDeps, type VaultWorkspaceKind } from './vaultIpc.js';
+import { registerVaultIpc, resolveVaultWorkspaceKind, watchPatWrites, type VaultIpcDeps, type VaultWorkspaceKind } from './vaultIpc.js';
 import { isEnvPending, readEnvApplied } from './envApplied.js';
 import { IdentityService } from './identity/identityService.js';
 import { BUILTIN_GITHUB_CLIENT_ID, GITHUB_CLIENT_ID_ENV } from './identity/clientId.js';
@@ -2259,7 +2259,9 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
     manifestKind: async (id) => (await readWorkspaceManifest(id))?.kind ?? null,
     mockWorkspaces: MOCK_MODE ? () => mockDocker.listLiveWorkspaces() : undefined
   });
-  const vaultIpcDeps: VaultIpcDeps = {
+  // Bound once the identity service exists below.
+  let patChanged = <T>(write: () => Promise<T>): Promise<T> => write();
+  const vaultIpcDeps: VaultIpcDeps = watchPatWrites({
     isVaultAvailable: vault.isVaultAvailable,
     listModelEntries: vault.listModelEntries,
     getRootValue: vault.getRootValue,
@@ -2279,7 +2281,7 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
       current: vault.resolveWorkspaceEnv
     }),
     workspaceKind: vaultWorkspaceKind
-  };
+  }, (write) => patChanged(write));
   registerVaultIpc(ipcMain, vaultIpcDeps);
 
   // GitHub sign-in (identity:*). The token stays in the host-only vault scope
@@ -2295,6 +2297,7 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
     clientId: async () => (await readGithubClientId(githubClientId)).value,
     patToken: () => vault.getRootValue('GITHUB_TOKEN')
   });
+  patChanged = (write) => identity.patChanged(write);
   registerIdentityIpc(ipcMain, identity);
   registerGithubClientIdIpc(ipcMain, githubClientId);
   remoteToken = () => identity.bearerToken();

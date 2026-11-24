@@ -126,6 +126,25 @@ describe('remote tab cards (D174–D176)', () => {
     expect(ts()).toMatch(/reason === 'unauthorized' && !isSignInBlock\(remoteBlockRef\.current\)/);
   });
 
+  it('the 4401 one-shot skips a tab that is attaching or no longer ended (M5)', () => {
+    const s = ts();
+    expect(s).toMatch(/attaching: attachingRef\.current, ended: endedRef\.current !== null/);
+    expect(s).toMatch(/endedRef\.current = end;/);
+  });
+
+  it('a sign-in tag from an attach a sign-in overtook attaches again (M6)', () => {
+    const s = ts();
+    expect(s).toMatch(/const attachEpoch = authEpochRef\.current;/);
+    expect(s).toMatch(/retryStaleSignInAttach\(block, attachEpoch, authEpochRef\.current\)/);
+  });
+
+  it('announces the card text only, not the live sign-in panel (M7)', () => {
+    const s = ts();
+    const card = s.slice(s.indexOf('{shown && ('), s.indexOf("{endedReason?.kind === 'natural'"));
+    expect(card).toMatch(/<div className="session-ended-overlay">/);
+    expect(card).toMatch(/<div role="status">\s*<div className="session-ended-title">\{c\.title\}<\/div>\s*<div className="session-ended-help">\{c\.body\}<\/div>\s*<\/div>/);
+  });
+
   it('renders fixed card copy only, never the attach error text', () => {
     const s = ts();
     expect(s).toMatch(/remoteCard\(shown, remoteName \?\? 'the host', ssoUrl\)/);

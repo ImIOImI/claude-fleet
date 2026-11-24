@@ -1,7 +1,7 @@
 // vault:* IPC surface: renderer workspace ids are guarded, remote/unknown
 // workspaces refused for writes, and vault:list never returns secret values.
 import { describe, expect, it } from 'vitest';
-import { registerVaultIpc, resolveVaultWorkspaceKind, type VaultIpcDeps, type VaultWorkspaceKind } from './vaultIpc.js';
+import { registerVaultIpc, resolveVaultWorkspaceKind, watchPatWrites, type VaultIpcDeps, type VaultWorkspaceKind } from './vaultIpc.js';
 import * as model from './vaultModel.js';
 import type { Store } from './vaultModel.js';
 import type { VaultEntry } from '../preload/vaultTypes.js';
@@ -216,5 +216,41 @@ describe('migrated fleet key', () => {
     const list = (await call('vault:list')) as VaultEntry[];
     expect(list.find((e) => e.key === 'GITHUB_TOKEN')?.secret).toBe(true);
     expect(JSON.stringify(list)).not.toContain('ghp_plain');
+  });
+});
+
+describe('watchPatWrites', () => {
+  function rig() {
+    const calls: string[] = [];
+    const watched: string[] = [];
+    const base: Pick<VaultIpcDeps, 'putKey' | 'deleteKey' | 'renameKey'> = {
+      putKey: async (a) => void calls.push(`put ${a.key}`),
+      deleteKey: async (key: string) => void calls.push(`delete ${key}`),
+      renameKey: async (key: string, next: string) => void calls.push(`rename ${key} ${next}`)
+    };
+    const d = watchPatWrites(base, async (write) => {
+      watched.push(calls.length.toString());
+      return write();
+    });
+    return { d, calls, watched };
+  }
+
+  it('routes a write, delete or rename of GITHUB_TOKEN through the identity watch', async () => {
+    const r = rig();
+    await r.d.putKey({ key: 'GITHUB_TOKEN', secret: true, tags: [], rootValue: 'x' });
+    await r.d.deleteKey('GITHUB_TOKEN');
+    await r.d.renameKey('GITHUB_TOKEN', 'OLD_TOKEN');
+    await r.d.renameKey('OTHER', 'GITHUB_TOKEN');
+    expect(r.calls).toEqual(['put GITHUB_TOKEN', 'delete GITHUB_TOKEN', 'rename GITHUB_TOKEN OLD_TOKEN', 'rename OTHER GITHUB_TOKEN']);
+    expect(r.watched).toHaveLength(4);
+  });
+
+  it('leaves other keys alone', async () => {
+    const r = rig();
+    await r.d.putKey({ key: 'AWS_PROFILE', secret: false, tags: [] });
+    await r.d.deleteKey('AWS_PROFILE');
+    await r.d.renameKey('A', 'B');
+    expect(r.calls).toHaveLength(3);
+    expect(r.watched).toEqual([]);
   });
 });

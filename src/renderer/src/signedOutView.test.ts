@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { EMPTY_REMOTE_AUTH, remoteAttachTag, type RemoteAuthState } from '../../preload/remoteAuth';
-import { attachErrorBlock, blockFor, REATTACH_JITTER_MS, reattachJitterMs, reattachOnAuthChange, remoteCard, remoteEndKind, shouldReattach, shownRemoteBlock, signedOutBanner, SIGNED_OUT_BANNER, skipAttach } from './signedOutView';
+import { attachErrorBlock, blockFor, retryStaleSignInAttach, REATTACH_JITTER_MS, reattachJitterMs, reattachOnAuthChange, remoteCard, remoteEndKind, shouldReattach, shownRemoteBlock, signedOutBanner, SIGNED_OUT_BANNER, skipAttach } from './signedOutView';
 
 const W = '01JC0000000000000000000000';
 const out = (reason: 'not-signed-in' | 'expired'): RemoteAuthState => ({ ...EMPTY_REMOTE_AUTH, signedOut: { reason, since: 1 } });
@@ -51,12 +51,23 @@ describe('attach errors (D175)', () => {
 
 describe('tab end and card (D170, D176)', () => {
   it('sign-in blocks beat restarting; restarting beats other blocks', () => {
-    expect(remoteEndKind(true, 'expired')).toEqual({ kind: 'remote', block: 'expired' });
+    expect(remoteEndKind(true, 'expired', 'unauthorized')).toEqual({ kind: 'remote', block: 'expired' });
     expect(remoteEndKind(true, 'unreachable')).toEqual({ kind: 'restarting' });
-    expect(remoteEndKind(false, 'forbidden')).toEqual({ kind: 'remote', block: 'forbidden' });
+    expect(remoteEndKind(false, 'forbidden', 'forbidden')).toEqual({ kind: 'remote', block: 'forbidden' });
     expect(remoteEndKind(false, null)).toEqual({ kind: 'natural' });
     expect(remoteEndKind(true, null)).toEqual({ kind: 'restarting' });
-    expect(remoteEndKind(false, 'not-signed-in')).toEqual({ kind: 'remote', block: 'not-signed-in' });
+    expect(remoteEndKind(false, 'not-signed-in', 'unauthorized')).toEqual({ kind: 'remote', block: 'not-signed-in' });
+    expect(remoteEndKind(false, 'unreachable')).toEqual({ kind: 'remote', block: 'unreachable' });
+  });
+
+  it('an end the host did not close is natural under a sign-in or refusal block, and never reattaches (I3)', () => {
+    for (const b of ['not-signed-in', 'expired', 'host-refused', 'forbidden'] as const) {
+      const end = remoteEndKind(false, b);
+      expect(end).toEqual({ kind: 'natural' });
+      expect(shownRemoteBlock(true, end, b)).toBeNull();
+      expect(reattachOnAuthChange({ remote: true, ended: end, attaching: false, prev: { epoch: 0, block: b }, next: { epoch: 1, block: null } })).toBe(false);
+    }
+    expect(remoteEndKind(true, 'expired')).toEqual({ kind: 'restarting' });
   });
 
   it('a 4401/4403 end with no block yet is natural but marked, so a later block can upgrade it', () => {
@@ -124,5 +135,17 @@ describe('reattachJitterMs', () => {
     expect(d.every((x) => x >= 0 && x < REATTACH_JITTER_MS)).toBe(true);
     expect(reattachJitterMs('tab-3')).toBe(d[3]);
     expect(new Set(d).size).toBeGreaterThan(10);
+  });
+});
+
+describe('retryStaleSignInAttach (M6)', () => {
+  it('retries a sign-in-tagged attach failure only if a sign-in landed during the attach', () => {
+    expect(retryStaleSignInAttach('expired', 0, 1)).toBe(true);
+    expect(retryStaleSignInAttach('not-signed-in', 2, 3)).toBe(true);
+    expect(retryStaleSignInAttach('host-refused', 2, 3)).toBe(true);
+    expect(retryStaleSignInAttach('expired', 1, 1)).toBe(false);
+    expect(retryStaleSignInAttach('unreachable', 0, 1)).toBe(false);
+    expect(retryStaleSignInAttach('forbidden', 0, 1)).toBe(false);
+    expect(retryStaleSignInAttach(null, 0, 1)).toBe(false);
   });
 });

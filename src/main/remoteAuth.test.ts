@@ -150,9 +150,9 @@ describe('RemoteAuthMonitor races', () => {
     const read = deferred<boolean>();
     const r = rig({ signedIn: () => read.p });
     const s = r.m.start();
-    await r.m.identityChanged({ cause: 'sign-in', signedIn: true });
+    const c = r.m.identityChanged({ cause: 'sign-in', signedIn: true });
     read.resolve(false);
-    await s;
+    await Promise.all([s, c]);
     expect(r.m.snapshot().signedOut).toBeNull();
   });
 
@@ -160,10 +160,51 @@ describe('RemoteAuthMonitor races', () => {
     const read = deferred<boolean>();
     const r = rig({ signedIn: () => read.p });
     const s = r.m.start();
-    await r.m.identityChanged({ cause: 'revoked', signedIn: false });
+    const c = r.m.identityChanged({ cause: 'revoked', signedIn: false });
     read.resolve(false);
-    await s;
+    await Promise.all([s, c]);
     expect(r.m.snapshot().signedOut?.reason).toBe('expired');
+  });
+
+  it('a push that lands while start reads the token waits for it, so it carries the signed-out state (M4)', async () => {
+    const read = deferred<boolean>();
+    const r = rig({ signedIn: () => read.p });
+    const s = r.m.start();
+    const o = r.m.observe(W, new RemoteError('unreachable', 'x'));
+    const t = r.m.identityChanged({ cause: 'token-refreshed', signedIn: true });
+    await Promise.resolve();
+    expect(r.sent).toEqual([]);
+    read.resolve(false);
+    await Promise.all([s, o, t]);
+    expect(r.sent.length).toBeGreaterThan(0);
+    expect(r.sent[0]!.conns[W]?.kind).toBe('unreachable');
+    expect(r.m.snapshot().signedOut).toBeNull();
+
+    const read2 = deferred<boolean>();
+    const q = rig({ signedIn: () => read2.p });
+    const s2 = q.m.start();
+    const o2 = q.m.observe(W, new RemoteError('unreachable', 'x'));
+    read2.resolve(false);
+    await Promise.all([s2, o2]);
+    expect(q.sent).toHaveLength(1);
+    expect(q.sent[0]!.signedOut).toEqual({ reason: 'not-signed-in', since: 1000 });
+  });
+
+  it('an ok observe while signed out re-reads the sign-in and, if signed in, recovers like a sign-in', async () => {
+    let signedIn = false;
+    const r = rig({ signedIn: async () => signedIn });
+    await r.m.start();
+    await r.m.observe('other', new RemoteError('unauthorized', 'x', 401));
+    signedIn = true;
+    await r.m.observe(W, null);
+    expect(r.last()).toEqual({ signedOut: null, epoch: 1, conns: {} });
+    expect(r.deps.reconnect).toHaveBeenCalledOnce();
+
+    const q = rig({ in: false });
+    await q.m.start();
+    await q.m.observe(W, null);
+    expect(q.m.snapshot().signedOut).not.toBeNull();
+    expect(q.deps.reconnect).not.toHaveBeenCalled();
   });
 
   it('a sign-in during the bookmark count cancels the revoke notification', async () => {

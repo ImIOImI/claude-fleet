@@ -149,8 +149,17 @@ export function sessionEndKind(restarting: boolean): 'restarting' | 'natural' {
 export const AUTO_REATTACH_GAP_MS = 5 * 60_000;
 
 /** The host closed a live remote tab with 4401 (the token it opened with expired): re-attach once with the current sign-in. */
-export function reattachAfterAuthEnd(o: { remote: boolean; reason?: PtyEndReason; signedIn: boolean; lastAutoAt: number | null; now: number }): boolean {
-  if (!o.remote || o.reason !== 'unauthorized' || !o.signedIn) return false;
+export function reattachAfterAuthEnd(o: {
+  remote: boolean;
+  reason?: PtyEndReason;
+  signedIn: boolean;
+  lastAutoAt: number | null;
+  now: number;
+  /** Another attach (Retry, a sign-in) already started. */
+  attaching: boolean;
+  ended: boolean;
+}): boolean {
+  if (!o.remote || o.reason !== 'unauthorized' || !o.signedIn || o.attaching || !o.ended) return false;
   return o.lastAutoAt === null || o.now - o.lastAutoAt >= AUTO_REATTACH_GAP_MS;
 }
 

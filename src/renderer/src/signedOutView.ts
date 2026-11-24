@@ -68,11 +68,18 @@ export type TabEnd =
   | { kind: 'remote'; block: RemoteBlockKind }
   | { kind: 'attach-error'; message: string };
 
+/** A block explains an end only if the host closed it (`reason`) or the link dropped; an `/exit` under a block stays natural. */
 export function remoteEndKind(restarting: boolean, block: RemoteBlockKind | null, reason?: PtyEndReason): TabEnd {
-  if (block && isSignInBlock(block)) return { kind: 'remote', block };
+  const blocked = block !== null && (reason !== undefined || block === 'unreachable');
+  if (blocked && isSignInBlock(block)) return { kind: 'remote', block };
   if (restarting) return { kind: 'restarting' };
-  if (block) return { kind: 'remote', block };
+  if (blocked) return { kind: 'remote', block };
   return reason ? { kind: 'natural', authEnd: true } : { kind: 'natural' };
+}
+
+/** A sign-in tag from an attach that a sign-in overtook: the card would never clear, so attach again. */
+export function retryStaleSignInAttach(block: RemoteBlockKind | null, epochAtAttach: number, epochNow: number): boolean {
+  return (isSignInBlock(block) || block === 'host-refused') && epochAtAttach !== epochNow;
 }
 
 /** A host close (4401/4403) can beat the state push; unreachable never upgrades. */

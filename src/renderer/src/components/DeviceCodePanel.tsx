@@ -5,7 +5,7 @@ import type { SignInFlowState } from '../signInFlow';
 import { signInFlow } from '../signInFlowInstance';
 
 export function useSignInFlow(): SignInFlowState {
-  return useSyncExternalStore(signInFlow.subscribe, signInFlow.get);
+  return useSyncExternalStore(signInFlow.subscribe, signInFlow.get, signInFlow.get);
 }
 
 export function DeviceCodePanel() {
@@ -21,21 +21,15 @@ export function DeviceCodePanel() {
 
   if (s.phase === 'waiting') {
     return (
-      <div className="device-flow inline">
-        <span className="device-code" aria-label="Device code">{s.userCode}</span>
-        <div className="device-actions">
-          <button type="button" className="btn" onClick={() => void window.api.clipboard.write(s.userCode).then(() => setCopied(true), () => undefined)}>
-            {copied ? 'Copied' : 'Copy'}
-          </button>
-          <a className="btn primary" href={s.verificationUri} target="_blank" rel="noreferrer">
-            Open github.com/login/device
-          </a>
-          <button type="button" className="btn" onClick={() => signInFlow.cancel()}>
-            Cancel
-          </button>
-        </div>
-        <span className="device-countdown">Waiting for GitHub. The code expires in {countdown(s.expiresAt, now)}.</span>
-      </div>
+      <DeviceCodeWaiting
+        userCode={s.userCode}
+        verificationUri={s.verificationUri}
+        expiresAt={s.expiresAt}
+        now={now}
+        copied={copied}
+        onCopy={() => void window.api.clipboard.write(s.userCode).then(() => setCopied(true), () => undefined)}
+        onCancel={() => signInFlow.cancel()}
+      />
     );
   }
   return (
@@ -45,5 +39,39 @@ export function DeviceCodePanel() {
         Sign in
       </button>
     </span>
+  );
+}
+
+export function DeviceCodeWaiting(p: {
+  userCode: string;
+  verificationUri: string;
+  expiresAt: number;
+  now: number;
+  copied: boolean;
+  onCopy: () => void;
+  onCancel: () => void;
+}) {
+  return (
+    <div className="device-flow inline">
+      <span>
+        <span className="visually-hidden">Code: </span>
+        <span className="device-code">{p.userCode}</span>
+      </span>
+      <div className="device-actions">
+        <button type="button" className="btn" onClick={p.onCopy}>
+          {p.copied ? 'Copied' : 'Copy'}
+        </button>
+        <a className="btn primary" href={p.verificationUri} target="_blank" rel="noreferrer">
+          Open github.com/login/device
+        </a>
+        <button type="button" className="btn" onClick={p.onCancel}>
+          Cancel
+        </button>
+      </div>
+      {/* Ticks every second; a reader would hear it each time. */}
+      <span className="device-countdown" aria-live="off">
+        Waiting for GitHub. The code expires in {countdown(p.expiresAt, p.now)}.
+      </span>
+    </div>
   );
 }

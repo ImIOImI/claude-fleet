@@ -80,14 +80,31 @@ export function createRemoteAuthMonitor(d: RemoteAuthMonitorDeps): RemoteAuthMon
   /** Latest observe per bookmark; an older one still awaiting the SSO link drops its result. */
   const seq = new Map<string, number>();
   const snapshot = (): RemoteAuthState => ({ signedOut, epoch, conns: Object.fromEntries(conns) });
-  const push = (): void => d.send(snapshot());
+  let started: Promise<void> = Promise.resolve();
+  // The renderer drops its snapshot once a push lands, so no push may precede the start read.
+  const push = async (): Promise<void> => {
+    await started;
+    d.send(snapshot());
+  };
+  const signIn = async (cause: string): Promise<void> => {
+    changes++;
+    signedOut = null;
+    epoch++;
+    for (const [id, conn] of conns) if (SIGN_IN_KINDS.has(conn.kind)) conns.delete(id);
+    d.log({ level: 'info', message: 'remote sign-in changed', extra: { cause, epoch } });
+    d.reconnect();
+    await push();
+  };
 
   return {
     snapshot,
-    async start() {
-      const seen = changes;
-      const ok = await d.signedIn().catch(() => false);
-      if (!ok && changes === seen) signedOut = { reason: 'not-signed-in', since: now() };
+    start() {
+      started = (async () => {
+        const seen = changes;
+        const ok = await d.signedIn().catch(() => false);
+        if (!ok && changes === seen) signedOut = { reason: 'not-signed-in', since: now() };
+      })();
+      return started;
     },
     async observe(id, err) {
       const kind = connKindOf(err);
@@ -95,9 +112,14 @@ export function createRemoteAuthMonitor(d: RemoteAuthMonitorDeps): RemoteAuthMon
       const my = (seq.get(id) ?? 0) + 1;
       seq.set(id, my);
       if (kind === 'ok') {
+        // A host answered, so a token exists: a sign-in this monitor missed.
+        if (signedOut !== null) {
+          const seen = changes;
+          if ((await d.signedIn().catch(() => false)) && signedOut !== null && changes === seen) await signIn('observed');
+        }
         if (!conns.delete(id)) return;
         d.log({ level: 'info', message: 'remote connection ok', extra: { workspaceId: id } });
-        push();
+        await push();
         return;
       }
       if (conns.get(id)?.kind === kind) return;
@@ -108,23 +130,15 @@ export function createRemoteAuthMonitor(d: RemoteAuthMonitorDeps): RemoteAuthMon
       }
       conns.set(id, conn);
       d.log({ level: 'warn', message: 'remote connection blocked', extra: { workspaceId: id, kind } });
-      push();
+      await push();
     },
     async identityChanged(c) {
+      if (c.signedIn) return signIn(c.cause);
       const my = ++changes;
-      if (c.signedIn) {
-        signedOut = null;
-        epoch++;
-        for (const [id, conn] of conns) if (SIGN_IN_KINDS.has(conn.kind)) conns.delete(id);
-        d.log({ level: 'info', message: 'remote sign-in changed', extra: { cause: c.cause, epoch } });
-        d.reconnect();
-        push();
-        return;
-      }
       const first = signedOut === null;
       signedOut = { reason: c.cause === 'revoked' ? 'expired' : 'not-signed-in', since: signedOut?.since ?? now() };
       d.log({ level: 'warn', message: 'remote signed out', extra: { cause: c.cause } });
-      push();
+      await push();
       if (!first || c.cause !== 'revoked') return;
       const n = await d.bookmarkCount().catch(() => 0);
       if (n > 0 && changes === my) d.notify({ ...SIGNED_OUT_NOTICE });

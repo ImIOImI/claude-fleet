@@ -482,7 +482,8 @@ export class IdentityService {
       await this.clearNow();
       return true;
     });
-    if (done) this.emit({ cause: 'revoked', signedIn: false });
+    // A vault PAT may still win, so this isn't necessarily a sign-out.
+    if (done) this.emit({ cause: 'revoked', signedIn: (await this.settled()) !== null });
     return done;
   }
 
@@ -748,6 +749,22 @@ export class IdentityService {
       return was;
     });
     if (had) this.emit({ cause: 'sign-out', signedIn: false });
+  }
+
+  /** Runs a Vault write that may change the root GITHUB_TOKEN, then fires `sign-in`/`sign-out` if the bearer changed.
+   *  The comparison runs after the write returns, so a PAT probe doesn't hold up the write. */
+  async patChanged<T>(write: () => Promise<T>): Promise<T> {
+    const before = (await this.settled().catch(() => null))?.token ?? null;
+    const r = await write();
+    void this.settled().then(
+      (s) => {
+        const after = s?.token ?? null;
+        if (after === before) return;
+        this.emit(after === null ? { cause: 'sign-out', signedIn: false } : { cause: 'sign-in', signedIn: true });
+      },
+      () => undefined
+    );
+    return r;
   }
 
   /** For RemoteClient: the signed-in token, attached to fleet-host requests. Main process only. */
