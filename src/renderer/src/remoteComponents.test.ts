@@ -99,3 +99,38 @@ describe('signed-out UI (D173)', () => {
     }
   });
 });
+
+describe('remote tab cards (D174–D176)', () => {
+  const ts = () => readFileSync('src/renderer/src/components/TerminalSession.tsx', 'utf8');
+
+  it('gates the attach on a sign-in block, as on paused', () => {
+    expect(ts()).toMatch(/if \(skipAttach\(remoteRef\.current, remoteBlockRef\.current\)\)/);
+  });
+
+  it('maps a tagged attach error to the remote card and pty:end through remoteEndKind with the end reason', () => {
+    const s = ts();
+    expect(s).toMatch(/attachErrorBlock\(err\)/);
+    expect(s).toMatch(/remoteEndKind\(restartingRef\.current, remoteRef\.current \? remoteBlockRef\.current : null, reason\)/);
+  });
+
+  it('reattaches through the pure helper, staggered, and has no identity:changed listener of its own', () => {
+    const s = ts();
+    expect(s).toMatch(/reattachOnAuthChange\(\{/);
+    expect(s).toMatch(/attaching: attachingRef\.current/);
+    expect(s).toMatch(/if \(endedRef\.current && !attachingRef\.current\) setSessionEpoch/);
+    expect(s).toMatch(/reattachJitterMs\(sessionId\)/);
+    expect(s).not.toMatch(/identity\.onChanged/);
+  });
+
+  it('keeps the one-shot 4401 reattach, except under a sign-in block', () => {
+    expect(ts()).toMatch(/reason === 'unauthorized' && !isSignInBlock\(remoteBlockRef\.current\)/);
+  });
+
+  it('renders fixed card copy only, never the attach error text', () => {
+    const s = ts();
+    expect(s).toMatch(/remoteCard\(shown, remoteName \?\? 'the host', ssoUrl\)/);
+    expect(s).not.toMatch(/dangerouslySetInnerHTML/);
+    const card = s.slice(s.indexOf('{shown && ('), s.indexOf("{endedReason?.kind === 'natural'"));
+    expect(card).not.toMatch(/message|msg/);
+  });
+});

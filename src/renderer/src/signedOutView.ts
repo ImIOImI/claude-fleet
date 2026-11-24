@@ -98,3 +98,20 @@ export function shouldReattach(showing: RemoteBlockKind | null, prev: AuthView, 
 export function skipAttach(remote: boolean, block: RemoteBlockKind | null): boolean {
   return remote && isSignInBlock(block);
 }
+
+/** Whether a sign-in or block change should reattach this tab (D174). */
+export function reattachOnAuthChange(o: { remote: boolean; ended: TabEnd | null; attaching: boolean; prev: AuthView; next: AuthView }): boolean {
+  if (!o.remote || o.attaching) return false;
+  const showing = shownRemoteBlock(true, o.ended, o.prev.block);
+  if (showing) return shouldReattach(showing, o.prev, o.next);
+  return o.ended?.kind === 'natural' && !!o.ended.authEnd && !isSignInBlock(o.next.block) && o.next.epoch !== o.prev.epoch;
+}
+
+export const REATTACH_JITTER_MS = 2_000;
+
+/** Spreads the tabs of one host over a couple of seconds when its block clears. */
+export function reattachJitterMs(tabId: string): number {
+  let h = 0;
+  for (let i = 0; i < tabId.length; i++) h = (h * 31 + tabId.charCodeAt(i)) >>> 0;
+  return h % REATTACH_JITTER_MS;
+}

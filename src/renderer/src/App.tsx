@@ -49,7 +49,7 @@ import type {
 import { storeBannerText } from './storeView';
 import { SignedOutBanner } from './components/SignedOutBanner';
 import { signInFlow } from './signInFlowInstance';
-import { signedOutBanner } from './signedOutView';
+import { blockFor, signedOutBanner } from './signedOutView';
 import { EMPTY_REMOTE_AUTH, type RemoteAuthState } from '../../preload/remoteAuth';
 import type { CaptureSettings } from '../../preload/captureSettings';
 import type { ExtraMount } from '../../preload/extraMounts';
@@ -1649,6 +1649,10 @@ export function App() {
                   key={w.id}
                   remoteTier={w.kind === 'remote' ? w.remote?.tier ?? null : undefined}
                   drain={w.kind === 'remote' ? drains[w.id] ?? null : null}
+                  remoteBlock={w.kind === 'remote' ? blockFor(remoteAuth, w.id) : null}
+                  authEpoch={remoteAuth.epoch}
+                  ssoUrl={w.kind === 'remote' ? remoteAuth.conns[w.id]?.ssoUrl ?? null : null}
+                  remoteName={w.name}
                   visible={(!inboxOpen && selectedId === w.id) || (inboxOpen && inboxSection === 'sessions' && w.id === roleWsId)}
                   workspaceId={w.id}
                   mirrorDefault={w.mirror.default}

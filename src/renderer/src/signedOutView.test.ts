@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { EMPTY_REMOTE_AUTH, remoteAttachTag, type RemoteAuthState } from '../../preload/remoteAuth';
-import { attachErrorBlock, blockFor, remoteCard, remoteEndKind, shouldReattach, shownRemoteBlock, signedOutBanner, SIGNED_OUT_BANNER, skipAttach } from './signedOutView';
+import { attachErrorBlock, blockFor, REATTACH_JITTER_MS, reattachJitterMs, reattachOnAuthChange, remoteCard, remoteEndKind, shouldReattach, shownRemoteBlock, signedOutBanner, SIGNED_OUT_BANNER, skipAttach } from './signedOutView';
 
 const W = '01JC0000000000000000000000';
 const out = (reason: 'not-signed-in' | 'expired'): RemoteAuthState => ({ ...EMPTY_REMOTE_AUTH, signedOut: { reason, since: 1 } });
@@ -94,5 +94,35 @@ describe('shouldReattach (D174)', () => {
     expect(shouldReattach('unreachable', { epoch: 2, block: 'unreachable' }, { epoch: 2, block: 'forbidden' })).toBe(false);
     expect(shouldReattach('host-refused', { epoch: 0, block: 'unreachable' }, { epoch: 1, block: 'unreachable' })).toBe(true);
     expect(shouldReattach('host-refused', { epoch: 1, block: null }, { epoch: 1, block: null })).toBe(false);
+  });
+});
+
+describe('reattachOnAuthChange (D174)', () => {
+  const v = (epoch: number, block: 'expired' | 'unreachable' | null) => ({ epoch, block });
+
+  it('a tab on a remote card reattaches as shouldReattach says, never while an attach is in flight', () => {
+    const ended = { kind: 'remote', block: 'expired' } as const;
+    expect(reattachOnAuthChange({ remote: true, ended, attaching: false, prev: v(0, 'expired'), next: v(1, null) })).toBe(true);
+    expect(reattachOnAuthChange({ remote: true, ended, attaching: true, prev: v(0, 'expired'), next: v(1, null) })).toBe(false);
+    expect(reattachOnAuthChange({ remote: false, ended, attaching: false, prev: v(0, 'expired'), next: v(1, null) })).toBe(false);
+    expect(reattachOnAuthChange({ remote: true, ended: null, attaching: false, prev: v(0, null), next: v(1, null) })).toBe(false);
+  });
+
+  it('a tab the host closed 4401/4403 with no block reattaches when the epoch moves, not while signed out', () => {
+    const ended = { kind: 'natural', authEnd: true } as const;
+    expect(reattachOnAuthChange({ remote: true, ended, attaching: false, prev: v(0, null), next: v(1, null) })).toBe(true);
+    expect(reattachOnAuthChange({ remote: true, ended, attaching: false, prev: v(0, null), next: v(0, null) })).toBe(false);
+    expect(reattachOnAuthChange({ remote: true, ended, attaching: false, prev: v(0, null), next: v(1, 'expired') })).toBe(false);
+    expect(reattachOnAuthChange({ remote: true, ended: { kind: 'natural' }, attaching: false, prev: v(0, null), next: v(1, null) })).toBe(false);
+  });
+});
+
+describe('reattachJitterMs', () => {
+  it('is stable per tab, within bounds, and spreads tabs out', () => {
+    const ids = Array.from({ length: 20 }, (_, i) => `tab-${i}`);
+    const d = ids.map(reattachJitterMs);
+    expect(d.every((x) => x >= 0 && x < REATTACH_JITTER_MS)).toBe(true);
+    expect(reattachJitterMs('tab-3')).toBe(d[3]);
+    expect(new Set(d).size).toBeGreaterThan(10);
   });
 });
