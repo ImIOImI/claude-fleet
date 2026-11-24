@@ -1181,6 +1181,15 @@ describe('IdentityService vault PAT', () => {
     expect(await s.svc.bearerToken()).toBe(PAT);
   });
 
+  it('recover: a host-refused PAT GitHub accepts is reused for a minute', async () => {
+    const s = await deviceThenPat();
+    expect(await s.svc.bearerToken()).toBe(PAT);
+    s.github.probe.mockClear();
+    expect(await s.svc.recover(PAT)).toBe('host-refused');
+    expect(await s.svc.recover(PAT)).toBe('host-refused');
+    expect(s.github.probe).toHaveBeenCalledOnce();
+  });
+
   it('recover: GitHub unreachable keeps the PAT without a backoff', async () => {
     const s = await deviceThenPat();
     expect(await s.svc.bearerToken()).toBe(PAT);
@@ -1211,6 +1220,53 @@ describe('IdentityService vault PAT', () => {
     expect(await s.svc.recover(PAT)).toBe('expired');
     expect(await s.svc.bearerToken()).toBeNull();
     expect(s.vault.store.get('identity:github|PAT_PROFILE')).toContain('rejectedSha');
+  });
+
+  describe('patChanged (a Vault write of GITHUB_TOKEN)', () => {
+    const watch = (s: { svc: IdentityService }) => {
+      const seen: unknown[] = [];
+      s.svc.onChange((c) => seen.push(c));
+      return seen;
+    };
+
+    it('adding a PAT while signed out fires sign-in; removing it fires sign-out', async () => {
+      const s = patSetup({ pat: null });
+      const seen = watch(s);
+      await s.svc.patChanged(async () => s.setPat(PAT));
+      await vi.waitFor(() => expect(seen).toEqual([{ cause: 'sign-in', signedIn: true }]));
+      await s.svc.patChanged(async () => s.setPat(null));
+      await vi.waitFor(() => expect(seen).toEqual([{ cause: 'sign-in', signedIn: true }, { cause: 'sign-out', signedIn: false }]));
+    });
+
+    it('a PAT over a device sign-in fires sign-in (the bearer changed); removing it falls back with another', async () => {
+      const s = patSetup({ pat: null, polls: [DONE], probe: PROBE });
+      await signIn(s);
+      s.setProbe(PAT_PROBE);
+      const seen = watch(s);
+      await s.svc.patChanged(async () => s.setPat(PAT));
+      await vi.waitFor(() => expect(seen).toEqual([{ cause: 'sign-in', signedIn: true }]));
+      await s.svc.patChanged(async () => s.setPat(null));
+      await vi.waitFor(() => expect(seen).toHaveLength(2));
+      expect(seen[1]).toEqual({ cause: 'sign-in', signedIn: true });
+      expect(await s.svc.bearerToken()).toBe(TOKEN);
+    });
+
+    it('a write that leaves the bearer as it was fires nothing, and returns the write result', async () => {
+      const s = patSetup();
+      await s.svc.status();
+      const seen = watch(s);
+      expect(await s.svc.patChanged(async () => 'ok')).toBe('ok');
+      await s.svc.status();
+      expect(seen).toEqual([]);
+    });
+
+    it('a rejected PAT with no device token fires nothing', async () => {
+      const s = patSetup({ pat: null, probe: UNAUTHORIZED() });
+      const seen = watch(s);
+      await s.svc.patChanged(async () => s.setPat(PAT));
+      await s.svc.status();
+      expect(seen).toEqual([]);
+    });
   });
 
   it('sign-out while a PAT wins emits nothing and keeps the device token', async () => {
@@ -1249,6 +1305,36 @@ describe('IdentityService vault PAT with an expiring device token', () => {
     timers.at(-1)!.fn();
     await vi.waitFor(() => expect(s.github.refresh).toHaveBeenCalledWith('Iv1.testclient', 'ghr_first'));
     await vi.waitFor(() => expect(s.vault.store.get('identity:github|TOKEN')).toBe('ghu_2'));
+    expect(await s.svc.bearerToken()).toBe(PAT);
+  });
+});
+
+describe('IdentityService vault PAT with an expired device token', () => {
+  const HOUR = 3_600_000;
+  const PAT = 'ghp_vault_pat';
+  const PAT_PROBE: GithubProbe = { identity: { ...IDENT, login: 'pat-user', id: 7 }, scopes: ['read:org'], sso: null };
+
+  it('clearing the device token while the PAT wins fires revoked with signedIn true', async () => {
+    const timers: Array<{ fn: () => void; ms: number }> = [];
+    let pat: string | null = null;
+    const s = setup({
+      polls: [{ status: 'done', token: 'ghu_first', scopes: [], expiresAt: 5000 + 8 * HOUR }],
+      patToken: async () => pat,
+      schedule: (fn, ms) => {
+        timers.push({ fn, ms });
+        return () => undefined;
+      }
+    });
+    await signIn(s);
+    s.setProbe(PAT_PROBE);
+    pat = PAT;
+    expect(await s.svc.bearerToken()).toBe(PAT);
+    const seen: unknown[] = [];
+    s.svc.onChange((c) => seen.push(c));
+    s.advance(9 * HOUR);
+    timers.at(-1)!.fn();
+    await vi.waitFor(() => expect(s.vault.store.get('identity:github|TOKEN')).toBeUndefined());
+    await vi.waitFor(() => expect(seen).toEqual([{ cause: 'revoked', signedIn: true }]));
     expect(await s.svc.bearerToken()).toBe(PAT);
   });
 });
@@ -1541,6 +1627,30 @@ describe('IdentityService change events and recovery', () => {
     expect(await s.svc.bearerToken()).toBeNull();
     expect(seen).toEqual([{ cause: 'revoked', signedIn: false }]);
     expect((await s.svc.status()).notice).toMatch(/revoked or expired/);
+  });
+
+  it('recover: a host-refused verdict GitHub confirmed is reused for a minute per token', async () => {
+    const s = setup({ polls: [DONE] });
+    await signIn(s);
+    s.github.probe.mockClear();
+    expect(await s.svc.recover(TOKEN)).toBe('host-refused');
+    s.advance(30_000);
+    expect(await s.svc.recover(TOKEN)).toBe('host-refused');
+    expect(s.github.probe).toHaveBeenCalledOnce();
+    expect(await s.svc.recover('gho_older')).toBe('retry');
+    s.advance(30_000);
+    expect(await s.svc.recover(TOKEN)).toBe('host-refused');
+    expect(s.github.probe).toHaveBeenCalledTimes(2);
+  });
+
+  it('recover: a network failure is not cached', async () => {
+    const s = setup({ polls: [DONE] });
+    await signIn(s);
+    s.setProbe(new IdentityError('network', 'offline'));
+    s.github.probe.mockClear();
+    await s.svc.recover(TOKEN);
+    await s.svc.recover(TOKEN);
+    expect(s.github.probe).toHaveBeenCalledTimes(2);
   });
 
   it('recover: a network failure is host-refused and keeps the token', async () => {

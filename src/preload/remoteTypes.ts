@@ -2,9 +2,12 @@
 
 export type RemoteTier = 'read' | 'steer' | 'session';
 
-/** Payload of `pty:end:<id>`. `unauthorized`: the host closed a remote attach with 4401. */
+/** The host closed a live remote socket: 4401 `unauthorized`, 4403 `forbidden`. */
+export type PtyEndReason = 'unauthorized' | 'forbidden';
+
+/** Payload of `pty:end:<id>`. */
 export interface PtyEndInfo {
-  reason?: 'unauthorized';
+  reason?: PtyEndReason;
 }
 
 export interface RemoteProbeOk {

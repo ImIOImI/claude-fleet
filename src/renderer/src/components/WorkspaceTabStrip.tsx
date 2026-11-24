@@ -10,6 +10,8 @@ import { usePortalMenu } from './portalMenu';
 import { IconCopy, IconEject, IconPause, IconPencil, IconPlay, IconStop, IconTrash } from './menuIcons';
 import { isWarm } from '../fleetTemperature';
 import { forgetText, remoteChip, tierTitle } from '../remoteView';
+import { blockFor } from '../signedOutView';
+import type { RemoteAuthState } from '../../../preload/remoteAuth';
 import { ModalBackdrop } from './ModalBackdrop';
 import { CloudGlyph } from './CloudGlyph';
 
@@ -39,6 +41,8 @@ interface Props {
   workspaces: WorkspaceSummary[];
   /** Last broker:drain per remote workspace (D152). */
   drains: Record<string, RemoteDrain>;
+  /** Sign-in and connection state for remote chips (D170). */
+  remoteAuth: RemoteAuthState;
   /**
    * Per-workspace observability summary, keyed by workspace id (ULID).
    * Values are `null` while the IPC poll hasn't returned yet or the
@@ -117,6 +121,7 @@ function IconGear(): JSX.Element {
 export function WorkspaceTabStrip({
   workspaces,
   drains,
+  remoteAuth,
   summaries,
   busyByWorkspace,
   waitingByWorkspace = {},
@@ -179,7 +184,7 @@ export function WorkspaceTabStrip({
         // "Busy" = claude actively working in a running workspace (PTY title
         // glyph is a spinner). Drives a pulsing dot + "working…" sub-line.
         const unreachable = w.state === 'unreachable';
-        const rc = remoteChip(w, drains[w.id]);
+        const rc = remoteChip(w, drains[w.id], w.kind === 'remote' ? blockFor(remoteAuth, w.id) : null);
         const busy = w.state === 'running' && busyByWorkspace[w.id] === true;
         const waiting = w.state === 'running' && waitingByWorkspace[w.id] === true;
         return (
@@ -187,7 +192,7 @@ export function WorkspaceTabStrip({
           key={w.id}
           className={`ws-chip-group ${w.id === selectedId ? 'active' : ''} ${
             dragId === w.id ? 'dragging' : ''
-          } ${unreachable ? (rc?.phase === 'checking' ? 'checking' : 'unreachable') : ''} ${rc?.phase === 'restarting' ? 'restarting' : ''}`}
+          } ${unreachable ? (rc?.phase === 'checking' ? 'checking' : 'unreachable') : ''} ${rc?.phase === 'restarting' ? 'restarting' : ''} ${rc?.phase === 'signed-out' ? 'signed-out' : ''} ${rc?.phase === 'no-access' ? 'no-access' : ''}`}
           style={{ ['--hue' as never]: colorFor(w) }}
           draggable
           {...reorderDragHandlers({

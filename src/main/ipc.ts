@@ -91,7 +91,7 @@ import {
 import * as vault from './vault.js';
 import { manifestEnvOnWrite } from './migration.js';
 import { assertRendererWorkspaceId } from './vaultScopes.js';
-import { registerVaultIpc, resolveVaultWorkspaceKind, type VaultIpcDeps, type VaultWorkspaceKind } from './vaultIpc.js';
+import { registerVaultIpc, resolveVaultWorkspaceKind, watchPatWrites, type VaultIpcDeps, type VaultWorkspaceKind } from './vaultIpc.js';
 import { isEnvPending, readEnvApplied } from './envApplied.js';
 import { IdentityService } from './identity/identityService.js';
 import { BUILTIN_GITHUB_CLIENT_ID, GITHUB_CLIENT_ID_ENV } from './identity/clientId.js';
@@ -99,6 +99,7 @@ import { readGithubClientId, registerGithubClientIdIpc, type GithubClientIdDeps 
 import { registerIdentityIpc } from './identityIpc.js';
 import { createRemoteBackend } from './remote.js';
 import type { RecoverVerdict } from './remoteClient.js';
+import { createRemoteAuthMonitor, eventsDisconnect, ssoLink } from './remoteAuth.js';
 import { createFederatedReader, type FederatedReader } from './federation/federatedReader.js';
 import { createSummaryRelay } from './federation/summaryRelay.js';
 import { createDrainRelay } from './remoteDrain.js';
@@ -403,6 +404,7 @@ const remoteBackend = createRemoteBackend({
   token: () => remoteToken(),
   recover: (t) => remoteRecover(t),
   login: () => remoteLogin(),
+  observe: (id, err) => void remoteAuth.observe(id, err),
   listManifests: () => listWorkspaceManifests(),
   writeManifest: (spec) => writeWorkspaceManifest(spec),
   deleteState: (id) => rm(workspaceStateDir(id), { recursive: true, force: true }),
@@ -446,7 +448,33 @@ const summaryRelay = createSummaryRelay({
   onConnected: (origin) => {
     remoteChanges.connected(origin);
     remoteNoticeSink?.hint(origin);
+  },
+  onDisconnected: (origin, why) => {
+    const v = eventsDisconnect(why);
+    if (v && 'recheck' in v) remoteBackend.recheck(origin);
+    else if (v) void remoteAuth.observe(origin, v.observe);
   }
+});
+let signedOutNotifier: ((n: { title: string; body: string }) => void) | null = null;
+/** Set by the inbox services while they run; one notification per involuntary sign-out (D172). */
+export function setSignedOutNotifier(fn: ((n: { title: string; body: string }) => void) | null): void {
+  signedOutNotifier = fn;
+}
+let remoteSso: () => Promise<string | null> = async () => null;
+let remoteAuthStarted: Promise<void> = Promise.resolve();
+const remoteAuth = createRemoteAuthMonitor({
+  signedIn: async () => (await remoteToken()) !== null,
+  bookmarkCount: async () => (MOCK_MODE ? 0 : (await listWorkspaceManifests()).filter((m) => m.kind === 'remote').length),
+  send: (s) => {
+    for (const w of BrowserWindow.getAllWindows()) {
+      if (w.isDestroyed() || w.webContents.isDestroyed()) continue;
+      try { w.webContents.send('remote:auth', s); } catch { /* mid-teardown */ }
+    }
+  },
+  notify: (n) => signedOutNotifier?.(n),
+  reconnect: () => remoteBackend.reconnect(),
+  ssoUrl: () => remoteSso(),
+  log: (e) => logError({ source: 'main', type: 'remote-auth', level: e.level, message: e.message, extra: e.extra })
 });
 /** The remote notifier (D132), set by the inbox services while they run. */
 let remoteNoticeSink: Pick<RemoteNotifier, 'hint' | 'sync'> | null = null;
@@ -2231,7 +2259,9 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
     manifestKind: async (id) => (await readWorkspaceManifest(id))?.kind ?? null,
     mockWorkspaces: MOCK_MODE ? () => mockDocker.listLiveWorkspaces() : undefined
   });
-  const vaultIpcDeps: VaultIpcDeps = {
+  // Bound once the identity service exists below.
+  let patChanged = <T>(write: () => Promise<T>): Promise<T> => write();
+  const vaultIpcDeps: VaultIpcDeps = watchPatWrites({
     isVaultAvailable: vault.isVaultAvailable,
     listModelEntries: vault.listModelEntries,
     getRootValue: vault.getRootValue,
@@ -2251,7 +2281,7 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
       current: vault.resolveWorkspaceEnv
     }),
     workspaceKind: vaultWorkspaceKind
-  };
+  }, (write) => patChanged(write));
   registerVaultIpc(ipcMain, vaultIpcDeps);
 
   // GitHub sign-in (identity:*). The token stays in the host-only vault scope
@@ -2267,19 +2297,23 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
     clientId: async () => (await readGithubClientId(githubClientId)).value,
     patToken: () => vault.getRootValue('GITHUB_TOKEN')
   });
+  patChanged = (write) => identity.patChanged(write);
   registerIdentityIpc(ipcMain, identity);
   registerGithubClientIdIpc(ipcMain, githubClientId);
   remoteToken = () => identity.bearerToken();
   remoteRecover = (t) => identity.recover(t);
   remoteLogin = () => identity.currentLogin();
   identity.startRefresh().catch((err: unknown) => logError({ source: 'main', level: 'warn', type: 'identity-start-refresh', message: String(err) }));
+  remoteSso = async () => ssoLink((await identity.status().catch(() => null))?.sso);
   identity.onChange(({ cause, signedIn }) => {
-    if (cause === 'sign-in' || cause === 'token-refreshed') remoteBackend.reconnect();
+    // Reconnects on sign-in and token refresh (D174).
+    void remoteAuth.identityChanged({ cause, signedIn });
     for (const w of BrowserWindow.getAllWindows()) {
       if (w.isDestroyed() || w.webContents.isDestroyed()) continue;
       try { w.webContents.send('identity:changed', { cause, signedIn }); } catch { /* mid-teardown */ }
     }
   });
+  remoteAuthStarted = remoteAuth.start().catch(() => undefined);
   registerRemoteIpc(ipcMain, {
     backend: remoteBackend,
     accountStatus: () => identity.status(),
@@ -2289,7 +2323,11 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
     writeManifest: writeWorkspaceManifest,
     findByName: findWorkspaceByName,
     invalidate: invalidateWorkspaceList,
-    drainStates: () => drainRelay.snapshot()
+    drainStates: () => drainRelay.snapshot(),
+    authState: async () => {
+      await remoteAuthStarted;
+      return remoteAuth.snapshot();
+    }
   });
   registerFederationIpc(ipcMain, federated, localSearch);
   registerRemoteAutomationsIpc(ipcMain, federated);

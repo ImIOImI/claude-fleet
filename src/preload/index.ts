@@ -18,6 +18,8 @@ export type { AccountStatus, AccountIdentity, AccountSso, SignInStart, SignInPol
 import type { OwnerCostRow, SessionOwner } from './sessionOwner';
 export type { OwnerCostRow, SessionOwner } from './sessionOwner';
 import type { PtyEndInfo, RemoteAddOptions, RemoteDrain, RemoteLiveSession, RemoteProbe } from './remoteTypes';
+import type { RemoteAuthState } from './remoteAuth';
+export type { RemoteAuthState, RemoteBlockKind, RemoteConn, RemoteConnKind } from './remoteAuth';
 import type { StoreChoice, StoreSettings, StoreStatus } from './storeTypes';
 import type { FederatedSearchResult, RemoteSessionsResult, SessionCursor } from './federation';
 import type { BackfillCount, BackfillResult, UnpublishResult } from './publish';
@@ -813,6 +815,14 @@ const api = {
       const h = (_e: IpcRendererEvent, u: { workspaceId: string; drain: RemoteDrain }) => cb(u);
       ipcRenderer.on('remote:drain', h);
       return () => ipcRenderer.removeListener('remote:drain', h);
+    },
+    /** App-wide sign-in and per-bookmark connection state (D169). */
+    authState: (): Promise<RemoteAuthState> => ipcRenderer.invoke('remote:authState'),
+    /** The whole state, on every change. */
+    onAuth: (cb: (s: RemoteAuthState) => void): (() => void) => {
+      const h = (_e: IpcRendererEvent, s: RemoteAuthState) => cb(s);
+      ipcRenderer.on('remote:auth', h);
+      return () => ipcRenderer.removeListener('remote:auth', h);
     },
     /** A remote host's automations, proposals, todos or notices changed (debounced 1 s per host and channel); refetch. */
     onChanged: (cb: (c: RemoteChange) => void): (() => void) => {

@@ -68,6 +68,8 @@ export interface RemoteAttachOptions {
   closeWaitMs?: number;
   /** Drained-session lookup for a missing session (D151); absent: none. */
   drained?: () => Promise<DrainedRow[]>;
+  /** The host closed the socket (we didn't): its close code. */
+  onHostClose?: (code: number) => void;
 }
 
 export async function attachRemotePty(o: RemoteAttachOptions): Promise<PtyHandle> {
@@ -82,6 +84,7 @@ export async function attachRemotePty(o: RemoteAttachOptions): Promise<PtyHandle
   // Runs before the ws stream ends, so the notice lands ahead of the stream's end.
   ws.once('close', (code: number) => {
     closedWith = code;
+    if (!closing) o.onHostClose?.(code);
     const notice = closing ? null : code === 4401 ? LIVE_AUTH_CLOSED : closeNotice(code);
     if (notice && !stream.destroyed && !stream.readableEnded) stream.push(Buffer.from(`\r\n\x1b[33m[${notice}]\x1b[0m\r\n`));
   });
@@ -128,7 +131,7 @@ export async function attachRemotePty(o: RemoteAttachOptions): Promise<PtyHandle
   if (!r.ok) fail(`host refused to attach: ${await hostSays(r.error)}`);
   return {
     stream,
-    endReason: () => (!closing && closedWith === 4401 ? 'unauthorized' : undefined),
+    endReason: () => (closing ? undefined : closedWith === 4401 ? 'unauthorized' : closedWith === 4403 ? 'forbidden' : undefined),
     resize: async (cols, rows) => broker.sendResize(CHANNEL, cols, rows),
     detach: () => {
       closing = true;

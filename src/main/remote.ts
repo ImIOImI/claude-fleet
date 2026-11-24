@@ -5,7 +5,9 @@
 import type { Backend } from './backend.js';
 import type { Workspace, WorkspaceSpec } from './workspaces.js';
 import { attachRemotePty, fetchDrained } from './remoteAttach.js';
-import { RemoteClient, RemoteError, type RecoverVerdict, type WhoAmI } from './remoteClient.js';
+import { closeKind, RemoteClient, RemoteError, type RecoverVerdict, type WhoAmI } from './remoteClient.js';
+import { connKindOf } from './remoteAuth.js';
+import { remoteAttachTag } from '../preload/remoteAuth.js';
 
 export const MANAGED_MSG = 'This remote workspace is managed by its deployment';
 export const TIER_REFRESH_MS = 60_000;
@@ -19,6 +21,8 @@ export interface RemoteBackendDeps {
   token(): Promise<string | null>;
   /** After a host 401: the identity service's verdict on the token that was sent. */
   recover?: (sentToken: string) => Promise<RecoverVerdict>;
+  /** Each connection outcome for the sign-in monitor (D169); `err` null means ok. */
+  observe?: (workspaceId: string, err: unknown) => void;
   /** The signed-in login; a change voids the /whoami throttle. */
   login?: () => Promise<string | null>;
   listManifests(): Promise<WorkspaceSpec[]>;
@@ -49,6 +53,8 @@ export interface RemoteBackend extends Backend {
   refresh(id?: string): Promise<void>;
   /** After a sign-in or token refresh: drop the /whoami throttle, reconnect every /events socket, re-probe every bookmark. */
   reconnect(): void;
+  /** Re-ask one bookmark's /whoami now, ignoring the throttle. */
+  recheck(id: string): void;
   /** Stop every background probe (app quit). */
   stop(): void;
   /** Bookmarks the probe loop knows, with cached liveness; no I/O. */
@@ -83,6 +89,25 @@ export function createRemoteBackend(deps: RemoteBackendDeps): RemoteBackend {
   const clients = new Map<string, RemoteClient>();
   const login = deps.login ?? (async () => null);
   const lastWhoami = new Map<string, { at: number; login: string | null }>();
+  // Bookmarks whose last outcome was a block: the probe re-asks /whoami every cycle until one clears it.
+  const blocked = new Set<string>();
+
+  function report(id: string, err: unknown): void {
+    const kind = connKindOf(err);
+    if (kind === null) return;
+    if (kind === 'ok') blocked.delete(id);
+    else blocked.add(id);
+    deps.observe?.(id, err);
+  }
+
+  /** A block kind rides in the message across IPC (D175). */
+  function tagged(id: string, err: unknown): unknown {
+    report(id, err);
+    const kind = connKindOf(err);
+    if (kind === null || kind === 'ok') return err;
+    const e = err as RemoteError;
+    return new RemoteError(e.kind, remoteAttachTag(kind) + e.message, e.status, e.retryAfterMs, e.auth);
+  }
   const watches = new Map<string, Watch>();
   let stopped = false;
   const schedule =
@@ -137,11 +162,13 @@ export function createRemoteBackend(deps: RemoteBackendDeps): RemoteBackend {
     } catch (err) {
       return { state: 'unreachable', retryAfterMs: retryAfter(err) };
     }
-    if (await whoamiFresh(spec.id)) return { state: 'running', retryAfterMs: 0 };
+    if (!blocked.has(spec.id) && (await whoamiFresh(spec.id))) return { state: 'running', retryAfterMs: 0 };
     try {
       await refreshTier(spec);
+      report(spec.id, null);
       return { state: 'running', retryAfterMs: 0 };
     } catch (err) {
+      report(spec.id, err);
       return { state: err instanceof WrongWorkspaceError ? 'unreachable' : 'running', retryAfterMs: retryAfter(err) };
     }
   }
@@ -149,6 +176,8 @@ export function createRemoteBackend(deps: RemoteBackendDeps): RemoteBackend {
   function unwatch(id: string): void {
     watches.get(id)?.cancel?.();
     watches.delete(id);
+    blocked.delete(id);
+    deps.observe?.(id, null);
   }
 
   function probe(w: Watch): Promise<void> {
@@ -192,6 +221,13 @@ export function createRemoteBackend(deps: RemoteBackendDeps): RemoteBackend {
     await Promise.all([...watches.values()].filter((w) => id === undefined || w.spec.id === id).map(probe));
   }
 
+  /** A 4401 close says only "unauthorized": the next /whoami tells expired from host-refused. */
+  function recheck(id: string): void {
+    lastWhoami.delete(id);
+    blocked.add(id);
+    void refresh(id).catch(() => undefined);
+  }
+
   return {
     clientFor,
     refreshTier,
@@ -203,6 +239,7 @@ export function createRemoteBackend(deps: RemoteBackendDeps): RemoteBackend {
       return remotes.map(row);
     },
     refresh,
+    recheck,
     reconnect() {
       if (stopped) return;
       lastWhoami.clear();
@@ -233,9 +270,28 @@ export function createRemoteBackend(deps: RemoteBackendDeps): RemoteBackend {
     },
     async attachPty(containerId, sessionId, cols, rows, resumeOf) {
       const spec = await bookmark(containerId);
-      const who = await refreshTier(spec);
-      const client = clientFor(spec.remote.url);
-      return attachRemotePty({ client, sessionId, cols, rows, resumeOf, canCreate: who.tier === 'session', drained: () => fetchDrained(client) });
+      try {
+        const who = await refreshTier(spec);
+        const client = clientFor(spec.remote.url);
+        const handle = await attachRemotePty({
+          client,
+          sessionId,
+          cols,
+          rows,
+          resumeOf,
+          canCreate: who.tier === 'session',
+          drained: () => fetchDrained(client),
+          onHostClose: (code) => {
+            const k = closeKind(code);
+            if (k === 'unauthorized') recheck(spec.id);
+            else if (k === 'forbidden') report(spec.id, new RemoteError(k, 'closed by the host', code));
+          }
+        });
+        report(spec.id, null);
+        return handle;
+      } catch (err) {
+        throw tagged(spec.id, err);
+      }
     },
     getBrokerLogs: async () => '',
     committeePost: unsupported('Committee post'),

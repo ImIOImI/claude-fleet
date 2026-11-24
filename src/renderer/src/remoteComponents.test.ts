@@ -63,3 +63,93 @@ describe('remote components', () => {
     expect(src('../App.tsx')).toMatch(/withRemoteCounts\(localCounts, remoteCounts\)/);
   });
 });
+
+describe('signed-out UI (D173)', () => {
+  const read = (p: string) => readFileSync(`src/renderer/src/${p}`, 'utf8');
+
+  it('the banner and panel render text only and sign in through identity:* only', () => {
+    for (const f of ['components/SignedOutBanner.tsx', 'components/DeviceCodePanel.tsx', 'signInFlowInstance.ts']) {
+      const s = read(f);
+      expect(s).not.toMatch(/dangerouslySetInnerHTML|innerHTML/);
+      expect(s).not.toMatch(/\btoken\b/i);
+    }
+    expect(read('signInFlowInstance.ts').match(/window\.api\.[a-zA-Z]+/g)).toEqual(['window.api.identity', 'window.api.identity', 'window.api.identity']);
+  });
+
+  it('App subscribes before the snapshot, shows the banner from the pure helper and resets the flow when signed back in', () => {
+    const app = read('App.tsx');
+    expect(app.indexOf('window.api.remote.onAuth(')).toBeGreaterThan(-1);
+    expect(app.indexOf('window.api.remote.onAuth(')).toBeLessThan(app.indexOf('window.api.remote.authState()'));
+    expect(app).toMatch(/signedOutBanner\(remoteAuth, /);
+    expect(app).toMatch(/if \(!remoteAuth\.signedOut\) signInFlow\.reset\(\)/);
+    expect(app).toMatch(/<SignedOutBanner text=\{signedOutText\} \/>/);
+  });
+
+  it('the chip takes the block for remote workspaces only', () => {
+    const s = read('components/WorkspaceTabStrip.tsx');
+    expect(s).toMatch(/remoteChip\(w, drains\[w\.id\], w\.kind === 'remote' \? blockFor\(remoteAuth, w\.id\) : null\)/);
+    expect(s).toMatch(/rc\?\.phase === 'signed-out' \? 'signed-out'/);
+    expect(s).toMatch(/rc\?\.phase === 'no-access' \? 'no-access'/);
+  });
+
+  it('styles every class the banner, panel and chip phases use', () => {
+    const css = read('styles.css');
+    for (const c of ['.signed-out-banner', '.device-flow.inline', '.device-countdown', '.device-flow-error', '.device-flow-start', '.ws-chip-group.signed-out', '.ws-chip-group.no-access', '.session-ended-card.remote.wait']) {
+      expect(css).toContain(c);
+    }
+  });
+});
+
+describe('remote tab cards (D174–D176)', () => {
+  const ts = () => readFileSync('src/renderer/src/components/TerminalSession.tsx', 'utf8');
+
+  it('gates the attach on a sign-in block, as on paused', () => {
+    expect(ts()).toMatch(/if \(skipAttach\(remoteRef\.current, remoteBlockRef\.current\)\)/);
+  });
+
+  it('maps a tagged attach error to the remote card and pty:end through remoteEndKind with the end reason', () => {
+    const s = ts();
+    expect(s).toMatch(/attachErrorBlock\(err\)/);
+    expect(s).toMatch(/remoteEndKind\(restartingRef\.current, remoteRef\.current \? remoteBlockRef\.current : null, reason\)/);
+  });
+
+  it('reattaches through the pure helper, staggered, and has no identity:changed listener of its own', () => {
+    const s = ts();
+    expect(s).toMatch(/reattachOnAuthChange\(\{/);
+    expect(s).toMatch(/attaching: attachingRef\.current/);
+    expect(s).toMatch(/if \(endedRef\.current && !attachingRef\.current\) setSessionEpoch/);
+    expect(s).toMatch(/reattachJitterMs\(sessionId\)/);
+    expect(s).not.toMatch(/identity\.onChanged/);
+  });
+
+  it('keeps the one-shot 4401 reattach, except under a sign-in block', () => {
+    expect(ts()).toMatch(/reason === 'unauthorized' && !isSignInBlock\(remoteBlockRef\.current\)/);
+  });
+
+  it('the 4401 one-shot skips a tab that is attaching or no longer ended (M5)', () => {
+    const s = ts();
+    expect(s).toMatch(/attaching: attachingRef\.current, ended: endedRef\.current !== null/);
+    expect(s).toMatch(/endedRef\.current = end;/);
+  });
+
+  it('a sign-in tag from an attach a sign-in overtook attaches again (M6)', () => {
+    const s = ts();
+    expect(s).toMatch(/const attachEpoch = authEpochRef\.current;/);
+    expect(s).toMatch(/retryStaleSignInAttach\(block, attachEpoch, authEpochRef\.current\)/);
+  });
+
+  it('announces the card text only, not the live sign-in panel (M7)', () => {
+    const s = ts();
+    const card = s.slice(s.indexOf('{shown && ('), s.indexOf("{endedReason?.kind === 'natural'"));
+    expect(card).toMatch(/<div className="session-ended-overlay">/);
+    expect(card).toMatch(/<div role="status">\s*<div className="session-ended-title">\{c\.title\}<\/div>\s*<div className="session-ended-help">\{c\.body\}<\/div>\s*<\/div>/);
+  });
+
+  it('renders fixed card copy only, never the attach error text', () => {
+    const s = ts();
+    expect(s).toMatch(/remoteCard\(shown, remoteName \?\? 'the host', ssoUrl\)/);
+    expect(s).not.toMatch(/dangerouslySetInnerHTML/);
+    const card = s.slice(s.indexOf('{shown && ('), s.indexOf("{endedReason?.kind === 'natural'"));
+    expect(card).not.toMatch(/message|msg/);
+  });
+});

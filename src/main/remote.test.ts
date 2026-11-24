@@ -3,6 +3,7 @@ import { person, TOKEN } from '../host/testFakes.js';
 import { startTestHost, TEST_WORKSPACE_ID as ID } from '../host/testHost.js';
 import { CHECKING_STATUS, createRemoteBackend, HEALTH_POLL_MS, MANAGED_MSG, TIER_REFRESH_MS, type RemoteBackend } from './remote.js';
 import { RemoteClient, RemoteError } from './remoteClient.js';
+import { connKindOf } from './remoteAuth.js';
 import type { RemoteBookmark, WorkspaceSpec } from './workspaces.js';
 
 const realWhoami = RemoteClient.prototype.whoami;
@@ -17,7 +18,7 @@ afterEach(async () => {
   close = null;
 });
 
-async function rig(tier: 'read' | 'session', o: { cached?: RemoteBookmark['tier']; extra?: WorkspaceSpec[] } = {}) {
+async function rig(tier: 'read' | 'session', o: { cached?: RemoteBookmark['tier']; extra?: WorkspaceSpec[]; observe?: (id: string, err: unknown) => void } = {}) {
   const h = await startTestHost({ tokens: { [TOKEN]: person('alice', 1) }, grants: [{ login: 'alice', tier }] });
   close = h.close;
   let manifests: WorkspaceSpec[] = [
@@ -43,7 +44,8 @@ async function rig(tier: 'read' | 'session', o: { cached?: RemoteBookmark['tier'
     writeManifest: async (s) => void (manifests = manifests.map((m) => (m.id === s.id ? s : m))),
     deleteState: async (id) => void deleted.push(id),
     revokePublish: async (id) => void revoked.push(id),
-    now: () => t
+    now: () => t,
+    observe: o.observe
   });
   vi.spyOn(RemoteClient.prototype, 'whoami').mockImplementation(function (this: RemoteClient) {
     whoamiCalls++;
@@ -267,6 +269,82 @@ describe('remote backend', () => {
     await expect(r.backend.removeWorkspace('../../x')).rejects.toThrow(/no remote workspace/);
     expect(r.deleted).toEqual([]);
     expect(r.revoked).toEqual([]);
+  });
+
+  it('the probe loop reports a good /whoami as ok', async () => {
+    const seen: Array<[string, unknown]> = [];
+    const r = await rig('read', { observe: (id, err) => void seen.push([id, err]) });
+    await r.backend.refresh();
+    expect(seen).toContainEqual([ID, null]);
+  });
+
+  it('a blocked bookmark re-asks /whoami on every probe, inside the minute, until it clears', async () => {
+    const seen: Array<[string, unknown]> = [];
+    const r = await rig('read', { observe: (id, err) => void seen.push([id, err]) });
+    await r.backend.refresh(ID);
+    const spy = vi.spyOn(RemoteClient.prototype, 'whoami').mockRejectedValueOnce(new RemoteError('unauthorized', 'no', 401, undefined, 'host-refused'));
+    await r.backend.attachPty(ID, 'main', 80, 24).catch(() => undefined);
+    expect(seen.at(-1)?.[1]).toBeInstanceOf(RemoteError);
+    spy.mockClear();
+    await r.backend.refresh(ID);
+    expect(spy).toHaveBeenCalledOnce();
+    expect(seen.at(-1)).toEqual([ID, null]);
+    spy.mockClear();
+    await r.backend.refresh(ID);
+    expect(spy).not.toHaveBeenCalled();
+  });
+
+  it('tags a remote attach failure with its kind and reports it (D175)', async () => {
+    const seen: Array<[string, unknown]> = [];
+    const r = await rig('session', { observe: (id, err) => void seen.push([id, err]) });
+    vi.spyOn(RemoteClient.prototype, 'whoami').mockRejectedValue(new RemoteError('unauthorized', 'nope', 401, undefined, 'expired'));
+    const err = (await r.backend.attachPty(ID, 'main', 80, 24).catch((e: unknown) => e)) as RemoteError;
+    expect(err.message).toMatch(/^remote-expired: /);
+    expect([err.kind, err.auth]).toEqual(['unauthorized', 'expired']);
+    expect(seen.at(-1)?.[0]).toBe(ID);
+  });
+
+  it('an untagged attach failure is rethrown unchanged', async () => {
+    const r = await rig('session');
+    vi.spyOn(RemoteClient.prototype, 'whoami').mockRejectedValue(new RemoteError('protocol', 'odd reply'));
+    await expect(r.backend.attachPty(ID, 'main', 80, 24)).rejects.toThrow(/^odd reply$/);
+  });
+
+  it('a host 4401 on a live tab re-asks /whoami instead of guessing a kind; 4403 is forbidden; 1001 is neither', async () => {
+    const kinds = (seen: Array<[string, unknown]>) => seen.filter(([, e]) => e !== null).map(([, e]) => connKindOf(e));
+    for (const [code, want] of [[4401, 'recheck'], [4403, 'forbidden'], [1001, 'none']] as const) {
+      const seen: Array<[string, unknown]> = [];
+      const r = await rig('session', { observe: (id, err) => void seen.push([id, err]) });
+      const h = await r.backend.attachPty(ID, 'tab1', 80, 24);
+      const calls = r.whoamiCalls();
+      const errsBefore = kinds(seen).length;
+      r.host.halt(code, 'x');
+      await new Promise<void>((done) => h.stream.once('end', done).resume());
+      if (want === 'recheck') await expect.poll(() => r.whoamiCalls()).toBeGreaterThan(calls);
+      if (want === 'forbidden') await expect.poll(() => kinds(seen).slice(errsBefore)).toEqual(['forbidden']);
+      if (want === 'none') await new Promise((res) => setTimeout(res, 50));
+      const after = kinds(seen).slice(errsBefore);
+      expect(after).not.toContain('host-refused');
+      if (want !== 'recheck') expect(r.whoamiCalls()).toBe(calls);
+      if (want === 'none') expect(after).toEqual([]);
+      await r.close();
+    }
+  });
+
+  it('reports ok only once the attach socket is up', async () => {
+    const seen: Array<[string, unknown]> = [];
+    const r = await rig('read', { observe: (id, err) => void seen.push([id, err]) });
+    await expect(r.backend.attachPty(ID, 'tab1', 80, 24)).rejects.toThrow(/cannot start one/);
+    expect(seen).not.toContainEqual([ID, null]);
+  });
+
+  it('a forgotten bookmark is reported ok so its block clears', async () => {
+    const seen: Array<[string, unknown]> = [];
+    const r = await rig('read', { observe: (id, err) => void seen.push([id, err]) });
+    await r.backend.refresh();
+    seen.length = 0;
+    await r.backend.removeWorkspace(ID);
+    expect(seen).toContainEqual([ID, null]);
   });
 
   it('attach refuses a non-remote id without contacting any host', async () => {

@@ -37,6 +37,20 @@ export async function resolveVaultWorkspaceKind(
   return (await d.mockWorkspaces()).find((w) => w.id === ws)?.kind ?? null;
 }
 
+const FLEET_KEY_PAT = 'GITHUB_TOKEN';
+type PatWrites = Pick<VaultIpcDeps, 'putKey' | 'deleteKey' | 'renameKey'>;
+
+/** Root `GITHUB_TOKEN` writes run through `watch` (`IdentityService.patChanged`), so a PAT added or removed signs in or out. */
+export function watchPatWrites<D extends PatWrites>(deps: D, watch: <T>(write: () => Promise<T>) => Promise<T>): D {
+  const isPat = (...keys: string[]) => keys.includes(FLEET_KEY_PAT);
+  return {
+    ...deps,
+    putKey: (a) => (isPat(a.key) ? watch(() => deps.putKey(a)) : deps.putKey(a)),
+    deleteKey: (key) => (isPat(key) ? watch(() => deps.deleteKey(key)) : deps.deleteKey(key)),
+    renameKey: (key, next) => (isPat(key, next) ? watch(() => deps.renameKey(key, next)) : deps.renameKey(key, next))
+  };
+}
+
 export interface IpcHandleLike {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any -- matches IpcMain.handle's listener
   handle(channel: string, fn: (event: unknown, ...args: any[]) => unknown): void;

@@ -24,6 +24,8 @@ export const REFRESH_LEAD_MS = 10 * 60_000;
 export const REFRESH_RETRY_MS = 60_000;
 /** Minimum gap between successful refreshes, except once the token has expired. */
 export const MIN_REFRESH_INTERVAL_MS = 5 * 60_000;
+/** How long recover trusts that GitHub still accepts a token a host refused (one GET /user per token per minute). */
+export const HOST_REFUSED_TTL_MS = 60_000;
 const MAX_TIMER_MS = 2 ** 31 - 1;
 
 const REVOKED_NOTICE = 'GitHub no longer accepts the saved sign-in (revoked or expired). Sign in again.';
@@ -253,6 +255,8 @@ export class IdentityService {
   private readonly listeners = new Set<(c: IdentityChange) => void>();
   /** One recovery per rejected token; concurrent 401s share it. */
   private readonly recovering = new Map<string, Promise<RecoverResult>>();
+  /** GitHub accepted this token after a host 401: skip GET /user for HOST_REFUSED_TTL_MS. */
+  private hostRefused: { token: string; at: number } | null = null;
 
   constructor(deps: IdentityServiceDeps) {
     this.vault = deps.vault;
@@ -478,7 +482,8 @@ export class IdentityService {
       await this.clearNow();
       return true;
     });
-    if (done) this.emit({ cause: 'revoked', signedIn: false });
+    // A vault PAT may still win, so this isn't necessarily a sign-out.
+    if (done) this.emit({ cause: 'revoked', signedIn: (await this.settled()) !== null });
     return done;
   }
 
@@ -746,6 +751,22 @@ export class IdentityService {
     if (had) this.emit({ cause: 'sign-out', signedIn: false });
   }
 
+  /** Runs a Vault write that may change the root GITHUB_TOKEN, then fires `sign-in`/`sign-out` if the bearer changed.
+   *  The comparison runs after the write returns, so a PAT probe doesn't hold up the write. */
+  async patChanged<T>(write: () => Promise<T>): Promise<T> {
+    const before = (await this.settled().catch(() => null))?.token ?? null;
+    const r = await write();
+    void this.settled().then(
+      (s) => {
+        const after = s?.token ?? null;
+        if (after === before) return;
+        this.emit(after === null ? { cause: 'sign-out', signedIn: false } : { cause: 'sign-in', signedIn: true });
+      },
+      () => undefined
+    );
+    return r;
+  }
+
   /** For RemoteClient: the signed-in token, attached to fleet-host requests. Main process only. */
   async bearerToken(): Promise<string | null> {
     return (await this.current())?.token ?? null;
@@ -765,16 +786,18 @@ export class IdentityService {
     const saved = await this.settled();
     if (!saved) return 'expired';
     if (saved.token !== sent) return 'retry';
-    if (saved.source === 'pat') return this.recoverPat(sent);
+    if (saved.source === 'pat') return this.hostRefusedFresh(sent) ? 'host-refused' : this.recoverPat(sent);
     if (saved.grant.refreshToken && this.dueForRefresh(saved)) {
       const t = await this.refresh(saved);
       if (!t) return 'expired';
       // Same token: the refresh failed transiently and the sign-in stays.
       return t !== sent ? 'retry' : 'host-refused';
     }
+    if (this.hostRefusedFresh(sent)) return 'host-refused';
     // Only a token GitHub rejects is renewed; otherwise a host that refuses valid tokens would rotate it on every 401.
     try {
       await this.github.probe(sent);
+      this.hostRefused = { token: sent, at: this.now() };
       return 'host-refused';
     } catch (err) {
       if (!(err instanceof IdentityError) || err.kind !== 'unauthorized') return 'host-refused';
@@ -785,6 +808,11 @@ export class IdentityService {
     }
     if (await this.revoke(sent)) this.notice = REVOKED_NOTICE;
     return 'expired';
+  }
+
+  private hostRefusedFresh(token: string): boolean {
+    const hr = this.hostRefused;
+    return !!hr && hr.token === token && this.now() - hr.at < HOST_REFUSED_TTL_MS;
   }
 
   /** A PAT GitHub rejects is tombstoned, never removed from the Vault; the device token, if any, takes over. */
@@ -798,7 +826,10 @@ export class IdentityService {
       return 'host-refused';
     }
     await this.serial(() => this.recordProbe(sha, p, r, false));
-    if (r.ok) return 'host-refused';
+    if (r.ok) {
+      this.hostRefused = { token: pat, at: this.now() };
+      return 'host-refused';
+    }
     const next = await this.settled();
     if (this.patRejected === sha) this.emit({ cause: 'revoked', signedIn: next !== null });
     return next && next.token !== pat ? 'retry' : 'expired';

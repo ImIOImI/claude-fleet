@@ -15,7 +15,7 @@
 
 import { useEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
-import type { RemoteDrain, RemoteLiveSession, RemoteTier } from '../../../preload';
+import type { RemoteBlockKind, RemoteDrain, RemoteLiveSession, RemoteTier } from '../../../preload';
 import { canEndSession, defaultTabOnTierChange, drainBanner, drainEnded, ipcErrorText, joinableSessions, mineIds, paneRules, raceTimeout, tierTitle } from '../remoteView';
 import type { WorkspaceObservabilitySummary } from '../../../preload';
 import type { MirrorSetting, CleanupSetting } from '../App';
@@ -60,6 +60,12 @@ interface Props {
   remoteTier?: RemoteTier | null;
   /** Remote workspaces only: the host's last broker:drain (D152). */
   drain?: RemoteDrain | null;
+  /** Remote only: the tab card to show when attaching can't work (D170). */
+  remoteBlock?: RemoteBlockKind | null;
+  /** Bumped on every sign-in; remote tabs on a card reattach (D174). */
+  authEpoch?: number;
+  ssoUrl?: string | null;
+  remoteName?: string;
   /** ULID — used for sessions.json path and observability lookups. */
   workspaceId: string;
   /** The workspace's durable-mirror defaults (manifest). New tabs inherit
@@ -215,6 +221,10 @@ export function TerminalPane({
   containerId,
   remoteTier,
   drain,
+  remoteBlock,
+  authEpoch,
+  ssoUrl,
+  remoteName,
   workspaceId,
   mirrorDefault,
   cleanupDefault,
@@ -1100,6 +1110,10 @@ export function TerminalPane({
             onRefreshUnresolved={handleRefreshUnresolved}
             restarting={rules.restarting}
             resumeToken={resumeToken}
+            remoteBlock={rules.remote ? remoteBlock ?? null : null}
+            authEpoch={authEpoch ?? 0}
+            ssoUrl={ssoUrl ?? null}
+            remoteName={remoteName}
           />
         ))}
         {loaded && sessions.length === 0 && rules.remote && (

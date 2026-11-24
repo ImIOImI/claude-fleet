@@ -24,7 +24,21 @@ import { EchoRttTracker } from '../echoRtt';
 import { initPerfState, perfRecording } from '../perfState';
 import { buildTerminalOptions } from './terminalOptions';
 import { createResizePusher, type ResizePusher } from './resizePusher';
-import { reattachAfterAuthEnd, resumesAfterDrain, sessionEndKind } from '../remoteView';
+import { reattachAfterAuthEnd, resumesAfterDrain } from '../remoteView';
+import {
+  attachErrorBlock,
+  isSignInBlock,
+  reattachJitterMs,
+  reattachOnAuthChange,
+  remoteCard,
+  remoteEndKind,
+  retryStaleSignInAttach,
+  shownRemoteBlock,
+  skipAttach,
+  type TabEnd
+} from '../signedOutView';
+import { DeviceCodePanel } from './DeviceCodePanel';
+import type { RemoteBlockKind } from '../../../preload/remoteAuth';
 
 const URL_REGEX = /https?:\/\/[^\s'"`<>()\[\]{}]+/g;
 const TRAILING_PUNCTUATION = /[.,;:!?]+$/;
@@ -150,6 +164,12 @@ interface Props {
   restarting?: boolean;
   /** Bumped when the restart is over; a tab that ended during it re-attaches. */
   resumeToken?: number | null;
+  /** Remote only: the tab card to show when attaching can't work (D170). */
+  remoteBlock?: RemoteBlockKind | null;
+  /** Bumped on every sign-in; a tab on a remote card reattaches (D174). */
+  authEpoch?: number;
+  ssoUrl?: string | null;
+  remoteName?: string;
 }
 
 export function TerminalSession({
@@ -168,6 +188,10 @@ export function TerminalSession({
   onRefreshUnresolved,
   restarting = false,
   resumeToken,
+  remoteBlock = null,
+  authEpoch = 0,
+  ssoUrl = null,
+  remoteName,
 }: Props) {
   const hostRef = useRef<HTMLDivElement | null>(null);
   // The live xterm, so effects outside the attach effect can force a repaint
@@ -179,9 +203,13 @@ export function TerminalSession({
   remoteRef.current = remote;
   const restartingRef = useRef(restarting);
   restartingRef.current = restarting;
+  const remoteBlockRef = useRef(remoteBlock);
+  remoteBlockRef.current = remoteBlock;
+  const authEpochRef = useRef(authEpoch);
+  authEpochRef.current = authEpoch;
+  // From the attach effect's start until pty:attach settles; auth changes don't reattach meanwhile.
+  const attachingRef = useRef(false);
   const endedInDrainRef = useRef(false);
-  // The last attach failed (never reached a session), so retrying it is safe.
-  const attachFailedRef = useRef(false);
   // When this tab last re-attached by itself after a 4401; bounds that to one per AUTO_REATTACH_GAP_MS.
   const lastAutoReattachRef = useRef<number | null>(null);
   const visibleRef = useRef(visible);
@@ -198,9 +226,10 @@ export function TerminalSession({
   // permission denied, etc.). The overlay renders different copy +
   // surfaces the error text for the latter so users can act on it
   // instead of staring at a generic "session ended" card.
-  const [endedReason, setEndedReason] = useState<
-    { kind: 'natural' } | { kind: 'restarting' } | { kind: 'attach-error'; message: string } | null
-  >(null);
+  const [endedReason, setEndedReason] = useState<TabEnd | null>(null);
+  // Also set by pty:end itself, so an IPC reply that beats the re-render reads it.
+  const endedRef = useRef(endedReason);
+  endedRef.current = endedReason;
 
   // The live pty handle id for the current attach, mirrored out of the effect
   // closure so the loadout-reload handler can close it. Null between attaches.
@@ -217,7 +246,9 @@ export function TerminalSession({
     if (!hostRef.current) return;
     const host = hostRef.current;
     setEndedReason(null);
-    attachFailedRef.current = false;
+    endedRef.current = null;
+    attachingRef.current = true;
+    const attachEpoch = authEpochRef.current;
     onLifecycleChange?.(sessionId, 'live');
 
     // Declared up front so the safeFit helper can read it. The cleanup
@@ -531,7 +562,17 @@ export function TerminalSession({
       // network attach — it would hang 30s against the frozen PID-1 broker
       // and fail with "ATTACHED timed out". When `paused` flips to false on
       // resume, this effect re-runs and attaches cleanly. (#18)
-      if (paused) return;
+      if (paused) {
+        attachingRef.current = false;
+        return;
+      }
+      // Signed out: no attach until a sign-in moves authEpoch (D176).
+      if (skipAttach(remoteRef.current, remoteBlockRef.current)) {
+        attachingRef.current = false;
+        setEndedReason({ kind: 'remote', block: remoteBlockRef.current! });
+        onLifecycleChange?.(sessionId, 'ended');
+        return;
+      }
 
       try {
         // Pin the durable-mirror decision before the PTY (and thus the
@@ -552,6 +593,7 @@ export function TerminalSession({
           resumeTarget,
           visibleRef.current
         );
+        attachingRef.current = false;
         if (disposed) {
           window.api.pty.detach(sid);
           return;
@@ -649,14 +691,14 @@ export function TerminalSession({
         });
         unsubEnd = window.api.pty.onEnd(sid, ({ reason }) => {
           term.writeln('\r\n[session ended]');
-          if (!disposed && remoteRef.current && reason === 'unauthorized') {
-            // The token this attach opened with expired; the next sign-in change re-attaches it too.
-            attachFailedRef.current = true;
+          if (!disposed && remoteRef.current && reason === 'unauthorized' && !isSignInBlock(remoteBlockRef.current)) {
+            // The token this attach opened with expired; retry once with the current one.
             void window.api.identity
               .status()
               .then(({ signedIn }) => {
                 const now = Date.now();
-                if (disposed || !reattachAfterAuthEnd({ remote: true, reason, signedIn, lastAutoAt: lastAutoReattachRef.current, now })) return;
+                const ok = reattachAfterAuthEnd({ remote: true, reason, signedIn, lastAutoAt: lastAutoReattachRef.current, now, attaching: attachingRef.current, ended: endedRef.current !== null });
+                if (disposed || !ok) return;
                 lastAutoReattachRef.current = now;
                 setSessionEpoch((e) => e + 1);
               })
@@ -665,9 +707,10 @@ export function TerminalSession({
           if (!disposed) {
             // A dead session isn't busy.
             setBusy(false);
-            const kind = sessionEndKind(restartingRef.current);
-            endedInDrainRef.current = kind === 'restarting';
-            setEndedReason({ kind });
+            const end = remoteEndKind(restartingRef.current, remoteRef.current ? remoteBlockRef.current : null, reason);
+            endedInDrainRef.current = end.kind === 'restarting';
+            endedRef.current = end;
+            setEndedReason(end);
             onLifecycleChange?.(sessionId, 'ended');
             // Diagnostic: distinguish "claude /exit" from "broker
             // disconnected mid-session" cases. Both currently fire the
@@ -716,19 +759,27 @@ export function TerminalSession({
         // verbatim so the user has something to act on; we don't bother
         // writing it into xterm because the overlay would cover it
         // anyway (z-index over .terminal-host).
+        attachingRef.current = false;
         const msg = err instanceof Error ? err.message : String(err);
         if (!disposed) {
-          setEndedReason({ kind: 'attach-error', message: msg });
-          attachFailedRef.current = true;
-          // Mirror to error.log so post-mortem debugging has a record
-          // even though this isn't an uncaught exception (the catch
-          // here is clean — but the user still loses their terminal).
-          void window.api.app.logError({
-            type: 'pty-attach-error',
-            message: msg,
-            stack: err instanceof Error ? err.stack : undefined,
-            extra: { sessionId, containerId }
-          });
+          // A remote block is fixed card copy; main already logged the transition.
+          const block = remoteRef.current ? attachErrorBlock(err) : null;
+          if (retryStaleSignInAttach(block, attachEpoch, authEpochRef.current)) {
+            setSessionEpoch((e) => e + 1);
+          } else if (block) {
+            setEndedReason({ kind: 'remote', block });
+          } else {
+            setEndedReason({ kind: 'attach-error', message: msg });
+            // Mirror to error.log so post-mortem debugging has a record
+            // even though this isn't an uncaught exception (the catch
+            // here is clean — but the user still loses their terminal).
+            void window.api.app.logError({
+              type: 'pty-attach-error',
+              message: msg,
+              stack: err instanceof Error ? err.stack : undefined,
+              extra: { sessionId, containerId }
+            });
+          }
           onLifecycleChange?.(sessionId, 'ended');
         }
       }
@@ -863,13 +914,20 @@ export function TerminalSession({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [reloadToken, sessionId, workspaceId, onRefreshUnresolved]);
 
-  // A remote tab that failed to attach, or that the host closed with 4401, retries once the sign-in changes.
+  const shown = shownRemoteBlock(remote, endedReason, remoteBlock);
+  const prevAuthRef = useRef({ epoch: authEpoch, block: remoteBlock });
   useEffect(() => {
-    if (!remote) return;
-    return window.api.identity.onChanged?.(({ signedIn }) => {
-      if (signedIn && attachFailedRef.current) setSessionEpoch((e) => e + 1);
-    });
-  }, [remote]);
+    const prev = prevAuthRef.current;
+    const next = { epoch: authEpoch, block: remoteBlock };
+    prevAuthRef.current = next;
+    if (!reattachOnAuthChange({ remote, ended: endedRef.current, attaching: attachingRef.current, prev, next })) return;
+    const t = setTimeout(() => {
+      // Another path (Retry, the 4401 one-shot) may have reattached meanwhile.
+      if (endedRef.current && !attachingRef.current) setSessionEpoch((e) => e + 1);
+    }, reattachJitterMs(sessionId));
+    return () => clearTimeout(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [authEpoch, remoteBlock]);
 
   useEffect(() => {
     if (!resumesAfterDrain(resumeToken, endedInDrainRef.current)) return;
@@ -957,7 +1015,31 @@ export function TerminalSession({
             </div>
           </div>
         )}
-        {endedReason?.kind === 'natural' && (
+        {shown && (() => {
+          const c = remoteCard(shown, remoteName ?? 'the host', ssoUrl);
+          return (
+            <div className="session-ended-overlay">
+              <div className={`session-ended-card remote ${c.tone}`}>
+                <div role="status">
+                  <div className="session-ended-title">{c.title}</div>
+                  <div className="session-ended-help">{c.body}</div>
+                </div>
+                {c.action === 'sign-in' && <DeviceCodePanel />}
+                {c.action === 'retry' && (
+                  <button className="btn" onClick={() => setSessionEpoch((e) => e + 1)}>
+                    Retry now
+                  </button>
+                )}
+                {c.linkUrl && (
+                  <a className="btn" href={c.linkUrl} target="_blank" rel="noreferrer">
+                    Authorise on GitHub
+                  </a>
+                )}
+              </div>
+            </div>
+          );
+        })()}
+        {endedReason?.kind === 'natural' && !shown && (
           <div className="session-ended-overlay" role="alertdialog" aria-label="Session ended">
             <div className="session-ended-card">
               <div className="session-ended-title">claude session ended</div>

@@ -1,7 +1,8 @@
 import { app, BrowserWindow, dialog, shell, ipcMain } from 'electron';
 import { join } from 'node:path';
-import { registerIpc, invalidateWorkspaceList, MOCK_MODE, remoteFederation, replayInputWait, setFederatedEmbedder, setRemoteNoticeSink, stopRemoteBackend } from './ipc.js';
+import { registerIpc, invalidateWorkspaceList, MOCK_MODE, remoteFederation, replayInputWait, setFederatedEmbedder, setRemoteNoticeSink, setSignedOutNotifier, stopRemoteBackend } from './ipc.js';
 import { createRemoteNotifier } from './federation/remoteNotices.js';
+import { signedOutRequest } from './remoteAuth.js';
 import { parseNoticeRows } from './federation/remoteAutomationRows.js';
 import { NotifyStore } from './inbox/notifyStore.js';
 import { openDb, openDbPostgres, closeDb, deleteEmbeddingsForOtherModels, sessionsWithPendingTurns, recordErrors, stateKysely, onStateOpenStats, stateLeftoverDrain, setStateWarnSink, sessionCaptureSignals, isAutomationSession } from './db.js';
@@ -483,6 +484,13 @@ if (gotSingleInstanceLock) app.whenReady().then(async () => {
       });
       setRemoteNoticeSink(notifier);
       inboxTeardown.push(() => { notifier.stop(); setRemoteNoticeSink(null); });
+      setSignedOutNotifier(
+        (n) =>
+          void svc
+            .request(signedOutRequest(n))
+            .catch((e: unknown) => logError({ source: 'main', type: 'remote-auth', level: 'warn', message: String(e) }))
+      );
+      inboxTeardown.push(() => setSignedOutNotifier(null));
     }
     // Knowledge capture settings (#483 §5a): get/set_capture_settings MCP tools,
     // capture-settings proposals, and the change log for form edits.
