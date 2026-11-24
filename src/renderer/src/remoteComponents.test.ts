@@ -63,3 +63,39 @@ describe('remote components', () => {
     expect(src('../App.tsx')).toMatch(/withRemoteCounts\(localCounts, remoteCounts\)/);
   });
 });
+
+describe('signed-out UI (D173)', () => {
+  const read = (p: string) => readFileSync(`src/renderer/src/${p}`, 'utf8');
+
+  it('the banner and panel render text only and sign in through identity:* only', () => {
+    for (const f of ['components/SignedOutBanner.tsx', 'components/DeviceCodePanel.tsx', 'signInFlowInstance.ts']) {
+      const s = read(f);
+      expect(s).not.toMatch(/dangerouslySetInnerHTML|innerHTML/);
+      expect(s).not.toMatch(/\btoken\b/i);
+    }
+    expect(read('signInFlowInstance.ts').match(/window\.api\.[a-zA-Z]+/g)).toEqual(['window.api.identity', 'window.api.identity', 'window.api.identity']);
+  });
+
+  it('App subscribes before the snapshot, shows the banner from the pure helper and resets the flow when signed back in', () => {
+    const app = read('App.tsx');
+    expect(app.indexOf('window.api.remote.onAuth(')).toBeGreaterThan(-1);
+    expect(app.indexOf('window.api.remote.onAuth(')).toBeLessThan(app.indexOf('window.api.remote.authState()'));
+    expect(app).toMatch(/signedOutBanner\(remoteAuth, /);
+    expect(app).toMatch(/if \(!remoteAuth\.signedOut\) signInFlow\.reset\(\)/);
+    expect(app).toMatch(/<SignedOutBanner text=\{signedOutText\} \/>/);
+  });
+
+  it('the chip takes the block for remote workspaces only', () => {
+    const s = read('components/WorkspaceTabStrip.tsx');
+    expect(s).toMatch(/remoteChip\(w, drains\[w\.id\], w\.kind === 'remote' \? blockFor\(remoteAuth, w\.id\) : null\)/);
+    expect(s).toMatch(/rc\?\.phase === 'signed-out' \? 'signed-out'/);
+    expect(s).toMatch(/rc\?\.phase === 'no-access' \? 'no-access'/);
+  });
+
+  it('styles every class the banner, panel and chip phases use', () => {
+    const css = read('styles.css');
+    for (const c of ['.signed-out-banner', '.device-flow.inline', '.device-countdown', '.device-flow-error', '.device-flow-start', '.ws-chip-group.signed-out', '.ws-chip-group.no-access', '.session-ended-card.remote.wait']) {
+      expect(css).toContain(c);
+    }
+  });
+});

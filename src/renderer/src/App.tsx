@@ -47,6 +47,10 @@ import type {
   StoreStatus
 } from '../../preload';
 import { storeBannerText } from './storeView';
+import { SignedOutBanner } from './components/SignedOutBanner';
+import { signInFlow } from './signInFlowInstance';
+import { signedOutBanner } from './signedOutView';
+import { EMPTY_REMOTE_AUTH, type RemoteAuthState } from '../../preload/remoteAuth';
 import type { CaptureSettings } from '../../preload/captureSettings';
 import type { ExtraMount } from '../../preload/extraMounts';
 import type { WorkspacePublish } from '../../preload/publish';
@@ -272,6 +276,20 @@ export function App() {
     void window.api.remote.drainStates().then((s) => setDrains((p) => ({ ...s, ...p }))).catch(() => undefined);
     return window.api.remote.onDrain((u) => setDrains((p) => ({ ...p, [u.workspaceId]: u.drain })));
   }, []);
+  const [remoteAuth, setRemoteAuth] = useState<RemoteAuthState>(EMPTY_REMOTE_AUTH);
+  useEffect(() => {
+    // Every push is the whole state and newer than the snapshot.
+    let pushed = false;
+    const off = window.api.remote.onAuth((s) => {
+      pushed = true;
+      setRemoteAuth(s);
+    });
+    void window.api.remote.authState().then((s) => { if (!pushed) setRemoteAuth(s); }).catch(() => undefined);
+    return off;
+  }, []);
+  useEffect(() => {
+    if (!remoteAuth.signedOut) signInFlow.reset();
+  }, [remoteAuth.signedOut]);
   // A pushed status is newer than the fetched one. main broadcasts
   // inbox:changed when the Postgres store becomes ready.
   const [storeStatus, setStoreStatus] = useState<StoreStatus | null>(null);
@@ -1478,7 +1496,8 @@ export function App() {
 
   const remoteBanner = unreachableBanner(unreachableRemoteNames(workspaces));
   const storeBanner = storeBannerText(storeStatus);
-  const hasBanners = backendReady === false || !!remoteBanner || !!storeBanner;
+  const signedOutText = signedOutBanner(remoteAuth, workspaces.filter((w) => w.kind === 'remote').length);
+  const hasBanners = backendReady === false || !!remoteBanner || !!storeBanner || !!signedOutText;
   const selectedRemotePane = selected ? remotePane(selected) : null;
 
   return (
@@ -1489,6 +1508,7 @@ export function App() {
     >
       <WorkspaceTabStrip
         drains={drains}
+        remoteAuth={remoteAuth}
         workspaces={roleWsId ? workspaces.filter((w) => w.id !== roleWsId) : workspaces}
         summaries={summaries}
         busyByWorkspace={effectiveBusyByWorkspace}
@@ -1533,6 +1553,7 @@ export function App() {
               {storeBanner}
             </div>
           )}
+          {signedOutText && <SignedOutBanner text={signedOutText} />}
         </div>
       )}
 

@@ -3980,3 +3980,27 @@ button.vault-chip.on { color: var(--ok); border-color: var(--c2-soft); backgroun
 .drain-banner { padding: 6px 12px; background: color-mix(in oklab, var(--warn) 18%, transparent); color: var(--warn); font-size: 12px; }
 .ws-chip-group.restarting .ws-chip-sub { color: var(--warn); }
 .session-ended-card.restarting .session-ended-title { color: var(--warn); }
+
+/* Remote workspace signed out / no access (D170, D173). */
+.daemon-banner.signed-out-banner {
+  color: var(--wait);
+  background: color-mix(in oklab, var(--wait) 10%, var(--bg));
+  border-bottom-color: color-mix(in oklab, var(--wait) 30%, transparent);
+  flex-wrap: wrap;
+}
+.daemon-banner.signed-out-banner .dot { background: var(--wait); animation: none; }
+.device-flow.inline { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.device-flow.inline .device-code { font-size: 15px; padding: 0; }
+.device-flow.inline .device-actions { margin-bottom: 0; }
+.device-flow-start { display: inline-flex; align-items: center; gap: 8px; }
+.device-countdown { font-size: 12px; color: var(--ink-2); }
+.device-flow-error { font-size: 12px; color: var(--danger); margin-right: 8px; }
+.ws-chip-group.signed-out .ws-chip-sub { color: var(--wait); }
+.ws-chip .dot.remote.signed-out { background: var(--wait); animation: none; }
+.ws-chip-group.no-access .ws-chip-sub { color: var(--danger); }
+.ws-chip .dot.remote.no-access { background: var(--danger); animation: none; }
+.session-ended-card.remote.wait .session-ended-title { color: var(--wait); }
+.session-ended-card.remote.warn .session-ended-title { color: var(--warn); }
+.session-ended-card.remote.danger .session-ended-title { color: var(--danger); }
+.session-ended-card.remote .device-flow.inline,
+.session-ended-card.remote .device-flow-start { justify-content: center; align-self: center; }
