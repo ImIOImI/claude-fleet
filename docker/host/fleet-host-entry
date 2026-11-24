@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # fleet-host-entry <mode> (SPEC §4 Host images):
 #   host       fleet-host alone (host pod, uid 1001): credentials :8081, MCP :8082
-#   workspace  the broker and its sessions (workspace pod, uid 1000): broker :7070, readiness :7071, drain on preStop/SIGTERM
+#   workspace  the broker and its sessions (workspace pod, uid 1000): pinned loadouts first, then broker :7070, readiness :7071, drain on preStop/SIGTERM
 #   single     broker and fleet-host in one container under one uid; local and dev only
 set -u
 mode=${1:-}
@@ -13,6 +13,7 @@ window_s=${FLEET_HOST_RESTART_WINDOW_S:-60}
 backoff_start_ms=${FLEET_HOST_BACKOFF_START_MS:-1000}
 backoff_max_ms=${FLEET_HOST_BACKOFF_MAX_MS:-10000}
 workspace_uid=${FLEET_WORKSPACE_UID:-1000}
+loadouts_record=${FLEET_LOADOUTS_RECORD:-/workspace/.claude/fleet-loadouts.json}
 
 log() { printf '{"level":"%s","msg":"fleet-host-entry: %s"%s}\n' "$1" "$2" "${3:-}" >&2; }
 
@@ -65,6 +66,21 @@ refuse_mesh_url() {
   fi
 }
 
+# Pinned loadouts land before any session exists; a recorded install is reverted even with nothing pinned (D163, D164).
+sync_loadouts() {
+  [ -n "${FLEET_LOADOUTS:-}" ] || [ -e "$loadouts_record" ] || return 0
+  local t=${FLEET_LOADOUTS_TIMEOUT_S:-60} status=0
+  case "$t" in ''|*[!0-9]*|????*) t=60 ;; esac
+  t=$(( 10#$t ))
+  (( t >= 1 && t <= 600 )) || t=60
+  timeout -k 5 "$t" node "$host_js" loadouts sync || status=$?
+  if (( status == 124 || status == 137 )); then
+    log warn "loadout sync timed out or was killed; starting the broker" ",\"timeoutS\":$t"
+  elif (( status != 0 )); then
+    log warn "loadout sync exited; starting the broker" ",\"status\":$status"
+  fi
+}
+
 run_workspace() {
   local uid
   uid=$(id -u)
@@ -80,6 +96,7 @@ run_workspace() {
   export CLAUDE_FLEET_BROKER_REQUIRE_MESH=1
   # The preStop `broker drain` needs the control socket; SIGTERM then drains too (D142, D143).
   export CLAUDE_FLEET_BROKER_DRAIN=1
+  sync_loadouts
   exec "$broker_bin"
 }
 

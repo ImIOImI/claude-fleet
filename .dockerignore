@@ -89,6 +89,8 @@
 !src/main/transcriptIndexCore.ts
 !src/main/publish/protocol.ts
 !src/main/publish/scrub.ts
+!src/main/loadoutCore.ts
+!src/main/ociCore.ts
 # fleet-embedder for the host image (docker/host/Dockerfile embedder-build stage).
 !embedder/**
 
@@ -102,6 +104,8 @@ src/host/testFakes.ts
 src/host/testHost.ts
 src/host/testGithubApp.ts
 src/host/testAutomationRuntime.ts
+src/host/testGithubRepo.ts
+src/host/testTar.ts
 docker/host/*.test.sh
 embedder/target/**
 embedder/bin/**

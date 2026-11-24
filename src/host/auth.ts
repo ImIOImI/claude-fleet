@@ -7,6 +7,7 @@ import { createGithubProvider } from '../main/identity/githubProvider.js';
 import { resolveTier, type GrantConfig, type MachineRule, type Tier } from '../main/identity/grants.js';
 import { IdentityError, type Identity, type IdentityProvider } from '../main/identity/types.js';
 import { withVerifyCache } from '../main/identity/verifyCache.js';
+import { AUTH_MISSING, AUTH_RECENTLY_REJECTED, AUTH_REJECTED } from '../main/identity/hostAuthErrors.js';
 import type { HostConfig } from './config.js';
 import type { Logger } from './log.js';
 
@@ -24,6 +25,12 @@ export type ProviderFactory = (machines: readonly MachineRule[]) => IdentityProv
 export const githubProviderFactory: ProviderFactory = (machines) => createGithubProvider({ machines });
 
 export const NEGATIVE_TTL_MS = 30_000;
+
+
+/** A refusal's fixed class for the request log: never a token, and no login. */
+export function authReason(error: string): string {
+  return error.startsWith('no grant for @') ? 'no grant' : error;
+}
 export const NEGATIVE_MAX_ENTRIES = 1000;
 
 export interface AuthContextOptions {
@@ -50,7 +57,7 @@ function withNegativeCache(inner: IdentityProvider, opts: AuthContextOptions): I
         rejected.delete(key);
         if (until > now()) {
           rejected.set(key, until);
-          throw new IdentityError('unauthorized', 'token recently rejected', 401);
+          throw new IdentityError('unauthorized', AUTH_RECENTLY_REJECTED, 401);
         }
       }
       try {
@@ -94,7 +101,7 @@ export function bearerToken(header: string | string[] | undefined): string | nul
 
 export async function authenticate(header: string | string[] | undefined, ctx: AuthContext, log?: Logger): Promise<AuthResult> {
   const token = bearerToken(header);
-  if (!token) return { ok: false, status: 401, error: 'missing or malformed bearer token' };
+  if (!token) return { ok: false, status: 401, error: AUTH_MISSING };
   let identity: Identity;
   try {
     identity = await ctx.provider.verify(token);
@@ -102,7 +109,7 @@ export async function authenticate(header: string | string[] | undefined, ctx: A
     if (!(err instanceof IdentityError)) return { ok: false, status: 502, error: 'identity check failed' };
     switch (err.kind) {
       case 'unauthorized':
-        return { ok: false, status: 401, error: 'token rejected by GitHub' };
+        return { ok: false, status: 401, error: err.message === AUTH_RECENTLY_REJECTED ? AUTH_RECENTLY_REJECTED : AUTH_REJECTED };
       case 'forbidden':
       case 'machine-unknown':
         log?.log('warn', 'machine identity refused', { kind: err.kind, detail: err.message });

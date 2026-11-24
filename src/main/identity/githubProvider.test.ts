@@ -354,3 +354,17 @@ describe('github provider: machines (GitHub App installation tokens)', () => {
     await expect(createGithubProvider({ machines: MACHINES }).probe(TOKEN)).rejects.toMatchObject({ kind: 'unauthorized' });
   });
 });
+
+describe('github provider: token expiry', () => {
+  it('verify carries the expiry GitHub reports for the token; probe and an absent header carry none', async () => {
+    stubGithub({
+      [`GET ${API}/user`]: () => json(USER, 200, { 'github-authentication-token-expiration': '2026-11-23 22:02:00 UTC' }),
+      [`GET ${API}/user/teams?per_page=100`]: () => json([])
+    });
+    const p = createGithubProvider();
+    expect((await p.verify(TOKEN)).tokenExpiresAt).toBe(Date.parse('2026-11-23T22:02:00Z'));
+    expect((await p.probe(TOKEN)).identity).not.toHaveProperty('tokenExpiresAt');
+    stubGithub({ [`GET ${API}/user`]: () => json(USER), [`GET ${API}/user/teams?per_page=100`]: () => json([]) });
+    expect(await p.verify(TOKEN)).not.toHaveProperty('tokenExpiresAt');
+  });
+});

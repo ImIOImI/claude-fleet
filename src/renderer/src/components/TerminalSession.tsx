@@ -24,7 +24,7 @@ import { EchoRttTracker } from '../echoRtt';
 import { initPerfState, perfRecording } from '../perfState';
 import { buildTerminalOptions } from './terminalOptions';
 import { createResizePusher, type ResizePusher } from './resizePusher';
-import { resumesAfterDrain, sessionEndKind } from '../remoteView';
+import { reattachAfterAuthEnd, resumesAfterDrain, sessionEndKind } from '../remoteView';
 
 const URL_REGEX = /https?:\/\/[^\s'"`<>()\[\]{}]+/g;
 const TRAILING_PUNCTUATION = /[.,;:!?]+$/;
@@ -180,6 +180,10 @@ export function TerminalSession({
   const restartingRef = useRef(restarting);
   restartingRef.current = restarting;
   const endedInDrainRef = useRef(false);
+  // The last attach failed (never reached a session), so retrying it is safe.
+  const attachFailedRef = useRef(false);
+  // When this tab last re-attached by itself after a 4401; bounds that to one per AUTO_REATTACH_GAP_MS.
+  const lastAutoReattachRef = useRef<number | null>(null);
   const visibleRef = useRef(visible);
   visibleRef.current = visible;
   // Bumped when the user clicks "Start new session" / "Retry" after a
@@ -213,6 +217,7 @@ export function TerminalSession({
     if (!hostRef.current) return;
     const host = hostRef.current;
     setEndedReason(null);
+    attachFailedRef.current = false;
     onLifecycleChange?.(sessionId, 'live');
 
     // Declared up front so the safeFit helper can read it. The cleanup
@@ -642,8 +647,21 @@ export function TerminalSession({
             term.write(chunk);
           }
         });
-        unsubEnd = window.api.pty.onEnd(sid, () => {
+        unsubEnd = window.api.pty.onEnd(sid, ({ reason }) => {
           term.writeln('\r\n[session ended]');
+          if (!disposed && remoteRef.current && reason === 'unauthorized') {
+            // The token this attach opened with expired; the next sign-in change re-attaches it too.
+            attachFailedRef.current = true;
+            void window.api.identity
+              .status()
+              .then(({ signedIn }) => {
+                const now = Date.now();
+                if (disposed || !reattachAfterAuthEnd({ remote: true, reason, signedIn, lastAutoAt: lastAutoReattachRef.current, now })) return;
+                lastAutoReattachRef.current = now;
+                setSessionEpoch((e) => e + 1);
+              })
+              .catch(() => undefined);
+          }
           if (!disposed) {
             // A dead session isn't busy.
             setBusy(false);
@@ -701,6 +719,7 @@ export function TerminalSession({
         const msg = err instanceof Error ? err.message : String(err);
         if (!disposed) {
           setEndedReason({ kind: 'attach-error', message: msg });
+          attachFailedRef.current = true;
           // Mirror to error.log so post-mortem debugging has a record
           // even though this isn't an uncaught exception (the catch
           // here is clean — but the user still loses their terminal).
@@ -843,6 +862,14 @@ export function TerminalSession({
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [reloadToken, sessionId, workspaceId, onRefreshUnresolved]);
+
+  // A remote tab that failed to attach, or that the host closed with 4401, retries once the sign-in changes.
+  useEffect(() => {
+    if (!remote) return;
+    return window.api.identity.onChanged?.(({ signedIn }) => {
+      if (signedIn && attachFailedRef.current) setSessionEpoch((e) => e + 1);
+    });
+  }, [remote]);
 
   useEffect(() => {
     if (!resumesAfterDrain(resumeToken, endedInDrainRef.current)) return;

@@ -28,7 +28,7 @@ async function rig(allow: string[] | null = null) {
   srv = await startCredHelper({
     app: { appId: '1', installationId: '2', keyFile },
     listen: { path: sock },
-    github: () => (allow ? { app: null, repositories: allow, permissions: null } : null),
+    github: () => (allow ? { app: null, repositories: allow, permissions: null, readOnlyRepositories: [] } : null),
     log: createLogger((l) => logs.push(l)),
     apiBase: gh.url
   });
@@ -50,6 +50,7 @@ describe('credential socket', () => {
     const token = await requestToken(sock, { repositories: ['a'] });
     await expect(requestToken(sock, { repositories: ['b'] })).rejects.toThrow(/403.*not in github.repositories/);
     await expect(requestToken(sock, { repositories: [] })).rejects.toThrow(/400/);
+    await expect(requestToken(sock, { repositories: [] })).rejects.toMatchObject({ status: 400 });
     const all = logs.join('\n');
     expect(all).toContain('app token issued');
     expect(all).not.toContain(token);
@@ -110,7 +111,7 @@ describe('credential server over TCP', () => {
     srv = await startCredHelper({
       app: { appId: '1', installationId: '2', keyFile },
       listen: { port: 0, host: '127.0.0.1' },
-      github: () => (allow ? { app: null, repositories: allow, permissions: null } : null),
+      github: () => (allow ? { app: null, repositories: allow, permissions: null, readOnlyRepositories: [] } : null),
       log: createLogger((l) => logs.push(l)),
       apiBase: gh.url
     });

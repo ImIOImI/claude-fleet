@@ -142,6 +142,15 @@ export function sessionEndKind(restarting: boolean): 'restarting' | 'natural' {
   return restarting ? 'restarting' : 'natural';
 }
 
+/** Minimum gap between automatic re-attaches of one tab after a 4401. */
+export const AUTO_REATTACH_GAP_MS = 5 * 60_000;
+
+/** The host closed a live remote tab with 4401 (the token it opened with expired): re-attach once with the current sign-in. */
+export function reattachAfterAuthEnd(o: { remote: boolean; reason?: 'unauthorized'; signedIn: boolean; lastAutoAt: number | null; now: number }): boolean {
+  if (!o.remote || o.reason !== 'unauthorized' || !o.signedIn) return false;
+  return o.lastAutoAt === null || o.now - o.lastAutoAt >= AUTO_REATTACH_GAP_MS;
+}
+
 /** Only an open tab whose session ended during the restart re-attaches when it is over (D151). */
 export function resumesAfterDrain(resumeToken: number | null | undefined, endedInDrain: boolean): boolean {
   return resumeToken != null && endedInDrain;

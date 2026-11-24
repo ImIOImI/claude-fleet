@@ -43,9 +43,12 @@ export async function fetchDrained(client: Pick<RemoteClient, 'rpc'>): Promise<D
   });
 }
 
+/** A live tab's 4401: the renderer re-attaches it once with the current sign-in (remoteView.reattachAfterAuthEnd). */
+const LIVE_AUTH_CLOSED = 'The host stopped accepting the GitHub sign-in this tab opened with (it expired or was revoked). Reconnecting with your current sign-in; if the tab stays closed, sign in again (Settings → Account).';
+
 /** Fixed text per host close code; the host's reason string is untrusted. */
 function closeNotice(code: number): string | null {
-  if (code === 4401) return 'The host signed you out: sign in with GitHub again (Settings → Account), then reopen this tab.';
+  if (code === 4401) return 'The host stopped accepting the GitHub sign-in this tab opened with (expired or revoked). Reopen this tab; if that fails, sign in again (Settings → Account).';
   if (code === 4403) return 'Your access to this host was removed.';
   if (code === 1013) return 'Disconnected: this tab fell too far behind the host. Reopen it.';
   if (code === 1008) return 'Disconnected by the host (a limit was reached). Reopen this tab.';
@@ -79,7 +82,7 @@ export async function attachRemotePty(o: RemoteAttachOptions): Promise<PtyHandle
   // Runs before the ws stream ends, so the notice lands ahead of the stream's end.
   ws.once('close', (code: number) => {
     closedWith = code;
-    const notice = closing ? null : closeNotice(code);
+    const notice = closing ? null : code === 4401 ? LIVE_AUTH_CLOSED : closeNotice(code);
     if (notice && !stream.destroyed && !stream.readableEnded) stream.push(Buffer.from(`\r\n\x1b[33m[${notice}]\x1b[0m\r\n`));
   });
   const shut = (): void => {
@@ -125,6 +128,7 @@ export async function attachRemotePty(o: RemoteAttachOptions): Promise<PtyHandle
   if (!r.ok) fail(`host refused to attach: ${await hostSays(r.error)}`);
   return {
     stream,
+    endReason: () => (!closing && closedWith === 4401 ? 'unauthorized' : undefined),
     resize: async (cols, rows) => broker.sendResize(CHANNEL, cols, rows),
     detach: () => {
       closing = true;

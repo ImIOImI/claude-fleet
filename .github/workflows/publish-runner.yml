@@ -77,6 +77,8 @@ on:
       - 'src/main/transcriptIndexCore.ts'
       - 'src/main/publish/protocol.ts'
       - 'src/main/publish/scrub.ts'
+      - 'src/main/loadoutCore.ts'
+      - 'src/main/ociCore.ts'
       - 'package-lock.json'
       - 'tsconfig.host.json'
       - 'vite.host.config.ts'

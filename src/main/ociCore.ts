@@ -76,6 +76,9 @@ export function safeLayerPath(destDir: string, title: string): string {
   return target;
 }
 
+/** Per-file cap for pulled loadout files (OCI layers on the desktop, tarball entries in fleet-host). */
+export const MAX_BLOB_BYTES = 5_242_880;
+
 /** A loadout source's credential (#444). `username` defaults to "token" in the
  *  Basic exchange (GHCR, GitLab and Harbor accept any username with a token). */
 export interface RegistryCredential {

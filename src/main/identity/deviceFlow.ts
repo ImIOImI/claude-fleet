@@ -8,6 +8,7 @@ export const GITHUB_DEVICE_PAGE = 'https://github.com/login/device';
 export const GITHUB_SCOPES: readonly string[] = ['read:org', 'read:packages'];
 
 const GRANT_TYPE = 'urn:ietf:params:oauth:grant-type:device_code';
+const REFRESH_GRANT = 'refresh_token';
 export const SLOW_DOWN_STEP_MS = 5000;
 const DEFAULT_INTERVAL_S = 5;
 const KNOWN_ERRORS = new Set([
@@ -18,7 +19,8 @@ const KNOWN_ERRORS = new Set([
   'device_flow_disabled',
   'incorrect_client_credentials',
   'incorrect_device_code',
-  'unsupported_grant_type'
+  'unsupported_grant_type',
+  'bad_refresh_token'
 ]);
 
 export interface DeviceCode {
@@ -44,7 +46,17 @@ export class DeviceFlowError extends Error {
   }
 }
 
-export type PollResult = { status: 'pending'; intervalMs: number } | { status: 'done'; token: string; scopes: string[] };
+/** An access token. The expiry fields are present only for expiring
+ *  (GitHub App user) tokens; a classic OAuth app token never expires. */
+export interface TokenGrant {
+  token: string;
+  scopes: string[];
+  expiresAt?: number;
+  refreshToken?: string;
+  refreshExpiresAt?: number;
+}
+
+export type PollResult = { status: 'pending'; intervalMs: number } | ({ status: 'done' } & TokenGrant);
 
 async function post(url: string, params: Record<string, string>): Promise<Record<string, unknown>> {
   let res: Response;
@@ -80,6 +92,8 @@ function mapError(code: string): DeviceFlowError {
   switch (code) {
     case 'expired_token':
       return new DeviceFlowError('expired', 'The sign-in code expired. Start again.');
+    case 'bad_refresh_token':
+      return new DeviceFlowError('expired', 'GitHub no longer accepts the saved sign-in. Sign in again.');
     case 'access_denied':
       return new DeviceFlowError('denied', 'Sign-in was cancelled on GitHub.');
     case 'device_flow_disabled':
@@ -121,12 +135,23 @@ export async function requestDeviceCode(clientId: string, now: () => number = Da
   };
 }
 
-export async function pollDeviceToken(clientId: string, deviceCode: string, intervalMs: number): Promise<PollResult> {
-  const b = await post(GITHUB_TOKEN_URL, { client_id: clientId, device_code: deviceCode, grant_type: GRANT_TYPE });
-  if (typeof b.access_token === 'string' && b.access_token) {
-    const scopes = typeof b.scope === 'string' ? b.scope.split(/[\s,]+/).filter(Boolean) : [];
-    return { status: 'done', token: b.access_token, scopes };
+function tokenGrant(b: Record<string, unknown>, now: number): TokenGrant | null {
+  if (typeof b.access_token !== 'string' || !b.access_token) return null;
+  const g: TokenGrant = { token: b.access_token, scopes: typeof b.scope === 'string' ? b.scope.split(/[\s,]+/).filter(Boolean) : [] };
+  const expiresIn = positiveSeconds(b.expires_in);
+  if (expiresIn !== null) g.expiresAt = now + expiresIn * 1000;
+  if (typeof b.refresh_token === 'string' && b.refresh_token) {
+    g.refreshToken = b.refresh_token;
+    const refreshIn = positiveSeconds(b.refresh_token_expires_in);
+    if (refreshIn !== null) g.refreshExpiresAt = now + refreshIn * 1000;
   }
+  return g;
+}
+
+export async function pollDeviceToken(clientId: string, deviceCode: string, intervalMs: number, now: () => number = Date.now): Promise<PollResult> {
+  const b = await post(GITHUB_TOKEN_URL, { client_id: clientId, device_code: deviceCode, grant_type: GRANT_TYPE });
+  const grant = tokenGrant(b, now());
+  if (grant) return { status: 'done', ...grant };
   if (b.error === 'authorization_pending') return { status: 'pending', intervalMs };
   if (b.error === 'slow_down') {
     const fromGithub = (positiveSeconds(b.interval) ?? 0) * 1000;
@@ -134,4 +159,13 @@ export async function pollDeviceToken(clientId: string, deviceCode: string, inte
   }
   if (typeof b.error === 'string') throw mapError(b.error);
   throw new DeviceFlowError('unexpected', 'GitHub token response had neither a token nor an error');
+}
+
+/** Trade a refresh token for a new pair; GitHub invalidates the old refresh token. */
+export async function refreshDeviceToken(clientId: string, refreshToken: string, now: () => number = Date.now): Promise<TokenGrant> {
+  const b = await post(GITHUB_TOKEN_URL, { client_id: clientId, grant_type: REFRESH_GRANT, refresh_token: refreshToken });
+  const grant = tokenGrant(b, now());
+  if (grant) return grant;
+  if (typeof b.error === 'string') throw mapError(b.error);
+  throw new DeviceFlowError('unexpected', 'GitHub refresh response had neither a token nor an error');
 }

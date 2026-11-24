@@ -267,8 +267,15 @@ function validateSteps(raw: unknown, params: ParamDef[], ctx: ResolveCtx, errors
     let allowedTools: string[] | undefined;
     if (p.allowedTools !== undefined) {
       if (mode !== 'fresh') { errors.push(`${w}.prompt.allowedTools: only for fresh sessions`); return; }
-      if (!Array.isArray(p.allowedTools) || p.allowedTools.length > 30 || !p.allowedTools.every((t) => typeof t === 'string' && TOOL_RE.test(t))) {
+      if (!Array.isArray(p.allowedTools) || p.allowedTools.length > 30) {
         errors.push(`${w}.prompt.allowedTools: a list of tool names like "Bash(git log:*)" or "Read"`);
+        return;
+      }
+      const bad = p.allowedTools.findIndex((t) => typeof t !== 'string' || !TOOL_RE.test(t));
+      if (bad >= 0) {
+        const t: unknown = p.allowedTools[bad];
+        const shown = typeof t === 'string' ? JSON.stringify(t.slice(0, 120)) : 'a non-string';
+        errors.push(`${w}.prompt.allowedTools[${bad}]: ${shown} is not a tool rule like "Bash(git log:*)" or "Read" (letters, digits, spaces and _*:.()/- only; for a name with [ or ], use a glob)`);
         return;
       }
       allowedTools = p.allowedTools as string[];

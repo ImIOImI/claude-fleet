@@ -50,3 +50,9 @@ export type SignInPoll =
   | { state: 'pending'; intervalMs: number }
   | { state: 'done'; status: AccountStatus }
   | { state: 'error'; message: string };
+
+/** Push `identity:changed`: the stored token changed. */
+export interface IdentityChange {
+  cause: 'sign-in' | 'token-refreshed' | 'sign-out' | 'revoked';
+  signedIn: boolean;
+}

@@ -11,13 +11,13 @@ export type {
   Automation, AutomationDef, ParamDef, ParamType, ParamValue, RunRow, RunStatus, StepRunRow, TriggerDef, StepDef,
   Proposal, ProposalItem, ProposalKind, ProposalStatus, ItemDecision, LoadoutAutomationPreview, ScriptStepDef, PromptStepDef, HostShell, ScriptShell
 } from './inboxTypes';
-import type { AccountStatus, SignInStart, SignInPoll } from './identityTypes';
+import type { AccountStatus, IdentityChange, SignInStart, SignInPoll } from './identityTypes';
 import type { GithubClientIdSetting } from './githubClientId';
 export type { GithubClientIdSetting, GithubClientIdSource } from './githubClientId';
 export type { AccountStatus, AccountIdentity, AccountSso, SignInStart, SignInPoll } from './identityTypes';
 import type { OwnerCostRow, SessionOwner } from './sessionOwner';
 export type { OwnerCostRow, SessionOwner } from './sessionOwner';
-import type { RemoteAddOptions, RemoteDrain, RemoteLiveSession, RemoteProbe } from './remoteTypes';
+import type { PtyEndInfo, RemoteAddOptions, RemoteDrain, RemoteLiveSession, RemoteProbe } from './remoteTypes';
 import type { StoreChoice, StoreSettings, StoreStatus } from './storeTypes';
 import type { FederatedSearchResult, RemoteSessionsResult, SessionCursor } from './federation';
 import type { BackfillCount, BackfillResult, UnpublishResult } from './publish';
@@ -30,7 +30,7 @@ export type {
 } from './remoteAutomations';
 export type { BackfillCount, BackfillResult, UnpublishResult, WorkspacePublish } from './publish';
 export type { ImportProgress, StoreChoice, StorePhase, StoreSettings, StoreStatus } from './storeTypes';
-export type { RemoteAddOptions, RemoteDrain, RemoteLiveSession, RemoteProbe, RemoteProbeOk, RemoteProbeErr, RemoteProbeErrorKind, RemoteTier } from './remoteTypes';
+export type { PtyEndInfo, RemoteAddOptions, RemoteDrain, RemoteLiveSession, RemoteProbe, RemoteProbeOk, RemoteProbeErr, RemoteProbeErrorKind, RemoteTier } from './remoteTypes';
 export type { ExtraMount } from './extraMounts';
 import type { VaultEntry, VaultWorkspaceEdit } from './vaultTypes';
 export type { VaultEntry, VaultLine, VaultLineMode, VaultWorkspaceEdit } from './vaultTypes';
@@ -776,7 +776,13 @@ const api = {
     signInPoll: (): Promise<SignInPoll> => ipcRenderer.invoke('identity:signInPoll'),
     signInCancel: (): Promise<void> => ipcRenderer.invoke('identity:signInCancel'),
     /** Delete the token from this computer's vault. */
-    signOut: (): Promise<void> => ipcRenderer.invoke('identity:signOut')
+    signOut: (): Promise<void> => ipcRenderer.invoke('identity:signOut'),
+    /** The stored GitHub token changed. Never carries the token. */
+    onChanged: (cb: (c: IdentityChange) => void): (() => void) => {
+      const h = (_e: unknown, c: IdentityChange): void => cb(c);
+      ipcRenderer.on('identity:changed', h);
+      return () => ipcRenderer.removeListener('identity:changed', h);
+    }
   },
   store: {
     getSettings: (): Promise<StoreSettings> => ipcRenderer.invoke('store:getSettings'),
@@ -894,9 +900,9 @@ const api = {
       ipcRenderer.on(channel, handler);
       return () => ipcRenderer.removeListener(channel, handler);
     },
-    onEnd: (sessionId: string, cb: () => void) => {
+    onEnd: (sessionId: string, cb: (info: PtyEndInfo) => void) => {
       const channel = `pty:end:${sessionId}`;
-      const handler = () => cb();
+      const handler = (_e: IpcRendererEvent, info?: PtyEndInfo) => cb(info ?? {});
       ipcRenderer.on(channel, handler);
       return () => ipcRenderer.removeListener(channel, handler);
     }

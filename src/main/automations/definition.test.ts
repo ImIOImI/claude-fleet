@@ -134,7 +134,9 @@ describe('Phase 4: event triggers and fresh steps', () => {
     expect(errs({ triggers: [{ event: { on: 'session.idle', debounce: '2h' } }] })).toMatch(/up to 1h/);
     expect(errs({ triggers: [{ event: { on: 'session.idle', workspace: 'nope' } }] })).toMatch(/unknown workspace "nope"/);
     expect(errs({ steps: [{ id: 'a', prompt: { workspace: 'W1', mode: 'live', message: 'm', allowedTools: ['Read'] } }] })).toMatch(/only for fresh sessions/);
-    expect(errs({ steps: [{ id: 'a', prompt: { workspace: 'W1', mode: 'fresh', message: 'm', allowedTools: ['rm -rf; x'] } }] })).toMatch(/tool names/);
+    expect(errs({ steps: [{ id: 'a', prompt: { workspace: 'W1', mode: 'fresh', message: 'm', allowedTools: ['rm -rf; x'] } }] })).toMatch(/allowedTools\[0\]: "rm -rf; x" is not a tool rule/);
+    expect(errs({ steps: [{ id: 'a', prompt: { workspace: 'W1', mode: 'fresh', message: 'm', allowedTools: ['Read', 'Bash(gh pr list --author app/x[bot])'] } }] }))
+      .toMatch(/steps\[0\]\.prompt\.allowedTools\[1\]: "Bash\(gh pr list --author app\/x\[bot\]\)" is not a tool rule.*use a glob/);
     expect(errs({ steps: [{ id: 'a', prompt: { workspace: 'W1', message: '{{trigger.nope}}' } }] })).toMatch(/use \{\{trigger\.kind\}\}/);
   });
 });
