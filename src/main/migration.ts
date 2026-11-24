@@ -25,6 +25,7 @@ import { sharedClaudeCredentialsPath, stateRoot, workspaceClaudeDir, workspaceMa
 import { fleetPrivateDir, fleetSharedDir } from './config.js';
 import { listWorkspaceManifests, writeWorkspaceManifest, FACTORY_MIRROR } from './workspaces.js';
 import type { WorkspaceSpec } from './workspaces.js';
+import * as vault from './vault.js';
 
 const SERVICE = 'claude-fleet';
 const SECRET_INDEX_PREFIX = '__secrets__:';
@@ -56,6 +57,51 @@ export async function runStartupMigration(): Promise<void> {
   } catch (err) {
     console.warn('[migration] fleet-folder migration failed:', err);
   }
+  try {
+    await migrateEnvToVault();
+  } catch (err) {
+    console.warn('[migration] manifest-env-to-vault migration failed:', err);
+  }
+}
+
+/**
+ * One-shot: move every manifest's `env.plain`/`env.secretKeys` into the vault,
+ * then rewrite the manifest with env cleared. Once migrated, ipc.ts forces
+ * manifest env empty on create/writeManifest. A failed migrate (e.g. an
+ * undecryptable vault) throws before any manifest is cleared.
+ *
+ * Re-run safe: `deps.migrate` no-ops (returns false) once the vault's
+ * `__migrated__` marker is set, but manifests are still swept and cleared —
+ * a crash between migrate and write on a prior run can leave a manifest with
+ * stale env whose values are already safely in the vault.
+ */
+export async function migrateEnvToVault(
+  deps: {
+    list: typeof listWorkspaceManifests;
+    write: typeof writeWorkspaceManifest;
+    migrate: typeof vault.migrateManifestEnv;
+    available: typeof vault.isVaultAvailable;
+  } = {
+    list: listWorkspaceManifests,
+    write: writeWorkspaceManifest,
+    migrate: vault.migrateManifestEnv,
+    available: vault.isVaultAvailable
+  }
+): Promise<void> {
+  if (!(await deps.available())) return;
+  const manifests = await deps.list();
+  await deps.migrate(manifests.map((m) => ({ id: m.id, plain: m.env.plain, secretKeys: m.env.secretKeys })));
+  for (const m of manifests) {
+    if (Object.keys(m.env.plain).length || m.env.secretKeys.length) {
+      await deps.write({ ...m, env: { plain: {}, secretKeys: [] } });
+    }
+  }
+}
+
+/** Manifest env to persist on a renderer write: untouched until the vault
+ *  migration has captured it, empty afterwards. */
+export function manifestEnvOnWrite(migrated: boolean, existing: WorkspaceSpec['env'] | undefined): WorkspaceSpec['env'] {
+  return !migrated && existing ? existing : { plain: {}, secretKeys: [] };
 }
 
 /**

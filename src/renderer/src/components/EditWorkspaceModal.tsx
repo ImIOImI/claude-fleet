@@ -125,21 +125,7 @@ export function containerLevelChanged(
   if (before.authMode !== after.authMode) return true;
   if ((before.endpointId ?? '') !== (after.endpointId ?? '')) return true;
   if ((before.image ?? '') !== (after.image ?? '')) return true;
-  // env.plain values
-  const beforePlain = before.env.plain;
-  const afterPlain = after.plainEnv;
-  const allPlainKeys = new Set([...Object.keys(beforePlain), ...Object.keys(afterPlain)]);
-  for (const k of allPlainKeys) {
-    if ((beforePlain[k] ?? '') !== (afterPlain[k] ?? '')) return true;
-  }
-  // secretKeys add/remove
-  const beforeSecrets = new Set(before.env.secretKeys);
-  const afterSecrets = new Set(after.secretKeys);
-  if (beforeSecrets.size !== afterSecrets.size) return true;
-  for (const k of beforeSecrets) if (!afterSecrets.has(k)) return true;
-  // Any newly-typed secret value
-  if (Object.keys(after.secrets).length > 0) return true;
-  // resources
+  if (after.vaultEdits.length > 0) return true;
   const beforeRes = before.resources;
   const afterRes = after.resources;
   if ((beforeRes?.cpus ?? null) !== (afterRes?.cpus ?? null)) return true;

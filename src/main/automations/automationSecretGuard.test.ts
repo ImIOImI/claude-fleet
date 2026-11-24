@@ -1,14 +1,14 @@
 // Regression coverage for the #444 final-review finding M6: `registerAutomationIpc`'s
-// `secret` dependency (runner.ts's script-step secret lookup) called
-// `getSecret(ws, key)` directly, with no backstop against `ws` being a
-// reserved (non-workspace) vault scope — the same backstop `vault.resolveEnv`
-// applies before injecting a bag into a workspace env. `automationIpc.ts`
-// pulls in electron, ipc.ts (dockerode, the broker client, better-sqlite3),
-// and a dozen other modules, so standing up a real `registerAutomationIpc` to
-// call the dependency is not the cheapest reliable way to guard against the
-// call being dropped by a future edit. Instead: unit-test the guard directly
-// (also covered in vaultScopes.test.ts) and assert, by source text, that the
-// `secret:` dependency still calls it before `getSecret`.
+// `secret` dependency (runner.ts's script-step secret lookup) called the vault
+// directly, with no backstop against `ws` being a reserved (non-workspace)
+// vault scope — the same backstop `vault.resolveWorkspaceEnv` applies before
+// injecting a bag into a workspace env. `automationIpc.ts` pulls in electron,
+// ipc.ts (dockerode, the broker client, better-sqlite3), and a dozen other
+// modules, so standing up a real `registerAutomationIpc` to call the
+// dependency is not the cheapest reliable way to guard against the call being
+// dropped by a future edit. Instead: unit-test the guard directly (also
+// covered in vaultScopes.test.ts) and assert, by source text, that the
+// `secret:` dependency still calls it before resolving the workspace env.
 
 import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
@@ -30,6 +30,11 @@ describe('automation secret guard wiring (#444 final review M6)', () => {
     const line = src.split('\n').find((l) => l.includes('secret: (ws, key)'));
     expect(line, 'secret: (ws, key) => … dependency not found in automationIpc.ts').toBeTruthy();
     expect(line!.indexOf('assertNotReservedVaultScope(ws)')).toBeGreaterThan(-1);
-    expect(line!.indexOf('assertNotReservedVaultScope(ws)')).toBeLessThan(line!.indexOf('getSecret(ws, key)'));
+    expect(line!.indexOf('assertNotReservedVaultScope(ws)')).toBeLessThan(line!.indexOf('resolveWorkspaceEnv(ws)'));
+  });
+
+  it('reads the key as an own property, so a prototype-named key resolves to null', () => {
+    const line = src.split('\n').find((l) => l.includes('secret: (ws, key)'));
+    expect(line).toContain('Object.hasOwn(e, key) ? e[key] : null');
   });
 });

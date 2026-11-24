@@ -39,12 +39,14 @@ test('Create: switching to API key + supplying ANTHROPIC_API_KEY ships authMode=
 
     await window.getByLabel('Workspace name').fill('test-apikey');
 
-    // Open Env vars disclosure → add ANTHROPIC_API_KEY plain (so the
-    // API-key radio unlocks without needing the keychain).
+    // Stage ANTHROPIC_API_KEY in the env section so the API-key radio unlocks.
     await window.locator('.form-disclosure > summary', { hasText: 'Env vars' }).click();
-    await window.getByRole('button', { name: '+ Add env var' }).click();
-    await window.getByLabel('Env key 1').fill('ANTHROPIC_API_KEY');
-    await window.getByLabel('Env value 1').fill('sk-ant-test');
+    await window.locator('.workspace-vault').getByRole('button', { name: '+ New key' }).click();
+    const form = window.getByRole('form', { name: 'New env key' });
+    await form.getByLabel('New key name').fill('ANTHROPIC_API_KEY');
+    await form.getByLabel('New key value').fill('sk-ant-test');
+    await form.getByRole('button', { name: 'Add key' }).click();
+    await expect(window.locator('.workspace-vault .vault-row[data-vault-key="ANTHROPIC_API_KEY"]')).toBeVisible();
 
     // Pick API key.
     await window.getByRole('radio', { name: /API key/ }).check();
@@ -54,9 +56,16 @@ test('Create: switching to API key + supplying ANTHROPIC_API_KEY ships authMode=
 
     const calls = await getCalls(app);
     expect(calls.create).toHaveLength(1);
-    const spec = calls.create[0] as { authMode: string; env: { plain: Record<string, string> } };
+    const spec = calls.create[0] as { id: string; authMode: string; env: { plain: Record<string, string> } };
     expect(spec.authMode).toBe('apikey');
-    expect(spec.env.plain.ANTHROPIC_API_KEY).toBe('sk-ant-test');
+    expect(spec.env.plain).toEqual({});
+    // The value goes to the vault (before create), never in the create payload.
+    expect(calls.vaultApplyWorkspaceEdits).toEqual([
+      {
+        id: spec.id,
+        edits: [{ key: 'ANTHROPIC_API_KEY', op: 'create', secret: true, tags: [], value: 'sk-ant-test', asRoot: false }]
+      }
+    ]);
   } finally {
     await app.close();
   }

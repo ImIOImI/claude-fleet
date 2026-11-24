@@ -32,6 +32,10 @@ export type { BackfillCount, BackfillResult, UnpublishResult, WorkspacePublish }
 export type { ImportProgress, StoreChoice, StorePhase, StoreSettings, StoreStatus } from './storeTypes';
 export type { PtyEndInfo, RemoteAddOptions, RemoteDrain, RemoteLiveSession, RemoteProbe, RemoteProbeOk, RemoteProbeErr, RemoteProbeErrorKind, RemoteTier } from './remoteTypes';
 export type { ExtraMount } from './extraMounts';
+import type { VaultEntry, VaultWorkspaceEdit } from './vaultTypes';
+export type { VaultEntry, VaultLine, VaultLineMode, VaultWorkspaceEdit } from './vaultTypes';
+export { FLEET_KEYS, FLEET_KEY_NAMES } from './fleetKeys';
+export type { FleetKey } from './fleetKeys';
 
 /** Outcome of a `pty:resize`. Lives here because preload is the IPC contract
  *  surface: main imports it type-only, and the renderer picks it up through
@@ -744,19 +748,21 @@ const api = {
   vault: {
     /** Probe whether the OS keychain is reachable. Cached after first call. */
     available: (): Promise<boolean> => ipcRenderer.invoke('vault:available'),
-    /** List the secret keys stored for one workspace. */
-    listKeys: (workspaceId: string): Promise<string[]> =>
-      ipcRenderer.invoke('vault:listKeys', workspaceId),
-    /** Fetch a specific secret value. Returns null when missing or no keychain. */
-    getSecret: (workspaceId: string, key: string): Promise<string | null> =>
-      ipcRenderer.invoke('vault:getSecret', workspaceId, key),
-    /** Store or update a secret. Throws when keychain unavailable. */
-    setSecret: (workspaceId: string, key: string, value: string): Promise<void> =>
-      ipcRenderer.invoke('vault:setSecret', workspaceId, key, value),
-    /** Delete a single secret. No-op when missing. */
-    deleteSecret: (workspaceId: string, key: string): Promise<void> =>
-      ipcRenderer.invoke('vault:deleteSecret', workspaceId, key),
-    /** Purge every secret for a workspace + its index. Called on workspace delete. */
+    /** Never includes a secret key's value. */
+    list: (): Promise<VaultEntry[]> => ipcRenderer.invoke('vault:list'),
+    /** `workspaceId: null` reveals the root value. */
+    reveal: (key: string, workspaceId: string | null): Promise<string | null> =>
+      ipcRenderer.invoke('vault:reveal', key, workspaceId),
+    putKey: (a: { key: string; secret: boolean; tags: string[]; rootValue?: string | null }): Promise<void> =>
+      ipcRenderer.invoke('vault:putKey', a),
+    renameKey: (key: string, next: string): Promise<void> => ipcRenderer.invoke('vault:renameKey', key, next),
+    deleteKey: (key: string): Promise<void> => ipcRenderer.invoke('vault:deleteKey', key),
+    setLine: (key: string, workspaceId: string, line: { mode: 'inherit' } | { mode: 'override'; value: string }): Promise<void> =>
+      ipcRenderer.invoke('vault:setLine', key, workspaceId, line),
+    removeLine: (key: string, workspaceId: string): Promise<void> => ipcRenderer.invoke('vault:removeLine', key, workspaceId),
+    copyWorkspace: (from: string, to: string): Promise<void> => ipcRenderer.invoke('vault:copyWorkspace', from, to),
+    applyWorkspaceEdits: (workspaceId: string, edits: VaultWorkspaceEdit[]): Promise<void> =>
+      ipcRenderer.invoke('vault:applyWorkspaceEdits', workspaceId, edits),
     deleteAllForWorkspace: (workspaceId: string): Promise<void> =>
       ipcRenderer.invoke('vault:deleteAllForWorkspace', workspaceId)
   },

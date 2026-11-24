@@ -6,24 +6,20 @@ import type { ScrubValue } from './scrub.js';
 const ENDPOINT_KEY = 'ANTHROPIC_AUTH_TOKEN';
 
 export interface VaultReader {
-  listKeys(workspaceId: string): Promise<string[]>;
+  workspaceSecretValues(workspaceId: string): Promise<{ key: string; value: string }[]>;
   getSecret(workspaceId: string, key: string): Promise<string | null>;
 }
 
-/** The vault bag, the model endpoint's API key and the GitHub sign-in. Throws (so nothing is sent) when a declared or in-use secret can't be read. */
+/** The workspace's resolved vault bag, the model endpoint's API key and the GitHub sign-in.
+ *  Throws (so nothing is sent) when an in-use secret can't be read. */
 export async function publishSecretValues(
-  spec: { id: string; env: { secretKeys: string[] }; authMode?: string; endpointId?: string },
+  spec: { id: string; authMode?: string; endpointId?: string },
   vault: VaultReader,
   githubToken: () => Promise<string | null>,
   endpoint: (id: string) => Promise<{ hasApiKey: boolean } | null> = async () => null
 ): Promise<ScrubValue[]> {
   const out: ScrubValue[] = [];
-  const declared = new Set(spec.env.secretKeys);
-  for (const key of new Set([...declared, ...(await vault.listKeys(spec.id))])) {
-    const value = await vault.getSecret(spec.id, key);
-    if (value) out.push({ key, value });
-    else if (declared.has(key)) throw new Error(`secret ${key} can’t be read from the vault`);
-  }
+  out.push(...(await vault.workspaceSecretValues(spec.id)));
   if (spec.endpointId && (await endpoint(spec.endpointId))?.hasApiKey) {
     const value = await vault.getSecret(`${ENDPOINT_VAULT_PREFIX}${spec.endpointId}`, ENDPOINT_KEY);
     // Only an endpoint in use is required; a leftover endpointId (authMode switched away) is scrubbed when readable.

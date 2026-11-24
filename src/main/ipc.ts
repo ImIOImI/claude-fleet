@@ -89,8 +89,10 @@ import {
   setPortExposureHandlers,
 } from './mcpServer.js';
 import * as vault from './vault.js';
+import { manifestEnvOnWrite } from './migration.js';
 import { assertRendererWorkspaceId } from './vaultScopes.js';
-import { registerVaultIpc } from './vaultIpc.js';
+import { registerVaultIpc, resolveVaultWorkspaceKind, type VaultIpcDeps, type VaultWorkspaceKind } from './vaultIpc.js';
+import { isEnvPending, readEnvApplied } from './envApplied.js';
 import { IdentityService } from './identity/identityService.js';
 import { BUILTIN_GITHUB_CLIENT_ID, GITHUB_CLIENT_ID_ENV } from './identity/clientId.js';
 import { readGithubClientId, registerGithubClientIdIpc, type GithubClientIdDeps } from './githubClientIdIpc.js';
@@ -1369,8 +1371,8 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
   ipcMain.handle(
     'workspace:create',
     async (_e, input: WorkspaceCreatePayload) => {
-      // The id becomes this workspace's vault scope (resolveEnv injects that
-      // bag into its env), so it may never name a host-only scope (#444).
+      // The id becomes this workspace's vault scope (resolveWorkspaceEnv
+      // injects that bag into its env), so it may never name a host-only scope.
       assertRendererWorkspaceId(input?.id);
       const prior = await readWorkspaceManifest(input.id);
       assertNotRemoteSpec(input.kind, prior);
@@ -1448,7 +1450,7 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
           input.terminalRenderer === 'webgl'
             ? input.terminalRenderer
             : undefined,
-        env: input.env,
+        env: manifestEnvOnWrite(await vault.isMigrated(), prior?.env),
         resources: input.resources,
         mounts,
         mirror: input.mirror ?? FACTORY_MIRROR,
@@ -1646,9 +1648,10 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
   /**
    * Update a workspace's manifest in place without touching the container.
    * Used by the Saved-tab Resume flow to apply edited fields (description,
-   * labels, env, etc.) before calling `workspace:start`. Container-level
-   * edits (env values, image) won't take effect until the container is
-   * restarted — see the Phase 2 *restart-to-apply* banner.
+   * labels, etc.) before calling `workspace:start`. Env lives in the vault,
+   * not the manifest — it's edited via vault:* IPC.
+   * Container-level edits (env values, image) won't take effect until the
+   * container is restarted — see the Phase 2 *restart-to-apply* banner.
    */
   ipcMain.handle(
     'workspace:writeManifest',
@@ -1701,6 +1704,7 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
         launcher: incomingLauncher,
         mounts,
         publish,
+        env: manifestEnvOnWrite(await vault.isMigrated(), existing?.env),
         remote: undefined
       });
       for (const id of existing?.publish?.to ?? []) if (!publish?.to.includes(id)) await deletePublishCursor(spec.id, id);
@@ -1839,7 +1843,8 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
   setConfigResolver(async (callerId) => {
     const m = await readWorkspaceManifest(callerId);
     const ep = m?.authMode === 'endpoint' && m.endpointId ? await getEndpoint(m.endpointId) : null;
-    const effectiveEnv = { ...(ep ? { CF_SUMMARY_MODEL: ep.modelId } : {}), ...(m?.env?.plain ?? {}) };
+    const workspaceEnv = await vault.resolveWorkspaceEnv(callerId);
+    const effectiveEnv = { ...(ep ? { CF_SUMMARY_MODEL: ep.modelId } : {}), ...workspaceEnv };
     return resolveWorkspaceConfig(callerId, effectiveEnv, { version: appVersionString(), sha: appBuildSha() ?? null }, m?.image, {
       mode: m?.authMode ?? 'oauth',
       endpoint: ep ? { name: ep.name, baseUrl: ep.baseUrl, modelId: ep.modelId } : null
@@ -2222,7 +2227,32 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
 
   // Per-workspace vault (vault:*): the guarded surface lives in vaultIpc.ts so
   // its fail-closed scope/key checks unit-test without electron (#444).
-  registerVaultIpc(ipcMain, vault);
+  const vaultWorkspaceKind = (ws: string): Promise<VaultWorkspaceKind> => resolveVaultWorkspaceKind(ws, {
+    manifestKind: async (id) => (await readWorkspaceManifest(id))?.kind ?? null,
+    mockWorkspaces: MOCK_MODE ? () => mockDocker.listLiveWorkspaces() : undefined
+  });
+  const vaultIpcDeps: VaultIpcDeps = {
+    isVaultAvailable: vault.isVaultAvailable,
+    listModelEntries: vault.listModelEntries,
+    getRootValue: vault.getRootValue,
+    revealValue: vault.revealValue,
+    putKey: vault.putKey,
+    renameKey: vault.renameKey,
+    deleteKey: vault.deleteKey,
+    setLine: vault.setLine,
+    removeLine: vault.removeLine,
+    copyWorkspace: vault.copyWorkspace,
+    applyWorkspaceEdits: vault.applyWorkspaceEdits,
+    deleteAllForWorkspace: vault.deleteAllForWorkspace,
+    pendingFor: (ws: string) => isEnvPending(ws, {
+      kind: vaultWorkspaceKind,
+      localLive: async (id) => (await localBackend.listLiveWorkspaces()).some((w) => w.id === id && w.state !== 'stopped'),
+      applied: readEnvApplied,
+      current: vault.resolveWorkspaceEnv
+    }),
+    workspaceKind: vaultWorkspaceKind
+  };
+  registerVaultIpc(ipcMain, vaultIpcDeps);
 
   // GitHub sign-in (identity:*). The token stays in the host-only vault scope
   // identity:github; private ghcr.io loadout sources borrow it via the hook.
@@ -2234,7 +2264,8 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
   };
   const identity = new IdentityService({
     vault,
-    clientId: async () => (await readGithubClientId(githubClientId)).value
+    clientId: async () => (await readGithubClientId(githubClientId)).value,
+    patToken: () => vault.getRootValue('GITHUB_TOKEN')
   });
   registerIdentityIpc(ipcMain, identity);
   registerGithubClientIdIpc(ipcMain, githubClientId);

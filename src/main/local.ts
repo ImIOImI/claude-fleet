@@ -71,7 +71,8 @@ import {
 import { logError } from './errorLog.js';
 import { learnMapping as learnMirrorMapping } from './mirrorPolicy.js';
 import { workspaceStateDir, assertValidWorkspaceId } from './paths.js';
-import { resolveEnv } from './vault.js';
+import { resolveWorkspaceEnv } from './vault.js';
+import { recordEnvApplied } from './envApplied.js';
 import { getStoreConfig } from './config.js';
 import { storeSecretEnvNames, type StoreConfig } from './store/storeConfig.js';
 import { activeStoreConfig } from './store/activeStore.js';
@@ -400,10 +401,11 @@ async function hostEnvForWorkspaces(): Promise<NodeJS.ProcessEnv> {
  */
 export async function buildEnv(
   id: string,
-  ws: { env: Workspace['env']; authMode?: Workspace['authMode']; endpointId?: string }
+  ws: { authMode?: Workspace['authMode']; endpointId?: string },
+  resolved?: Record<string, string>
 ): Promise<NodeJS.ProcessEnv> {
   const backendVars = ws.authMode === 'endpoint' ? await endpointEnv(ws.endpointId) : {};
-  const resolved = await resolveEnv(id, ws.env.plain, ws.env.secretKeys);
+  const resolvedEnv = resolved ?? (await resolveWorkspaceEnv(id));
   const base = await hostEnvForWorkspaces();
   // Endpoint workspaces must not inherit the host's real Anthropic key (dev
   // fallback mode) into a process whose base URL is a third-party endpoint.
@@ -415,9 +417,9 @@ export async function buildEnv(
   // sees CLAUDE_CODE_CHILD_SESSION and turns transcript saving OFF — no .jsonl
   // is written, the watcher ingests nothing, and the session shows $0.00 with
   // no busy attribution (#285). Scrub the markers so it saves its transcript.
-  // (An explicit workspace env override re-appears below via `resolved`.)
+  // (An explicit workspace env override re-appears below via `resolvedEnv`.)
   for (const marker of CLAUDE_CHILD_SESSION_MARKERS) delete base[marker];
-  return { ...base, ...backendVars, ...resolved, TERM: 'xterm-256color' };
+  return { ...base, ...backendVars, ...resolvedEnv, TERM: 'xterm-256color' };
 }
 
 // ── Backend surface ────────────────────────────────────────────────────────
@@ -621,6 +623,15 @@ export function recordResumeUsageQuietly(workspaceId: string, sessionId: string)
   );
 }
 
+/** Record the vault's resolved env for observability, matching
+ *  ensureLocalRetentionSettings's containment: a disk error here must never
+ *  abort the attach, so a rejection is logged, not thrown. */
+export function recordEnvAppliedQuietly(workspaceId: string, env: Record<string, string>): Promise<void> {
+  return recordEnvApplied(workspaceId, env).catch((e: unknown) =>
+    logError({ source: 'main', type: 'env-applied-record-failed', level: 'warn', message: String(e), workspaceId })
+  );
+}
+
 const spawnQueue = createSpawnQueue();
 let resumeLookupTimeoutMs = 3000;
 let resumeTimeoutLogged = false;
@@ -717,7 +728,8 @@ export async function attachPty(
   // own flags so the spawn becomes `node <stub> [--mcp-config …] [--session-id …]`.
   const rawExtra = process.env.CLAUDE_FLEET_LOCAL_CLAUDE_EXTRA_ARGS;
   const extraArgs = rawExtra ? rawExtra.split('\0').filter(Boolean) : undefined;
-  const env = await buildEnv(id, m);
+  const resolvedWorkspaceEnv = await resolveWorkspaceEnv(id);
+  const env = await buildEnv(id, m, resolvedWorkspaceEnv);
   const mcpConfigPath = await ensureMcpConfig(id, launcher);
   // claude reads --mcp-config INSIDE the distro for wsl mode.
   const mcpConfigArg =
@@ -744,6 +756,7 @@ export async function attachPty(
     await signalWslSessions(launcher, id, 'CONT');
   }
   await persistLiveState(id);
+  await recordEnvAppliedQuietly(id, resolvedWorkspaceEnv);
   // Cross-restart continuity: a restored tab whose process died with the
   // previous app run resumes its mapped conversation instead of spawning a
   // fresh one. Looked up before queueing: the queue is serial, so a slow DB
@@ -838,10 +851,10 @@ export async function attachPty(
         platform: process.platform,
         // wsl.exe needs a valid WINDOWS cwd; the Linux cwd goes via --cd.
         windowsCwd: homedir(),
-        // All per-workspace env keys (plain + secret) must cross the WSL boundary
+        // All vault-resolved workspace env keys must cross the WSL boundary
         // so that keys not matching ANTHROPIC_*/CLAUDE_* prefixes (e.g. a
         // per-workspace MYAPP_TOKEN) still reach the in-distro claude.
-        passEnvKeys: [...Object.keys(m.env.plain), ...m.env.secretKeys]
+        passEnvKeys: Object.keys(resolvedWorkspaceEnv)
       })
     });
   };

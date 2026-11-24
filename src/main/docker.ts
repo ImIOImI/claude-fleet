@@ -47,7 +47,8 @@ import { randomUUID } from 'node:crypto';
 import { recordBrokerSessionMapping, recordUsageEvent } from './db.js';
 import { logError } from './errorLog.js';
 import { learnMapping as learnMirrorMapping } from './mirrorPolicy.js';
-import { resolveEnv } from './vault.js';
+import { resolveWorkspaceEnv } from './vault.js';
+import { recordEnvApplied } from './envApplied.js';
 import { endpointEnv } from './endpoints.js';
 import { claudeCreateArgs } from './claudeArgs.js';
 import { injectAndSubmit } from './ptyInput.js';
@@ -575,16 +576,15 @@ async function createWorkspaceInner(spec: CreateWorkspaceInput): Promise<Workspa
   const gid = process.getgid?.() ?? 1000;
 
   const image = spec.image?.trim() || RUNNER_IMAGE;
-  // Resolve secrets at create-time; the merged env goes straight to the
-  // container's `Env` array. Missing secret keys resolve to empty string
-  // so the container still starts (claude itself surfaces the failure
-  // later via its own error path).
+  // Resolve the vault's current env at create-time; the merged env goes
+  // straight to the container's `Env` array.
   // authMode 'endpoint': compile the registry entry to claude-code's env
   // contract (ANTHROPIC_BASE_URL/AUTH_TOKEN/MODEL/…, #250). Spread FIRST so
-  // explicit workspace env still overrides it. Resolved live — registry
+  // the vault's workspace env still overrides it. Resolved live — registry
   // edits/key rotation apply on next create.
   const backendVars = spec.authMode === 'endpoint' ? await endpointEnv(spec.endpointId) : {};
-  const resolvedEnv = { ...backendVars, ...(await resolveEnv(spec.id, spec.env.plain, spec.env.secretKeys)) };
+  const workspaceEnv = await resolveWorkspaceEnv(spec.id);
+  const resolvedEnv = { ...backendVars, ...workspaceEnv };
   const envArr = ['HOME=/home/fleet', ...Object.entries(resolvedEnv).map(([k, v]) => `${k}=${v}`)];
   // Windows: tell the broker to listen on loopback TCP instead of a unix
   // socket. The host connects via the published 127.0.0.1:<hostPort>.
@@ -708,6 +708,7 @@ async function createWorkspaceInner(spec: CreateWorkspaceInput): Promise<Workspa
     },
     HostConfig: hostCfg
   });
+  await recordEnvAppliedQuietly(spec.id, workspaceEnv);
 
   await created.start();
   const info = await created.inspect();
@@ -1006,6 +1007,15 @@ export async function closeHeadless(workspaceId: string, sessionId: string): Pro
 export function recordResumeUsageQuietly(workspaceId: string, sessionId: string): void {
   void recordUsageEvent({ workspaceId, sessionId, kind: 'resumed' }).catch((e: unknown) =>
     logError({ source: 'main', level: 'warn', type: 'usage-record-failed', message: String(e), workspaceId })
+  );
+}
+
+/** Record the vault's resolved env for observability, matching
+ *  ensureContainerRetention's containment: a disk error here must never
+ *  abort container create, so a rejection is logged, not thrown. */
+export function recordEnvAppliedQuietly(workspaceId: string, env: Record<string, string>): Promise<void> {
+  return recordEnvApplied(workspaceId, env).catch((e: unknown) =>
+    logError({ source: 'main', type: 'env-applied-record-failed', level: 'warn', message: String(e), workspaceId })
   );
 }
 

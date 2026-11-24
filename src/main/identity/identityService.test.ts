@@ -45,6 +45,7 @@ function setup(
     vaultAvailable?: boolean;
     polls?: Array<PollResult | Error>;
     probe?: GithubProbe | Error;
+    patToken?: () => Promise<string | null>;
     refreshes?: Array<TokenGrant | Error>;
     schedule?: (fn: () => void, ms: number) => () => void;
   } = {}
@@ -78,6 +79,7 @@ function setup(
     clientId: async () => (o.clientId === undefined ? 'Iv1.testclient' : o.clientId),
     github,
     now: () => t,
+    patToken: o.patToken,
     schedule: o.schedule ?? (() => () => undefined)
   });
   return {
@@ -112,7 +114,8 @@ describe('IdentityService status', () => {
       scopes: [],
       packagesAccess: false,
       sso: null,
-      notice: null
+      notice: null,
+      source: null
     });
   });
 
@@ -780,6 +783,473 @@ describe('IdentityService revocation and expiry caps', () => {
   it('keeps an https avatar URL', async () => {
     const s = setup({ polls: [DONE] });
     expect((await signIn(s)).identity?.avatarUrl).toBe('https://avatars.githubusercontent.com/u/42');
+  });
+});
+
+describe('IdentityService vault PAT', () => {
+  const PAT = 'ghp_vault_pat';
+  const PAT_IDENT: Identity = { ...IDENT, login: 'pat-user', id: 7 };
+  const PAT_PROBE: GithubProbe = { identity: PAT_IDENT, scopes: ['read:org', 'read:packages'], sso: null };
+  const REJECTED = 'The GitHub token in the Vault was rejected (401).';
+  const FINE_GRAINED =
+    'Fine-grained tokens report no scopes: GHCR access and team grants need a classic token with read:org and read:packages.';
+  const UNAUTHORIZED = () => new IdentityError('unauthorized', 'GitHub rejected the token', 401);
+
+  function patSetup(o: Parameters<typeof setup>[0] & { pat?: string | null } = {}) {
+    let pat: string | null = o.pat === undefined ? PAT : o.pat;
+    const s = setup({ probe: PAT_PROBE, ...o, patToken: async () => pat });
+    return {
+      ...s,
+      setPat: (v: string | null) => {
+        pat = v;
+      }
+    };
+  }
+
+  /** Device sign-in first, then a PAT appears in the vault. */
+  async function deviceThenPat(o: Parameters<typeof patSetup>[0] = {}) {
+    const s = patSetup({ ...o, pat: null, polls: [DONE], probe: PROBE });
+    await signIn(s);
+    s.setProbe(PAT_PROBE);
+    s.setPat(PAT);
+    s.github.probe.mockClear();
+    return s;
+  }
+
+  it('prefers a vault PAT over the device token and verifies it once', async () => {
+    const s = await deviceThenPat();
+    const s1 = await s.svc.status();
+    const s2 = await s.svc.status();
+    expect(s1).toMatchObject({ signedIn: true, source: 'pat', identity: { login: 'pat-user' }, packagesAccess: true, notice: null });
+    expect(s2.source).toBe('pat');
+    expect(await s.svc.bearerToken()).toBe(PAT);
+    expect(await s.svc.packagesToken()).toBe(PAT);
+    expect(await s.svc.currentLogin()).toBe('pat-user');
+    expect(s.github.probe).toHaveBeenCalledTimes(1);
+    expect(s.github.probe).toHaveBeenCalledWith(PAT);
+    expect(s.vault.store.get('identity:github|TOKEN')).toBe(TOKEN);
+    expect(JSON.stringify(s1)).not.toContain(PAT);
+  });
+
+  it('trims the PAT and treats a blank one as absent', async () => {
+    const s = patSetup({ pat: '  \n' });
+    expect(await s.svc.status()).toMatchObject({ signedIn: false, source: null });
+    expect(s.github.probe).not.toHaveBeenCalled();
+    s.setPat(`  ${PAT}\n`);
+    expect(await s.svc.bearerToken()).toBe(PAT);
+    expect(s.github.probe).toHaveBeenCalledWith(PAT);
+  });
+
+  it('keeps the verification across service instances without storing the PAT', async () => {
+    const s = patSetup();
+    await s.svc.status();
+    const again = new IdentityService({
+      vault: s.vault.api,
+      clientId: async () => 'Iv1.testclient',
+      github: s.github,
+      patToken: async () => PAT
+    });
+    expect(await again.status()).toMatchObject({ signedIn: true, source: 'pat' });
+    expect(s.github.probe).toHaveBeenCalledTimes(1);
+    expect([...s.vault.store.values()].some((v) => v.includes(PAT))).toBe(false);
+  });
+
+  it('re-verifies when the PAT changes', async () => {
+    const s = patSetup({ pat: 'ghp_a' });
+    expect(await s.svc.bearerToken()).toBe('ghp_a');
+    s.setPat('ghp_b');
+    expect(await s.svc.bearerToken()).toBe('ghp_b');
+    expect(s.github.probe).toHaveBeenCalledTimes(2);
+    expect(s.github.probe).toHaveBeenNthCalledWith(1, 'ghp_a');
+    expect(s.github.probe).toHaveBeenNthCalledWith(2, 'ghp_b');
+  });
+
+  it('a rejected PAT falls back to the device token with a notice and clears nothing', async () => {
+    const s = await deviceThenPat();
+    s.setProbe(UNAUTHORIZED());
+    expect(await s.svc.status()).toMatchObject({ signedIn: true, source: 'device', identity: { login: 'octo' }, notice: REJECTED });
+    expect(await s.svc.bearerToken()).toBe(TOKEN);
+    expect(s.vault.api.deleteAllForWorkspace).not.toHaveBeenCalled();
+    expect(s.vault.store.get('identity:github|TOKEN')).toBe(TOKEN);
+    expect(JSON.parse(s.vault.store.get('identity:github|PROFILE') ?? '{}').identity.login).toBe('octo');
+    expect(s.vault.store.get('identity:github|PAT_PROFILE')).not.toContain(PAT);
+    // Remembered for this PAT: status polls don't re-probe.
+    expect(s.github.probe).toHaveBeenCalledTimes(1);
+    s.setPat(null);
+    expect(await s.svc.status()).toMatchObject({ signedIn: true, source: 'device', identity: { login: 'octo' }, notice: null });
+    expect(await s.svc.bearerToken()).toBe(TOKEN);
+  });
+
+  it('a rejected PAT with no device token signs nobody in, with the notice', async () => {
+    const s = patSetup({ probe: UNAUTHORIZED() });
+    expect(await s.svc.status()).toMatchObject({ signedIn: false, source: null, identity: null, notice: REJECTED });
+    expect(await s.svc.bearerToken()).toBeNull();
+  });
+
+  it('a device sign-in completed while the PAT is rejected stays in effect', async () => {
+    const s = patSetup({ probe: UNAUTHORIZED(), polls: [DONE] });
+    expect((await s.svc.status()).notice).toBe(REJECTED);
+    s.setProbe(PROBE);
+    expect((await signIn(s)).signedIn).toBe(true);
+    expect(await s.svc.status()).toMatchObject({ signedIn: true, source: 'device', identity: { login: 'octo' }, notice: REJECTED });
+    expect(await s.svc.bearerToken()).toBe(TOKEN);
+  });
+
+  it('a PAT rejection survives a restart without removing the PAT', async () => {
+    const s = await deviceThenPat();
+    s.setProbe(UNAUTHORIZED());
+    await s.svc.status();
+    const fresh = new IdentityService({
+      vault: s.vault.api,
+      clientId: async () => 'Iv1.testclient',
+      github: s.github,
+      patToken: async () => PAT
+    });
+    expect(await fresh.status()).toMatchObject({ signedIn: true, source: 'device', notice: REJECTED });
+    expect(await fresh.bearerToken()).toBe(TOKEN);
+    expect(s.github.probe).toHaveBeenCalledTimes(1);
+  });
+
+  it('a PAT rejection survives a restart with no device token', async () => {
+    const s = patSetup({ probe: UNAUTHORIZED() });
+    await s.svc.status();
+    const fresh = new IdentityService({
+      vault: s.vault.api,
+      clientId: async () => 'Iv1.testclient',
+      github: s.github,
+      patToken: async () => PAT
+    });
+    expect(await fresh.bearerToken()).toBeNull();
+    expect(s.github.probe).toHaveBeenCalledTimes(1);
+  });
+
+  it('a device sign-out keeps the PAT rejection', async () => {
+    const s = await deviceThenPat();
+    s.setProbe(UNAUTHORIZED());
+    await s.svc.status();
+    await s.svc.signOut();
+    expect(s.vault.store.has('identity:github|TOKEN')).toBe(false);
+    const fresh = new IdentityService({
+      vault: s.vault.api,
+      clientId: async () => 'Iv1.testclient',
+      github: s.github,
+      patToken: async () => PAT
+    });
+    expect(await fresh.status()).toMatchObject({ signedIn: false, notice: REJECTED });
+    expect(s.github.probe).toHaveBeenCalledTimes(1);
+  });
+
+  it('a replacement for a rejected PAT is verified', async () => {
+    const s = patSetup({ probe: UNAUTHORIZED() });
+    expect((await s.svc.status()).notice).toBe(REJECTED);
+    s.setProbe(PAT_PROBE);
+    s.setPat('ghp_new');
+    expect(await s.svc.status()).toMatchObject({ signedIn: true, source: 'pat', notice: null });
+  });
+
+  it('refresh re-probes a rejected PAT and signs it in once GitHub accepts it', async () => {
+    const s = patSetup({ probe: UNAUTHORIZED() });
+    await s.svc.status();
+    await s.svc.status();
+    expect(s.github.probe).toHaveBeenCalledTimes(1);
+    s.setProbe(PAT_PROBE);
+    expect(await s.svc.status({ refresh: true })).toMatchObject({ signedIn: true, source: 'pat', notice: null });
+    expect(s.github.probe).toHaveBeenCalledTimes(2);
+    expect(await s.svc.status()).toMatchObject({ signedIn: true, source: 'pat' });
+    expect(s.github.probe).toHaveBeenCalledTimes(2);
+  });
+
+  it('a transient PAT failure falls back to the device token and backs off for 60s', async () => {
+    const s = await deviceThenPat();
+    s.setProbe(new IdentityError('network', 'GitHub returned 500', 500));
+    const st = await s.svc.status();
+    expect(st).toMatchObject({ signedIn: true, source: 'device', identity: { login: 'octo' } });
+    expect(st.notice).toBe("Couldn't verify the GitHub token in the Vault (GitHub returned 500).");
+    expect(await s.svc.bearerToken()).toBe(TOKEN);
+    expect(s.github.probe).toHaveBeenCalledTimes(1);
+    s.advance(59_999);
+    expect((await s.svc.status()).source).toBe('device');
+    expect(s.github.probe).toHaveBeenCalledTimes(1);
+    s.setProbe(PAT_PROBE);
+    s.advance(1);
+    expect(await s.svc.status()).toMatchObject({ signedIn: true, source: 'pat', notice: null });
+    expect(s.github.probe).toHaveBeenCalledTimes(2);
+  });
+
+  it('a transient PAT failure with no device token signs nobody in', async () => {
+    const s = patSetup({ probe: new IdentityError('network', 'offline') });
+    expect(await s.svc.status()).toMatchObject({ signedIn: false, source: null, notice: "Couldn't verify the GitHub token in the Vault (offline)." });
+    expect(await s.svc.bearerToken()).toBeNull();
+  });
+
+  it('refresh re-probes a backed-off PAT', async () => {
+    const s = patSetup({ probe: new IdentityError('network', 'offline') });
+    await s.svc.status();
+    s.setProbe(PAT_PROBE);
+    expect(await s.svc.status({ refresh: true })).toMatchObject({ signedIn: true, source: 'pat', notice: null });
+    expect(s.github.probe).toHaveBeenCalledTimes(2);
+  });
+
+  it('a PAT probe does not hold up a device sign-out', async () => {
+    const s = patSetup({ pat: null, polls: [DONE], probe: PROBE });
+    await signIn(s);
+    let release!: () => void;
+    s.github.probe.mockImplementationOnce(
+      () =>
+        new Promise<GithubProbe>((r) => {
+          release = () => r(PAT_PROBE);
+        })
+    );
+    s.setPat(PAT);
+    const st = s.svc.status();
+    await vi.waitFor(() => expect(release).toBeDefined());
+    await s.svc.signOut();
+    expect(s.vault.store.has('identity:github|TOKEN')).toBe(false);
+    release();
+    expect(await st).toMatchObject({ signedIn: true, source: 'pat' });
+  });
+
+  it('a PAT changed mid-probe drops the stale result and reports the new PAT', async () => {
+    const s = patSetup({ pat: 'ghp_a' });
+    let release!: () => void;
+    s.github.probe.mockImplementationOnce(
+      () =>
+        new Promise<GithubProbe>((r) => {
+          release = () => r(PAT_PROBE);
+        })
+    );
+    const st = s.svc.status();
+    await vi.waitFor(() => expect(release).toBeDefined());
+    s.setPat('ghp_b');
+    s.setProbe({ ...PAT_PROBE, identity: { ...PAT_IDENT, login: 'b-user' } });
+    release();
+    expect(await st).toMatchObject({ signedIn: true, source: 'pat', identity: { login: 'b-user' } });
+    expect(await s.svc.bearerToken()).toBe('ghp_b');
+    expect(s.github.probe).toHaveBeenNthCalledWith(2, 'ghp_b');
+  });
+
+  it('a device revoke notice survives the PAT being removed afterwards', async () => {
+    const s = await deviceThenPat();
+    s.setProbe(UNAUTHORIZED());
+    expect(await s.svc.status()).toMatchObject({ source: 'device', notice: REJECTED });
+    expect(await s.svc.status({ refresh: true })).toMatchObject({ signedIn: false });
+    s.setPat(null);
+    const st = await s.svc.status();
+    expect(st.signedIn).toBe(false);
+    expect(st.notice).toMatch(/no longer accepts the saved sign-in/);
+  });
+
+  it('concurrent reads share one PAT probe', async () => {
+    const s = patSetup();
+    const [a, b] = await Promise.all([s.svc.status(), s.svc.bearerToken()]);
+    expect(a.source).toBe('pat');
+    expect(b).toBe(PAT);
+    expect(s.github.probe).toHaveBeenCalledTimes(1);
+  });
+
+  it('fine-grained PAT (no scopes) gets the scopes notice', async () => {
+    const s = patSetup({ probe: { ...PAT_PROBE, scopes: [] } });
+    expect(await s.svc.status()).toMatchObject({ signedIn: true, source: 'pat', scopes: [], packagesAccess: false, notice: FINE_GRAINED });
+    expect(await s.svc.packagesToken()).toBeNull();
+    expect(await s.svc.bearerToken()).toBe(PAT);
+  });
+
+  it('without a PAT the device token is used with source device', async () => {
+    const s = patSetup({ pat: null, polls: [DONE], probe: PROBE });
+    expect((await signIn(s)).source).toBe('device');
+    expect(await s.svc.status()).toMatchObject({ signedIn: true, source: 'device', identity: { login: 'octo' } });
+    expect(await s.svc.bearerToken()).toBe(TOKEN);
+  });
+
+  it('removing the PAT falls back to the device token, never pairing the PAT profile with it', async () => {
+    const s = await deviceThenPat();
+    expect((await s.svc.status()).identity?.login).toBe('pat-user');
+    s.setPat(null);
+    expect(await s.svc.status()).toMatchObject({ signedIn: true, source: 'device', identity: { login: 'octo' } });
+    expect(await s.svc.currentLogin()).toBe('octo');
+    expect(await s.svc.bearerToken()).toBe(TOKEN);
+  });
+
+  it('a device load ignores a PAT-sourced PROFILE', async () => {
+    const s = patSetup({ pat: null });
+    s.vault.store.set('identity:github|TOKEN', TOKEN);
+    s.vault.store.set(
+      'identity:github|PROFILE',
+      JSON.stringify({ identity: PAT_IDENT, scopes: [], sso: null, verifiedAt: 1, source: 'pat', tokenSha: 'x' })
+    );
+    expect(await s.svc.status()).toMatchObject({ signedIn: false, source: null });
+  });
+
+  it('removing the PAT with no device token signs out without clearing anything', async () => {
+    const s = patSetup();
+    await s.svc.status();
+    s.setPat(null);
+    expect(await s.svc.status()).toMatchObject({ signedIn: false, source: null });
+    expect(s.vault.api.deleteAllForWorkspace).not.toHaveBeenCalled();
+  });
+
+  it('signOut with a PAT active keeps every saved secret and the PAT sign-in', async () => {
+    const s = await deviceThenPat();
+    await s.svc.status();
+    const before = new Map(s.vault.store);
+    await s.svc.signOut();
+    expect(s.vault.api.deleteAllForWorkspace).not.toHaveBeenCalled();
+    expect(s.vault.store).toEqual(before);
+    expect(await s.svc.status()).toMatchObject({ signedIn: true, source: 'pat' });
+    expect(s.github.probe).toHaveBeenCalledTimes(1);
+  });
+
+  it('a PAT sign-in never writes TOKEN', async () => {
+    const s = patSetup();
+    await s.svc.status();
+    expect(s.vault.api.setSecret.mock.calls.some((c) => c[1] === 'TOKEN')).toBe(false);
+    expect(s.vault.store.has('identity:github|TOKEN')).toBe(false);
+  });
+
+  it('refresh re-verifies the PAT and picks up new teams without touching TOKEN', async () => {
+    const s = patSetup();
+    await s.svc.status();
+    s.setProbe({ ...PAT_PROBE, identity: { ...PAT_IDENT, teams: ['acme/new'] } });
+    expect(await s.svc.status({ refresh: true })).toMatchObject({ signedIn: true, source: 'pat', identity: { teams: ['acme/new'] } });
+    expect(s.github.probe).toHaveBeenCalledTimes(2);
+    expect(s.vault.store.has('identity:github|TOKEN')).toBe(false);
+    expect((await s.svc.status()).identity?.teams).toEqual(['acme/new']);
+    expect(s.github.probe).toHaveBeenCalledTimes(2);
+  });
+
+  it('refresh of a revoked PAT signs out with the rejection notice and clears nothing', async () => {
+    const s = patSetup();
+    await s.svc.status();
+    s.setProbe(UNAUTHORIZED());
+    expect(await s.svc.status({ refresh: true })).toMatchObject({ signedIn: false, notice: REJECTED });
+    expect(s.vault.api.deleteAllForWorkspace).not.toHaveBeenCalled();
+    expect(await s.svc.bearerToken()).toBeNull();
+  });
+
+  it('refresh of a PAT failing transiently keeps the cached PAT profile', async () => {
+    const s = patSetup();
+    await s.svc.status();
+    s.setProbe(new IdentityError('network', 'offline'));
+    const st = await s.svc.status({ refresh: true });
+    expect(st).toMatchObject({ signedIn: true, source: 'pat' });
+    expect(st.notice).toContain("Couldn't refresh your GitHub account (offline)");
+  });
+
+  it('a PAT verification queued behind a device sign-out is not wiped by it', async () => {
+    const s = patSetup({ pat: null, polls: [DONE], probe: PROBE });
+    await signIn(s);
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    const del = s.vault.api.deleteAllForWorkspace.getMockImplementation()!;
+    s.vault.api.deleteAllForWorkspace.mockImplementationOnce(async (scope: string) => {
+      await gate;
+      await del(scope);
+    });
+    const out = s.svc.signOut();
+    await vi.waitFor(() => expect(s.vault.api.deleteAllForWorkspace).toHaveBeenCalled());
+    s.setProbe(PAT_PROBE);
+    s.setPat(PAT);
+    const st = s.svc.status();
+    await new Promise((r) => setTimeout(r, 0));
+    expect(s.github.probe).toHaveBeenCalledTimes(1);
+    release();
+    await out;
+    expect(await st).toMatchObject({ signedIn: true, source: 'pat' });
+    expect(s.vault.store.has('identity:github|TOKEN')).toBe(false);
+    expect(await s.svc.status()).toMatchObject({ signedIn: true, source: 'pat' });
+    expect(s.github.probe).toHaveBeenCalledTimes(2);
+  });
+
+  it('keeps the PAT verification in memory when the vault is unavailable', async () => {
+    const s = patSetup({ vaultAvailable: false });
+    expect(await s.svc.status()).toMatchObject({ signedIn: true, source: 'pat', persisted: false });
+    await s.svc.status();
+    expect(s.github.probe).toHaveBeenCalledTimes(1);
+    expect(s.vault.api.setSecret).not.toHaveBeenCalled();
+  });
+
+  it('with no patToken dep the device sign-in reports source device', async () => {
+    const s = setup({ polls: [DONE] });
+    await signIn(s);
+    expect(await s.svc.status()).toMatchObject({ signedIn: true, source: 'device' });
+  });
+
+  it('recover: a host 401 on a PAT GitHub still accepts is host-refused', async () => {
+    const s = await deviceThenPat();
+    expect(await s.svc.bearerToken()).toBe(PAT);
+    expect(await s.svc.recover(PAT)).toBe('host-refused');
+    expect(await s.svc.bearerToken()).toBe(PAT);
+  });
+
+  it('recover: GitHub unreachable keeps the PAT without a backoff', async () => {
+    const s = await deviceThenPat();
+    expect(await s.svc.bearerToken()).toBe(PAT);
+    s.setProbe(new IdentityError('network', 'offline'));
+    expect(await s.svc.recover(PAT)).toBe('host-refused');
+    expect(await s.svc.status()).toMatchObject({ source: 'pat', notice: null });
+    expect(await s.svc.bearerToken()).toBe(PAT);
+  });
+
+  it('recover: a PAT GitHub rejects is tombstoned and the device token takes over', async () => {
+    const s = await deviceThenPat();
+    expect(await s.svc.bearerToken()).toBe(PAT);
+    const changes: unknown[] = [];
+    s.svc.onChange((c) => changes.push(c));
+    s.setProbe(UNAUTHORIZED());
+    expect(await s.svc.recover(PAT)).toBe('retry');
+    expect(await s.svc.bearerToken()).toBe(TOKEN);
+    expect(changes).toEqual([{ cause: 'revoked', signedIn: true }]);
+    expect(await s.svc.status()).toMatchObject({ source: 'device', notice: REJECTED });
+    expect(s.vault.store.get('identity:github|PAT_PROFILE')).toContain('rejectedSha');
+    expect(s.vault.api.deleteAllForWorkspace).not.toHaveBeenCalled();
+  });
+
+  it('recover: a rejected PAT with no device sign-in is expired', async () => {
+    const s = patSetup();
+    expect(await s.svc.bearerToken()).toBe(PAT);
+    s.setProbe(UNAUTHORIZED());
+    expect(await s.svc.recover(PAT)).toBe('expired');
+    expect(await s.svc.bearerToken()).toBeNull();
+    expect(s.vault.store.get('identity:github|PAT_PROFILE')).toContain('rejectedSha');
+  });
+
+  it('sign-out while a PAT wins emits nothing and keeps the device token', async () => {
+    const s = await deviceThenPat();
+    await s.svc.status();
+    const changes: unknown[] = [];
+    s.svc.onChange((c) => changes.push(c));
+    await s.svc.signOut();
+    expect(changes).toEqual([]);
+    expect(s.vault.store.get('identity:github|TOKEN')).toBe(TOKEN);
+  });
+});
+
+describe('IdentityService vault PAT with an expiring device token', () => {
+  const HOUR = 3_600_000;
+  const PAT = 'ghp_vault_pat';
+  const PAT_PROBE: GithubProbe = { identity: { ...IDENT, login: 'pat-user', id: 7 }, scopes: ['read:org'], sso: null };
+
+  it('keeps refreshing the device token while the PAT wins', async () => {
+    const timers: Array<{ fn: () => void; ms: number }> = [];
+    let pat: string | null = null;
+    const s = setup({
+      polls: [{ status: 'done', token: 'ghu_first', scopes: [], expiresAt: 5000 + 8 * HOUR, refreshToken: 'ghr_first', refreshExpiresAt: 5000 + 180 * 24 * HOUR }],
+      refreshes: [{ token: 'ghu_2', scopes: [], expiresAt: 16 * HOUR, refreshToken: 'ghr_2', refreshExpiresAt: 200 * 24 * HOUR }],
+      patToken: async () => pat,
+      schedule: (fn, ms) => {
+        timers.push({ fn, ms });
+        return () => undefined;
+      }
+    });
+    await signIn(s);
+    s.setProbe(PAT_PROBE);
+    pat = PAT;
+    expect(await s.svc.bearerToken()).toBe(PAT);
+    s.advance(8 * HOUR - 10 * 60_000);
+    timers.at(-1)!.fn();
+    await vi.waitFor(() => expect(s.github.refresh).toHaveBeenCalledWith('Iv1.testclient', 'ghr_first'));
+    await vi.waitFor(() => expect(s.vault.store.get('identity:github|TOKEN')).toBe('ghu_2'));
+    expect(await s.svc.bearerToken()).toBe(PAT);
   });
 });
 

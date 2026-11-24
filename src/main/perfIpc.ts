@@ -18,6 +18,7 @@ import type { Attributes } from '@opentelemetry/api';
 import { perfSpanAsync } from './perf.js';
 
 const W0 = { workspaceArg: 0 } as const;
+const W1 = { workspaceArg: 1 } as const;
 const W0S1 = { workspaceArg: 0, sessionArg: 1 } as const;
 
 /** Channel → 0-based positions (after the Electron event) of id-bearing args.
@@ -48,10 +49,12 @@ const CHANNEL_CONTEXT: Record<string, { workspaceArg?: number; sessionArg?: numb
   'files:dropBytes': W0,
   'files:dropUrl': W0,
   'files:dropText': W0,
-  'vault:listKeys': W0,
-  'vault:getSecret': W0,
-  'vault:setSecret': W0,
-  'vault:deleteSecret': W0,
+  // vault:putKey/renameKey/deleteKey are key-scoped, not workspace-scoped — absent, like config:*.
+  'vault:reveal': W1,
+  'vault:setLine': W1,
+  'vault:removeLine': W1,
+  'vault:copyWorkspace': W0,
+  'vault:applyWorkspaceEdits': W0,
   'vault:deleteAllForWorkspace': W0,
   'transcript:list': W0,
   'transcript:hasForBrokerSession': W0S1,

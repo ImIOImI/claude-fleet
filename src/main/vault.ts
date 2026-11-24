@@ -19,14 +19,19 @@
 // Migration note: secrets previously written to keytar (`<id>:<key>`
 // accounts) are NOT carried over — users re-enter API keys once. OAuth
 // workspaces store no secrets, so they're unaffected.
+//
+// Three kinds of scope share this store: workspace bags (bare id, resolved
+// via vaultModel's inherit/override lines), the app root env (`app:env`,
+// each key's canonical value) + its metadata index (`app:index`), and other
+// reserved host-only bags (endpoint:/identity:/store:/loadout-source:).
 
 import { app, safeStorage } from 'electron';
 import { perfSpanAsync } from './perf.js';
 import { readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
-import { assertNotReservedVaultScope } from './vaultScopes.js';
-
-type Store = Record<string, Record<string, string>>;
+import { APP_ENV_SCOPE, APP_INDEX_SCOPE } from './vaultScopes.js';
+import * as model from './vaultModel.js';
+import type { ModelEntry, Store, WorkspaceEdit } from './vaultModel.js';
 
 function filePath(): string {
   return join(app.getPath('userData'), 'secrets.enc');
@@ -35,6 +40,9 @@ function filePath(): string {
 // In-memory copy of the decrypted store. We own every write, so the cache
 // stays authoritative once loaded.
 let cache: Store | null = null;
+// Set when secrets.enc exists but can't be decrypted/parsed (e.g. keychain key
+// changed). Writes are refused so the unreadable file is never clobbered.
+let loadFailed = false;
 
 function isStore(v: unknown): v is Store {
   return typeof v === 'object' && v !== null && !Array.isArray(v);
@@ -42,23 +50,36 @@ function isStore(v: unknown): v is Store {
 
 async function load(): Promise<Store> {
   if (cache) return cache;
+  encryptionAvailable(); // enables the Linux plaintext backend before the first decrypt
+  let b64: string;
   try {
-    const b64 = await readFile(filePath(), 'utf8');
-    if (!b64.trim()) {
-      cache = {};
-      return cache;
-    }
-    const decrypted = safeStorage.decryptString(Buffer.from(b64, 'base64'));
-    const parsed = JSON.parse(decrypted) as unknown;
-    cache = isStore(parsed) ? parsed : {};
+    b64 = await readFile(filePath(), 'utf8');
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code !== 'ENOENT') loadFailed = true;
+    cache = {};
+    return cache;
+  }
+  if (!b64.trim()) {
+    cache = {};
+    return cache;
+  }
+  try {
+    const parsed = JSON.parse(safeStorage.decryptString(Buffer.from(b64, 'base64'))) as unknown;
+    if (!isStore(parsed)) throw new Error('vault payload is not an object');
+    cache = parsed;
   } catch {
-    // Missing file, undecryptable (key changed), or malformed → empty vault.
+    loadFailed = true;
     cache = {};
   }
   return cache;
 }
 
+function assertWritable(): void {
+  if (loadFailed) throw new Error("Vault file can't be decrypted; refusing to overwrite it.");
+}
+
 async function persist(store: Store): Promise<void> {
+  assertWritable();
   cache = store;
   const buf = safeStorage.encryptString(JSON.stringify(store));
   await writeFile(filePath(), buf.toString('base64'), 'utf8');
@@ -115,7 +136,8 @@ export async function listKeys(workspaceId: string): Promise<string[]> {
 /** Fetch a secret value. Returns null if missing. */
 export async function getSecret(workspaceId: string, key: string): Promise<string | null> {
   const store = await load();
-  return store[workspaceId]?.[key] ?? null;
+  const bag = store[workspaceId];
+  return bag !== undefined && Object.hasOwn(bag, key) ? bag[key] : null;
 }
 
 /**
@@ -128,6 +150,7 @@ export async function setSecret(workspaceId: string, key: string, value: string)
   }
   await withLock(async () => {
     const store = await load();
+    assertWritable();
     const bag = { ...(store[workspaceId] ?? {}), [key]: value };
     await persist({ ...store, [workspaceId]: bag });
   });
@@ -137,8 +160,9 @@ export async function setSecret(workspaceId: string, key: string, value: string)
 export async function deleteSecret(workspaceId: string, key: string): Promise<void> {
   await withLock(async () => {
     const store = await load();
+    assertWritable();
     const bag = store[workspaceId];
-    if (!bag || !(key in bag)) return;
+    if (bag === undefined || !Object.hasOwn(bag, key)) return;
     const next: Record<string, string> = { ...bag };
     delete next[key];
     const nextStore = { ...store };
@@ -150,50 +174,130 @@ export async function deleteSecret(workspaceId: string, key: string): Promise<vo
 
 /**
  * Delete every secret stored for a workspace. Called when a workspace is
- * purged from the Saved list.
+ * purged from the Saved list. A workspace scope (no ':') cascades through
+ * the model (drops inherit links + orphaned metadata too); a reserved scope
+ * is just a flat bag, dropped whole.
  */
 export async function deleteAllForWorkspace(workspaceId: string): Promise<void> {
+  if (!workspaceId.includes(':')) {
+    await mutate((s) => model.removeWorkspace(s, workspaceId));
+    return;
+  }
   await withLock(async () => {
     const store = await load();
-    if (!(workspaceId in store)) return;
+    assertWritable();
+    if (!Object.hasOwn(store, workspaceId)) return;
     const nextStore = { ...store };
     delete nextStore[workspaceId];
     await persist(nextStore);
   });
 }
 
-/**
- * Resolve a workspace's full env: merge the manifest's plain env with the
- * secret values from the vault. Used at container-start time. Missing keys
- * resolve to the empty string so the container still starts — surfacing the
- * missing key in logs is the caller's job.
- */
-export function resolveEnv(
-  workspaceId: string,
-  plain: Record<string, string>,
-  secretKeys: string[]
-): Promise<Record<string, string>> {
-  return perfSpanAsync('claude_fleet.vault.resolve_env', () => resolveEnvInner(workspaceId, plain, secretKeys), { workspace_id: workspaceId });
-}
-
-async function resolveEnvInner(
-  workspaceId: string,
-  plain: Record<string, string>,
-  secretKeys: string[]
-): Promise<Record<string, string>> {
-  // A workspace's id is its scope; a reserved (host-only / endpoint) bag must
-  // never be injected into a workspace env, whatever id reached here (#444).
-  assertNotReservedVaultScope(workspaceId);
-  const merged: Record<string, string> = { ...plain };
-  for (const key of secretKeys) {
-    const value = await getSecret(workspaceId, key);
-    merged[key] = value ?? '';
+/** Apply a store transform, persisting it. Throws when encryption isn't available.
+ *  Skips the write when `fn` returns the same store reference (a declared no-op,
+ *  e.g. an already-migrated `migrateManifestEnv`) so it doesn't re-encrypt and
+ *  rewrite secrets.enc for nothing on every launch. */
+async function mutate(fn: (s: Store) => Store): Promise<void> {
+  if (!encryptionAvailable()) {
+    throw new Error('Vault unavailable (secret encryption not available on this system).');
   }
-  return merged;
+  await withLock(async () => {
+    const store = await load();
+    assertWritable();
+    const next = fn(store);
+    if (next === store) return;
+    await persist(next);
+  });
 }
 
-/** Test-only: drop the in-memory cache + probe so a fresh read hits disk. */
+export async function listModelEntries(): Promise<ModelEntry[]> {
+  return model.listEntries(await load());
+}
+
+export async function getRootValue(key: string): Promise<string | null> {
+  const s = await load();
+  const root = s[APP_ENV_SCOPE];
+  return root !== undefined && Object.hasOwn(root, key) ? root[key] : null;
+}
+
+export async function revealValue(key: string, ws: string | null): Promise<string | null> {
+  const s = await load();
+  if (ws === null) {
+    const root = s[APP_ENV_SCOPE];
+    return root !== undefined && Object.hasOwn(root, key) ? root[key] : null;
+  }
+  if (!model.lineMode(s, key, ws)) return null;
+  const resolved = model.resolveWorkspaceEnv(s, ws);
+  return Object.hasOwn(resolved, key) ? resolved[key] : null;
+}
+
+export function putKey(a: { key: string; secret: boolean; tags: string[]; rootValue?: string | null }): Promise<void> {
+  return mutate((s) => model.putKey(s, a));
+}
+
+export function renameKey(key: string, next: string): Promise<void> {
+  return mutate((s) => model.renameKey(s, key, next));
+}
+
+export function deleteKey(key: string): Promise<void> {
+  return mutate((s) => model.deleteKey(s, key));
+}
+
+export function setLine(key: string, ws: string, line: { mode: 'inherit' } | { mode: 'override'; value: string }): Promise<void> {
+  return mutate((s) => model.setLine(s, key, ws, line));
+}
+
+export function removeLine(key: string, ws: string): Promise<void> {
+  return mutate((s) => model.removeLine(s, key, ws));
+}
+
+export function copyWorkspace(from: string, to: string): Promise<void> {
+  return mutate((s) => model.copyWorkspace(s, from, to));
+}
+
+export function applyWorkspaceEdits(ws: string, edits: WorkspaceEdit[]): Promise<void> {
+  return mutate((s) => model.applyWorkspaceEdits(s, ws, edits));
+}
+
+/** Resolve a workspace's full env from the vault. Used at container/local-spawn start time. */
+export async function resolveWorkspaceEnv(ws: string): Promise<Record<string, string>> {
+  return perfSpanAsync('claude_fleet.vault.resolve_env', async () => model.resolveWorkspaceEnv(await load(), ws), { workspace_id: ws });
+}
+
+export async function workspaceKeys(ws: string): Promise<{ key: string; secret: boolean }[]> {
+  return model.workspaceKeys(await load(), ws);
+}
+
+export async function workspaceProvidedKeys(ws: string): Promise<string[]> {
+  return model.workspaceProvidedKeys(await load(), ws);
+}
+
+export async function workspaceSecretValues(ws: string): Promise<{ key: string; value: string }[]> {
+  return model.workspaceSecretValues(await load(), ws);
+}
+
+/** One-shot manifest→vault migration. Returns false (store untouched) once already migrated. */
+export async function migrateManifestEnv(
+  manifests: { id: string; plain: Record<string, string>; secretKeys: string[] }[]
+): Promise<boolean> {
+  let ran = false;
+  await mutate((s) => {
+    if (s[APP_INDEX_SCOPE]?.[model.MIGRATED_MARKER]) return s;
+    ran = true;
+    return model.migrateManifestEnv(s, manifests);
+  });
+  return ran;
+}
+
+export async function isMigrated(): Promise<boolean> {
+  const s = await load();
+  return Boolean(s[APP_INDEX_SCOPE]?.[model.MIGRATED_MARKER]);
+}
+
+/** Test-only: drop the in-memory cache + probe + encryption-ensured flag so a fresh read/probe hits disk. */
 export function _resetVaultCacheForTests(): void {
   cache = null;
+  loadFailed = false;
   probeResult = null;
+  encryptionEnsured = false;
 }

@@ -228,7 +228,8 @@ export async function mockMainIpc(app: ElectronApplication, opts: MockOpts = {})
       mkdirp: [],
       openPath: [],
       setFleetRoot: [],
-      vaultSetSecret: [],
+      vaultApplyWorkspaceEdits: [],
+      vaultCopyWorkspace: [],
       vaultDeleteAllForWorkspace: [],
       setFavorite: [],
       addSource: [],
@@ -261,10 +262,10 @@ export async function mockMainIpc(app: ElectronApplication, opts: MockOpts = {})
       'config:setFleetRoot',
       'usage:rollingSpend',
       'vault:available',
-      'vault:listKeys',
-      'vault:getSecret',
-      'vault:setSecret',
-      'vault:deleteSecret',
+      'vault:list',
+      'vault:reveal',
+      'vault:applyWorkspaceEdits',
+      'vault:copyWorkspace',
       'vault:deleteAllForWorkspace',
       'observability:summaryForWorkspace',
       'observability:summaryForBrokerSession',
@@ -381,14 +382,16 @@ export async function mockMainIpc(app: ElectronApplication, opts: MockOpts = {})
       }
     );
     // Vault mocks — record but no persistence. Tests assert against the
-    // call list to verify Delete and secret-write flows.
+    // call list to verify Delete and staged env-edit flows.
     ipcMain.handle('vault:available', () => true);
-    ipcMain.handle('vault:listKeys', (_e, _id: string) => []);
-    ipcMain.handle('vault:getSecret', (_e, _id: string, _key: string) => null);
-    ipcMain.handle('vault:setSecret', async (_e, id: string, key: string, value: string) => {
-      g.__calls.vaultSetSecret.push({ id, key, value });
+    ipcMain.handle('vault:list', () => []);
+    ipcMain.handle('vault:reveal', (_e, _key: string, _id: string | null) => null);
+    ipcMain.handle('vault:applyWorkspaceEdits', async (_e, id: string, edits: unknown[]) => {
+      g.__calls.vaultApplyWorkspaceEdits.push({ id, edits });
     });
-    ipcMain.handle('vault:deleteSecret', async (_e, _id: string, _key: string) => undefined);
+    ipcMain.handle('vault:copyWorkspace', async (_e, from: string, to: string) => {
+      g.__calls.vaultCopyWorkspace.push({ from, to });
+    });
     ipcMain.handle(
       'vault:deleteAllForWorkspace',
       async (_e, id: string) => {
