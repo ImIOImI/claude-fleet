@@ -1,5 +1,5 @@
 // Pure copy and tier rules for remote workspaces. Display only: the host enforces every tier.
-import type { RemoteDrain, RemoteLiveSession, RemoteProbe, RemoteProbeErr, RemoteProbeOk, RemoteTier } from '../../preload/remoteTypes';
+import type { PtyEndReason, RemoteDrain, RemoteLiveSession, RemoteProbe, RemoteProbeErr, RemoteProbeOk, RemoteTier } from '../../preload/remoteTypes';
 import type { RemoteBlockKind } from '../../preload/remoteAuth';
 
 export type MaybeTier = RemoteTier | null | undefined;
@@ -149,7 +149,7 @@ export function sessionEndKind(restarting: boolean): 'restarting' | 'natural' {
 export const AUTO_REATTACH_GAP_MS = 5 * 60_000;
 
 /** The host closed a live remote tab with 4401 (the token it opened with expired): re-attach once with the current sign-in. */
-export function reattachAfterAuthEnd(o: { remote: boolean; reason?: 'unauthorized'; signedIn: boolean; lastAutoAt: number | null; now: number }): boolean {
+export function reattachAfterAuthEnd(o: { remote: boolean; reason?: PtyEndReason; signedIn: boolean; lastAutoAt: number | null; now: number }): boolean {
   if (!o.remote || o.reason !== 'unauthorized' || !o.signedIn) return false;
   return o.lastAutoAt === null || o.now - o.lastAutoAt >= AUTO_REATTACH_GAP_MS;
 }

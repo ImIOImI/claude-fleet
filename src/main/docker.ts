@@ -32,6 +32,7 @@ import { effectiveCaptureSettings, type CaptureSettings } from '../preload/captu
 import { ensureContainerRetention } from './claims/retention.js';
 import { fleetPrivateDir, fleetSharedDir, getFleetRoot } from './config.js';
 import type { ExtraMount } from '../preload/extraMounts.js';
+import type { PtyEndReason } from '../preload/remoteTypes.js';
 import { dockerSocketDirs, toDockerMounts } from './extraMountsHost.js';
 import {
   mcpWorkspaceSocketDir,
@@ -865,7 +866,7 @@ export interface PtyHandle {
    */
   close: () => Promise<void>;
   /** Why the stream ended, when the backend knows; read after `end`. */
-  endReason?: () => 'unauthorized' | undefined;
+  endReason?: () => PtyEndReason | undefined;
 }
 
 const HOST_CHANNEL = 1;

@@ -53,6 +53,8 @@ export interface RemoteBackend extends Backend {
   refresh(id?: string): Promise<void>;
   /** After a sign-in or token refresh: drop the /whoami throttle, reconnect every /events socket, re-probe every bookmark. */
   reconnect(): void;
+  /** Re-ask one bookmark's /whoami now, ignoring the throttle. */
+  recheck(id: string): void;
   /** Stop every background probe (app quit). */
   stop(): void;
   /** Bookmarks the probe loop knows, with cached liveness; no I/O. */
@@ -175,6 +177,7 @@ export function createRemoteBackend(deps: RemoteBackendDeps): RemoteBackend {
     watches.get(id)?.cancel?.();
     watches.delete(id);
     blocked.delete(id);
+    deps.observe?.(id, null);
   }
 
   function probe(w: Watch): Promise<void> {
@@ -218,6 +221,13 @@ export function createRemoteBackend(deps: RemoteBackendDeps): RemoteBackend {
     await Promise.all([...watches.values()].filter((w) => id === undefined || w.spec.id === id).map(probe));
   }
 
+  /** A 4401 close says only "unauthorized": the next /whoami tells expired from host-refused. */
+  function recheck(id: string): void {
+    lastWhoami.delete(id);
+    blocked.add(id);
+    void refresh(id).catch(() => undefined);
+  }
+
   return {
     clientFor,
     refreshTier,
@@ -229,6 +239,7 @@ export function createRemoteBackend(deps: RemoteBackendDeps): RemoteBackend {
       return remotes.map(row);
     },
     refresh,
+    recheck,
     reconnect() {
       if (stopped) return;
       lastWhoami.clear();
@@ -261,9 +272,8 @@ export function createRemoteBackend(deps: RemoteBackendDeps): RemoteBackend {
       const spec = await bookmark(containerId);
       try {
         const who = await refreshTier(spec);
-        report(spec.id, null);
         const client = clientFor(spec.remote.url);
-        return await attachRemotePty({
+        const handle = await attachRemotePty({
           client,
           sessionId,
           cols,
@@ -273,9 +283,12 @@ export function createRemoteBackend(deps: RemoteBackendDeps): RemoteBackend {
           drained: () => fetchDrained(client),
           onHostClose: (code) => {
             const k = closeKind(code);
-            if (k === 'unauthorized' || k === 'forbidden') report(spec.id, new RemoteError(k, 'closed by the host', code));
+            if (k === 'unauthorized') recheck(spec.id);
+            else if (k === 'forbidden') report(spec.id, new RemoteError(k, 'closed by the host', code));
           }
         });
+        report(spec.id, null);
+        return handle;
       } catch (err) {
         throw tagged(spec.id, err);
       }

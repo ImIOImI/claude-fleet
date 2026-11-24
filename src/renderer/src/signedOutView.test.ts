@@ -59,10 +59,20 @@ describe('tab end and card (D170, D176)', () => {
     expect(remoteEndKind(false, 'not-signed-in')).toEqual({ kind: 'remote', block: 'not-signed-in' });
   });
 
-  it('a natural end upgrades to a later sign-in or refusal block, never to unreachable', () => {
-    expect(shownRemoteBlock(true, { kind: 'natural' }, 'host-refused')).toBe('host-refused');
-    expect(shownRemoteBlock(true, { kind: 'natural' }, 'unreachable')).toBeNull();
-    expect(shownRemoteBlock(false, { kind: 'natural' }, 'expired')).toBeNull();
+  it('a 4401/4403 end with no block yet is natural but marked, so a later block can upgrade it', () => {
+    expect(remoteEndKind(false, null, 'unauthorized')).toEqual({ kind: 'natural', authEnd: true });
+    expect(remoteEndKind(false, null, 'forbidden')).toEqual({ kind: 'natural', authEnd: true });
+    expect(remoteEndKind(true, null, 'unauthorized')).toEqual({ kind: 'restarting' });
+    expect(remoteEndKind(false, 'host-refused', 'unauthorized')).toEqual({ kind: 'remote', block: 'host-refused' });
+  });
+
+  it('only an auth-closed natural end upgrades to a later sign-in or refusal block, never to unreachable', () => {
+    expect(shownRemoteBlock(true, { kind: 'natural', authEnd: true }, 'host-refused')).toBe('host-refused');
+    expect(shownRemoteBlock(true, { kind: 'natural', authEnd: true }, 'forbidden')).toBe('forbidden');
+    expect(shownRemoteBlock(true, { kind: 'natural', authEnd: true }, 'unreachable')).toBeNull();
+    expect(shownRemoteBlock(false, { kind: 'natural', authEnd: true }, 'expired')).toBeNull();
+    expect(shownRemoteBlock(true, { kind: 'natural' }, 'host-refused')).toBeNull();
+    expect(shownRemoteBlock(true, { kind: 'natural' }, 'expired')).toBeNull();
     expect(shownRemoteBlock(true, { kind: 'remote', block: 'unreachable' }, null)).toBe('unreachable');
     expect(shownRemoteBlock(true, { kind: 'remote', block: 'expired' }, 'host-refused')).toBe('host-refused');
   });

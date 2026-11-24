@@ -1,19 +1,19 @@
 import { describe, expect, it, vi } from 'vitest';
 import { parseRemoteAttachTag, remoteAttachTag, type RemoteAuthState } from '../preload/remoteAuth.js';
 import { RemoteError } from './remoteClient.js';
-import { connKindOf, createRemoteAuthMonitor, SIGNED_OUT_NOTICE, type RemoteAuthMonitorDeps } from './remoteAuth.js';
+import { connKindOf, createRemoteAuthMonitor, eventsDisconnect, SIGNED_OUT_NOTICE, signedOutRequest, ssoLink, type RemoteAuthMonitorDeps } from './remoteAuth.js';
 
 const W = '01JC0000000000000000000000';
 
-function rig(o: { signedIn?: boolean; bookmarks?: number } = {}) {
+function rig(o: { signedIn?: () => Promise<boolean>; bookmarks?: () => Promise<number>; ssoUrl?: () => Promise<string | null> } & { in?: boolean; n?: number } = {}) {
   const sent: RemoteAuthState[] = [];
   const deps: RemoteAuthMonitorDeps = {
-    signedIn: async () => o.signedIn ?? true,
-    bookmarkCount: async () => o.bookmarks ?? 1,
+    signedIn: o.signedIn ?? (async () => o.in ?? true),
+    bookmarkCount: o.bookmarks ?? (async () => o.n ?? 1),
     send: (s) => void sent.push(s),
     notify: vi.fn(),
     reconnect: vi.fn(),
-    ssoUrl: async () => 'https://github.com/orgs/acme/sso',
+    ssoUrl: o.ssoUrl ?? (async () => 'https://github.com/orgs/acme/sso'),
     log: vi.fn(),
     now: () => 1000
   };
@@ -46,7 +46,7 @@ describe('connKindOf', () => {
 
 describe('RemoteAuthMonitor', () => {
   it('starts signed out without notifying', async () => {
-    const r = rig({ signedIn: false });
+    const r = rig({ in: false });
     await r.m.start();
     expect(r.last().signedOut).toEqual({ reason: 'not-signed-in', since: 1000 });
     expect(r.deps.notify).not.toHaveBeenCalled();
@@ -59,13 +59,13 @@ describe('RemoteAuthMonitor', () => {
     await r.m.identityChanged({ cause: 'revoked', signedIn: false });
     expect(r.deps.notify).toHaveBeenCalledExactlyOnceWith(SIGNED_OUT_NOTICE);
     expect(r.last().signedOut?.reason).toBe('expired');
-    const none = rig({ bookmarks: 0 });
+    const none = rig({ n: 0 });
     await none.m.identityChanged({ cause: 'revoked', signedIn: false });
     expect(none.deps.notify).not.toHaveBeenCalled();
   });
 
   it('starting signed out then a revoke does not notify; a later sign-in then revoke does', async () => {
-    const r = rig({ signedIn: false });
+    const r = rig({ in: false });
     await r.m.start();
     await r.m.identityChanged({ cause: 'revoked', signedIn: false });
     expect(r.deps.notify).not.toHaveBeenCalled();
@@ -117,5 +117,97 @@ describe('RemoteAuthMonitor', () => {
     await r.m.observe(W, new RemoteError('unauthorized', 'gho_leak', 401));
     expect(r.deps.log).toHaveBeenCalledWith({ level: 'warn', message: 'remote connection blocked', extra: { workspaceId: W, kind: 'host-refused' } });
     expect(JSON.stringify((r.deps.log as ReturnType<typeof vi.fn>).mock.calls)).not.toContain('gho_leak');
+  });
+});
+
+function deferred<T>() {
+  let resolve!: (v: T) => void;
+  const p = new Promise<T>((r) => (resolve = r));
+  return { p, resolve };
+}
+
+describe('RemoteAuthMonitor races', () => {
+  it('a forbidden observe waiting on the SSO link pushes once, and a later ok wins', async () => {
+    const sso = deferred<string | null>();
+    const r = rig({ ssoUrl: () => sso.p });
+    const a = r.m.observe(W, new RemoteError('forbidden', 'x', 403));
+    const b = r.m.observe(W, new RemoteError('forbidden', 'y', 403));
+    sso.resolve('https://github.com/orgs/acme/sso');
+    await Promise.all([a, b]);
+    expect(r.sent).toHaveLength(1);
+
+    const late = deferred<string | null>();
+    const q = rig({ ssoUrl: () => late.p });
+    const f = q.m.observe(W, new RemoteError('forbidden', 'x', 403));
+    await q.m.observe(W, null);
+    late.resolve(null);
+    await f;
+    expect(q.m.snapshot().conns).toEqual({});
+  });
+
+  it('a sign-in that lands while start reads the token is not overwritten', async () => {
+    const read = deferred<boolean>();
+    const r = rig({ signedIn: () => read.p });
+    const s = r.m.start();
+    await r.m.identityChanged({ cause: 'sign-in', signedIn: true });
+    read.resolve(false);
+    await s;
+    expect(r.last().signedOut).toBeNull();
+  });
+
+  it('a revoke that lands while start reads the token keeps its reason', async () => {
+    const read = deferred<boolean>();
+    const r = rig({ signedIn: () => read.p });
+    const s = r.m.start();
+    await r.m.identityChanged({ cause: 'revoked', signedIn: false });
+    read.resolve(false);
+    await s;
+    expect(r.last().signedOut?.reason).toBe('expired');
+  });
+
+  it('a sign-in during the bookmark count cancels the revoke notification', async () => {
+    const count = deferred<number>();
+    const r = rig({ bookmarks: () => count.p });
+    const revoke = r.m.identityChanged({ cause: 'revoked', signedIn: false });
+    await r.m.identityChanged({ cause: 'sign-in', signedIn: true });
+    count.resolve(2);
+    await revoke;
+    expect(r.deps.notify).not.toHaveBeenCalled();
+    expect(r.last().signedOut).toBeNull();
+  });
+});
+
+describe('/events disconnects (D169)', () => {
+  it('4401 without a verdict rechecks; a recovered 401, 403 and no sign-in are observed; others ignored', () => {
+    expect(eventsDisconnect({ kind: 'unauthorized' })).toEqual({ recheck: true });
+    const v = eventsDisconnect({ kind: 'unauthorized', auth: 'expired', status: 401 });
+    expect(v && 'observe' in v && connKindOf(v.observe)).toBe('expired');
+    const f = eventsDisconnect({ kind: 'forbidden', status: 403 });
+    expect(f && 'observe' in f && connKindOf(f.observe)).toBe('forbidden');
+    const n = eventsDisconnect({ kind: 'not-signed-in' });
+    expect(n && 'observe' in n && connKindOf(n.observe)).toBe('not-signed-in');
+    expect(eventsDisconnect({ kind: 'unreachable' })).toBeNull();
+    expect(eventsDisconnect({ kind: 'dropped' })).toBeNull();
+  });
+});
+
+describe('signed-out notification request (D172)', () => {
+  it('has the fixed kind, priority, source and dedupe key', () => {
+    expect(signedOutRequest(SIGNED_OUT_NOTICE)).toEqual({
+      kind: 'signed-out',
+      title: 'Signed out of GitHub',
+      body: SIGNED_OUT_NOTICE.body,
+      priority: 'high',
+      source: { kind: 'user', id: null },
+      dedupeKey: 'remote-signed-out'
+    });
+  });
+});
+
+describe('ssoLink', () => {
+  it('only the X-GitHub-SSO authorise URL, never the app settings fallback', () => {
+    expect(ssoLink({ url: 'https://github.com/orgs/acme/sso', org: 'acme', orgCount: 0, appSettingsUrl: 'https://github.com/settings/x' })).toBe('https://github.com/orgs/acme/sso');
+    expect(ssoLink({ url: null, org: null, orgCount: 2, appSettingsUrl: 'https://github.com/settings/x' })).toBeNull();
+    expect(ssoLink(null)).toBeNull();
   });
 });

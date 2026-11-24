@@ -1543,6 +1543,30 @@ describe('IdentityService change events and recovery', () => {
     expect((await s.svc.status()).notice).toMatch(/revoked or expired/);
   });
 
+  it('recover: a host-refused verdict GitHub confirmed is reused for a minute per token', async () => {
+    const s = setup({ polls: [DONE] });
+    await signIn(s);
+    s.github.probe.mockClear();
+    expect(await s.svc.recover(TOKEN)).toBe('host-refused');
+    s.advance(30_000);
+    expect(await s.svc.recover(TOKEN)).toBe('host-refused');
+    expect(s.github.probe).toHaveBeenCalledOnce();
+    expect(await s.svc.recover('gho_older')).toBe('retry');
+    s.advance(30_000);
+    expect(await s.svc.recover(TOKEN)).toBe('host-refused');
+    expect(s.github.probe).toHaveBeenCalledTimes(2);
+  });
+
+  it('recover: a network failure is not cached', async () => {
+    const s = setup({ polls: [DONE] });
+    await signIn(s);
+    s.setProbe(new IdentityError('network', 'offline'));
+    s.github.probe.mockClear();
+    await s.svc.recover(TOKEN);
+    await s.svc.recover(TOKEN);
+    expect(s.github.probe).toHaveBeenCalledTimes(2);
+  });
+
   it('recover: a network failure is host-refused and keeps the token', async () => {
     const s = setup({ polls: [DONE] });
     await signIn(s);

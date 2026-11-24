@@ -98,8 +98,8 @@ import { BUILTIN_GITHUB_CLIENT_ID, GITHUB_CLIENT_ID_ENV } from './identity/clien
 import { readGithubClientId, registerGithubClientIdIpc, type GithubClientIdDeps } from './githubClientIdIpc.js';
 import { registerIdentityIpc } from './identityIpc.js';
 import { createRemoteBackend } from './remote.js';
-import { RemoteError, type RecoverVerdict } from './remoteClient.js';
-import { createRemoteAuthMonitor } from './remoteAuth.js';
+import type { RecoverVerdict } from './remoteClient.js';
+import { createRemoteAuthMonitor, eventsDisconnect, ssoLink } from './remoteAuth.js';
 import { createFederatedReader, type FederatedReader } from './federation/federatedReader.js';
 import { createSummaryRelay } from './federation/summaryRelay.js';
 import { createDrainRelay } from './remoteDrain.js';
@@ -450,9 +450,9 @@ const summaryRelay = createSummaryRelay({
     remoteNoticeSink?.hint(origin);
   },
   onDisconnected: (origin, why) => {
-    if (why.kind === 'unauthorized' || why.kind === 'forbidden' || why.kind === 'not-signed-in') {
-      void remoteAuth.observe(origin, new RemoteError(why.kind, 'events closed', why.status, undefined, why.auth));
-    }
+    const v = eventsDisconnect(why);
+    if (v && 'recheck' in v) remoteBackend.recheck(origin);
+    else if (v) void remoteAuth.observe(origin, v.observe);
   }
 });
 let signedOutNotifier: ((n: { title: string; body: string }) => void) | null = null;
@@ -2300,10 +2300,7 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
   remoteRecover = (t) => identity.recover(t);
   remoteLogin = () => identity.currentLogin();
   identity.startRefresh().catch((err: unknown) => logError({ source: 'main', level: 'warn', type: 'identity-start-refresh', message: String(err) }));
-  remoteSso = async () => {
-    const sso = (await identity.status().catch(() => null))?.sso;
-    return sso ? (sso.url ?? sso.appSettingsUrl) : null;
-  };
+  remoteSso = async () => ssoLink((await identity.status().catch(() => null))?.sso);
   identity.onChange(({ cause, signedIn }) => {
     // Reconnects on sign-in and token refresh (D174).
     void remoteAuth.identityChanged({ cause, signedIn });

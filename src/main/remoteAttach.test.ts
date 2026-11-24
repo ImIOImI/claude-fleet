@@ -132,6 +132,15 @@ describe('attachRemotePty', () => {
     expect(out.text()).toMatch(/reconnect/i);
   });
 
+  it('reports a 4403 close as a forbidden end', async () => {
+    const { host, client } = await rig(['s1']);
+    const h = await attachRemotePty({ client: client(READER), sessionId: 's1', cols: 80, rows: 24, canCreate: false });
+    const out = collect(h);
+    host.halt(4403, 'x');
+    await expect.poll(() => out.ended()).toBe(true);
+    expect(h.endReason?.()).toBe('forbidden');
+  });
+
   it('a detach adds no notice', async () => {
     const { client } = await rig(['s1']);
     const h = await attachRemotePty({ client: client(READER), sessionId: 's1', cols: 80, rows: 24, canCreate: false });

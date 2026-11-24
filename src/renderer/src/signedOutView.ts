@@ -1,5 +1,6 @@
 // Pure rules for the signed-out banner, remote tab cards and their reattach (D169–D176).
 import { parseRemoteAttachTag, type RemoteAuthState, type RemoteBlockKind } from '../../preload/remoteAuth';
+import type { PtyEndReason } from '../../preload/remoteTypes';
 import { ipcErrorText } from './remoteView';
 
 export const SIGNED_OUT_BANNER = 'Signed out of GitHub — remote workspaces are paused. Your sessions are still running on the host.';
@@ -60,22 +61,27 @@ export function attachErrorBlock(err: unknown): RemoteBlockKind | null {
   return parseRemoteAttachTag(ipcErrorText(err));
 }
 
-export type TabEnd = { kind: 'natural' } | { kind: 'restarting' } | { kind: 'remote'; block: RemoteBlockKind } | { kind: 'attach-error'; message: string };
+/** `authEnd`: the host closed it 4401/4403, so a block that lands later explains it. */
+export type TabEnd =
+  | { kind: 'natural'; authEnd?: boolean }
+  | { kind: 'restarting' }
+  | { kind: 'remote'; block: RemoteBlockKind }
+  | { kind: 'attach-error'; message: string };
 
-export function remoteEndKind(restarting: boolean, block: RemoteBlockKind | null): TabEnd {
+export function remoteEndKind(restarting: boolean, block: RemoteBlockKind | null, reason?: PtyEndReason): TabEnd {
   if (block && isSignInBlock(block)) return { kind: 'remote', block };
   if (restarting) return { kind: 'restarting' };
   if (block) return { kind: 'remote', block };
-  return { kind: 'natural' };
+  return reason ? { kind: 'natural', authEnd: true } : { kind: 'natural' };
 }
 
-/** A host close (4401/4403) can beat the state push, so a natural end upgrades to a block that arrives after it; unreachable never does. */
+/** A host close (4401/4403) can beat the state push; unreachable never upgrades. */
 const UPGRADES: ReadonlySet<RemoteBlockKind> = new Set(['not-signed-in', 'expired', 'host-refused', 'forbidden']);
 
 export function shownRemoteBlock(remote: boolean, ended: TabEnd | null, block: RemoteBlockKind | null): RemoteBlockKind | null {
   if (!remote || !ended) return null;
   if (ended.kind === 'remote') return block ?? ended.block;
-  if (ended.kind === 'natural' && block && UPGRADES.has(block)) return block;
+  if (ended.kind === 'natural' && ended.authEnd && block && UPGRADES.has(block)) return block;
   return null;
 }
 

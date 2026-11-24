@@ -2,6 +2,7 @@ import { app, BrowserWindow, dialog, shell, ipcMain } from 'electron';
 import { join } from 'node:path';
 import { registerIpc, invalidateWorkspaceList, MOCK_MODE, remoteFederation, replayInputWait, setFederatedEmbedder, setRemoteNoticeSink, setSignedOutNotifier, stopRemoteBackend } from './ipc.js';
 import { createRemoteNotifier } from './federation/remoteNotices.js';
+import { signedOutRequest } from './remoteAuth.js';
 import { parseNoticeRows } from './federation/remoteAutomationRows.js';
 import { NotifyStore } from './inbox/notifyStore.js';
 import { openDb, openDbPostgres, closeDb, deleteEmbeddingsForOtherModels, sessionsWithPendingTurns, recordErrors, stateKysely, onStateOpenStats, stateLeftoverDrain, setStateWarnSink, sessionCaptureSignals, isAutomationSession } from './db.js';
@@ -486,7 +487,7 @@ if (gotSingleInstanceLock) app.whenReady().then(async () => {
       setSignedOutNotifier(
         (n) =>
           void svc
-            .request({ kind: 'signed-out', title: n.title, body: n.body, priority: 'high', source: { kind: 'user', id: null }, dedupeKey: 'remote-signed-out' })
+            .request(signedOutRequest(n))
             .catch((e: unknown) => logError({ source: 'main', type: 'remote-auth', level: 'warn', message: String(e) }))
       );
       inboxTeardown.push(() => setSignedOutNotifier(null));

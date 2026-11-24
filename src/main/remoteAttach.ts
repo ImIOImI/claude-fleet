@@ -131,7 +131,7 @@ export async function attachRemotePty(o: RemoteAttachOptions): Promise<PtyHandle
   if (!r.ok) fail(`host refused to attach: ${await hostSays(r.error)}`);
   return {
     stream,
-    endReason: () => (!closing && closedWith === 4401 ? 'unauthorized' : undefined),
+    endReason: () => (closing ? undefined : closedWith === 4401 ? 'unauthorized' : closedWith === 4403 ? 'forbidden' : undefined),
     resize: async (cols, rows) => broker.sendResize(CHANNEL, cols, rows),
     detach: () => {
       closing = true;

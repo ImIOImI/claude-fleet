@@ -24,6 +24,8 @@ export const REFRESH_LEAD_MS = 10 * 60_000;
 export const REFRESH_RETRY_MS = 60_000;
 /** Minimum gap between successful refreshes, except once the token has expired. */
 export const MIN_REFRESH_INTERVAL_MS = 5 * 60_000;
+/** How long recover trusts that GitHub still accepts a token a host refused (one GET /user per token per minute). */
+export const HOST_REFUSED_TTL_MS = 60_000;
 const MAX_TIMER_MS = 2 ** 31 - 1;
 
 const REVOKED_NOTICE = 'GitHub no longer accepts the saved sign-in (revoked or expired). Sign in again.';
@@ -253,6 +255,8 @@ export class IdentityService {
   private readonly listeners = new Set<(c: IdentityChange) => void>();
   /** One recovery per rejected token; concurrent 401s share it. */
   private readonly recovering = new Map<string, Promise<RecoverResult>>();
+  /** GitHub accepted this token after a host 401: skip GET /user for HOST_REFUSED_TTL_MS. */
+  private hostRefused: { token: string; at: number } | null = null;
 
   constructor(deps: IdentityServiceDeps) {
     this.vault = deps.vault;
@@ -772,9 +776,12 @@ export class IdentityService {
       // Same token: the refresh failed transiently and the sign-in stays.
       return t !== sent ? 'retry' : 'host-refused';
     }
+    const hr = this.hostRefused;
+    if (hr && hr.token === sent && this.now() - hr.at < HOST_REFUSED_TTL_MS) return 'host-refused';
     // Only a token GitHub rejects is renewed; otherwise a host that refuses valid tokens would rotate it on every 401.
     try {
       await this.github.probe(sent);
+      this.hostRefused = { token: sent, at: this.now() };
       return 'host-refused';
     } catch (err) {
       if (!(err instanceof IdentityError) || err.kind !== 'unauthorized') return 'host-refused';
