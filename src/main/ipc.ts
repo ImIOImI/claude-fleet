@@ -461,6 +461,7 @@ export function setSignedOutNotifier(fn: ((n: { title: string; body: string }) =
   signedOutNotifier = fn;
 }
 let remoteSso: () => Promise<string | null> = async () => null;
+let remoteAuthStarted: Promise<void> = Promise.resolve();
 const remoteAuth = createRemoteAuthMonitor({
   signedIn: async () => (await remoteToken()) !== null,
   bookmarkCount: async () => (MOCK_MODE ? 0 : (await listWorkspaceManifests()).filter((m) => m.kind === 'remote').length),
@@ -2309,7 +2310,7 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
       try { w.webContents.send('identity:changed', { cause, signedIn }); } catch { /* mid-teardown */ }
     }
   });
-  void remoteAuth.start();
+  remoteAuthStarted = remoteAuth.start().catch(() => undefined);
   registerRemoteIpc(ipcMain, {
     backend: remoteBackend,
     accountStatus: () => identity.status(),
@@ -2320,7 +2321,10 @@ export function registerIpc(opts: RegisterIpcOpts = { jsonlWatcher: null }): voi
     findByName: findWorkspaceByName,
     invalidate: invalidateWorkspaceList,
     drainStates: () => drainRelay.snapshot(),
-    authState: () => remoteAuth.snapshot()
+    authState: async () => {
+      await remoteAuthStarted;
+      return remoteAuth.snapshot();
+    }
   });
   registerFederationIpc(ipcMain, federated, localSearch);
   registerRemoteAutomationsIpc(ipcMain, federated);

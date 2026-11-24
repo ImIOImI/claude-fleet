@@ -320,12 +320,12 @@ describe('remote backend', () => {
       const errsBefore = kinds(seen).length;
       r.host.halt(code, 'x');
       await new Promise<void>((done) => h.stream.once('end', done).resume());
-      await new Promise((res) => setTimeout(res, 50));
+      if (want === 'recheck') await expect.poll(() => r.whoamiCalls()).toBeGreaterThan(calls);
+      if (want === 'forbidden') await expect.poll(() => kinds(seen).slice(errsBefore)).toEqual(['forbidden']);
+      if (want === 'none') await new Promise((res) => setTimeout(res, 50));
       const after = kinds(seen).slice(errsBefore);
       expect(after).not.toContain('host-refused');
-      if (want === 'recheck') expect(r.whoamiCalls()).toBeGreaterThan(calls);
-      else expect(r.whoamiCalls()).toBe(calls);
-      if (want === 'forbidden') expect(after).toEqual(['forbidden']);
+      if (want !== 'recheck') expect(r.whoamiCalls()).toBe(calls);
       if (want === 'none') expect(after).toEqual([]);
       await r.close();
     }

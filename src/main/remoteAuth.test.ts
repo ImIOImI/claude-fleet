@@ -45,10 +45,11 @@ describe('connKindOf', () => {
 });
 
 describe('RemoteAuthMonitor', () => {
-  it('starts signed out without notifying', async () => {
+  it('starts signed out without notifying or pushing (the renderer reads the snapshot)', async () => {
     const r = rig({ in: false });
     await r.m.start();
-    expect(r.last().signedOut).toEqual({ reason: 'not-signed-in', since: 1000 });
+    expect(r.m.snapshot().signedOut).toEqual({ reason: 'not-signed-in', since: 1000 });
+    expect(r.sent).toEqual([]);
     expect(r.deps.notify).not.toHaveBeenCalled();
   });
 
@@ -152,7 +153,7 @@ describe('RemoteAuthMonitor races', () => {
     await r.m.identityChanged({ cause: 'sign-in', signedIn: true });
     read.resolve(false);
     await s;
-    expect(r.last().signedOut).toBeNull();
+    expect(r.m.snapshot().signedOut).toBeNull();
   });
 
   it('a revoke that lands while start reads the token keeps its reason', async () => {
@@ -162,7 +163,7 @@ describe('RemoteAuthMonitor races', () => {
     await r.m.identityChanged({ cause: 'revoked', signedIn: false });
     read.resolve(false);
     await s;
-    expect(r.last().signedOut?.reason).toBe('expired');
+    expect(r.m.snapshot().signedOut?.reason).toBe('expired');
   });
 
   it('a sign-in during the bookmark count cancels the revoke notification', async () => {

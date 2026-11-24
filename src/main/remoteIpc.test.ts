@@ -466,4 +466,22 @@ describe('remote:authState', () => {
     expect(REMOTE_CHANNELS).toContain('remote:authState');
     expect(await handlers.get('remote:authState')!({}, 'ignored')).toEqual(snap);
   });
+
+  it('waits for an async snapshot', async () => {
+    const handlers = new Map<string, (...a: unknown[]) => unknown>();
+    const ipc = { handle: (c: string, h: (...a: unknown[]) => unknown) => void handlers.set(c, h) };
+    const snap = { signedOut: { reason: 'not-signed-in' as const, since: 1 }, epoch: 0, conns: {} };
+    registerRemoteIpc(ipc as never, {
+      backend: {} as never,
+      accountStatus: async () => ({}) as never,
+      readManifest: async () => null,
+      listManifests: async () => [],
+      confirm: async () => false,
+      writeManifest: async () => undefined,
+      findByName: async () => null,
+      invalidate: () => undefined,
+      authState: async () => snap
+    });
+    expect(await handlers.get('remote:authState')!({})).toEqual(snap);
+  });
 });

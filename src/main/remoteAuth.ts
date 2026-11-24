@@ -62,6 +62,7 @@ export interface RemoteAuthMonitorDeps {
 }
 
 export interface RemoteAuthMonitor {
+  /** Reads the sign-in without pushing; `remote:authState` waits for it. */
   start(): Promise<void>;
   /** `err` null means the bookmark answered fine. */
   observe(workspaceId: string, err: unknown): Promise<void>;
@@ -87,7 +88,6 @@ export function createRemoteAuthMonitor(d: RemoteAuthMonitorDeps): RemoteAuthMon
       const seen = changes;
       const ok = await d.signedIn().catch(() => false);
       if (!ok && changes === seen) signedOut = { reason: 'not-signed-in', since: now() };
-      push();
     },
     async observe(id, err) {
       const kind = connKindOf(err);

@@ -56,7 +56,7 @@ export interface RemoteIpcDeps {
   /** Last broker:drain per remote workspace (D152). */
   drainStates?(): Record<string, RemoteDrain>;
   /** App-wide sign-in and per-bookmark connection state (D169). */
-  authState?(): RemoteAuthState;
+  authState?(): RemoteAuthState | Promise<RemoteAuthState>;
 }
 
 function parseAddOptions(raw: unknown): RemoteAddOptions {
@@ -212,7 +212,7 @@ export function registerRemoteIpc(ipc: IpcHandleLike, deps: RemoteIpcDeps): void
 
   ipc.handle('remote:probe', (_e, url: unknown) => probe(url));
   ipc.handle('remote:drainStates', async () => deps.drainStates?.() ?? {});
-  ipc.handle('remote:authState', async () => deps.authState?.() ?? EMPTY_REMOTE_AUTH);
+  ipc.handle('remote:authState', async () => (await deps.authState?.()) ?? EMPTY_REMOTE_AUTH);
 
   ipc.handle('remote:add', async (_e, url: unknown, rawOpts: unknown): Promise<RemoteProbe> => {
     const opts = parseAddOptions(rawOpts);
